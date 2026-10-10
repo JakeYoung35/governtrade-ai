@@ -6,14 +6,18 @@ A request holds a session-level advisory lock, so writers are serialized across 
 The isolated presenter demo always stays in local JSON.
 """
 import contextlib, datetime as dt, json, threading
+from decimal import Decimal
 from pathlib import Path
 from engine import main_seed
+from governor.records import BATCH_WINDOW,DECISION_WINDOW,BREAKER_EVENT_WINDOW
 
 MIGRATIONS=Path(__file__).parent/'migrations'
 LOCK_KEY=0x476f7654726164  # "GovTrad"
 EVENT_LIMIT=500  # Older events stay in the database; only recent ones are loaded into state.
 SAFETY_COLUMNS={'dailyLossCap':'daily_loss_cap','marketCap':'market_cap','exposureCap':'exposure_cap','slippage':'slippage_max'}
-TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion'}
+TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion','governorBatches','governorDecisions','governorForecasts','governorBreakerEvents','governorReplacedForecasts'}
+DECISION_ROW_FIELDS={'batchId','accountId','decidedAt'}  # columns of governor_decisions; the rest is payload
+BREAKER_EVENT_ROW_FIELDS={'id','accountId'}  # columns of governor_breaker_events; the rest is payload
 ACCOUNT_FIELDS={'id','name','venue','environment','subaccount','liveEnabled','credentialRef','credentialMasks','status','stale','error','ceiling','baseline','balance'}
 AGENT_FIELDS={'id','accountId','name','provider','model','modelValidated','modelCredentialRef','modelKeyMask','status','personality','mandate'}
 ORDER_FIELDS={'id','agent','accountId','market','direction','amount','request','status','decision','committed','filled','automatic','venueOrderId','quantity','actualCost','time','evaluations'}
@@ -32,6 +36,10 @@ ORDER_UPSERT='''INSERT INTO orders (id,agent_id,account_id,market_id,market,dire
 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 ON CONFLICT (id) DO UPDATE SET market_id=EXCLUDED.market_id,market=EXCLUDED.market,amount=EXCLUDED.amount,reasoning=EXCLUDED.reasoning,status=EXCLUDED.status,decision=EXCLUDED.decision,
 committed=EXCLUDED.committed,filled=EXCLUDED.filled,automatic=EXCLUDED.automatic,venue_order_id=EXCLUDED.venue_order_id,quantity=EXCLUDED.quantity,actual_cost=EXCLUDED.actual_cost,extra=EXCLUDED.extra'''
+
+FORECAST_UPSERT='''INSERT INTO governor_forecasts (proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability,outcome,resolved_at)
+VALUES (%s,%s,%s,%s,%s,%s,%s)
+ON CONFLICT (proposal_id) DO UPDATE SET outcome=EXCLUDED.outcome,resolved_at=EXCLUDED.resolved_at'''
 
 def signature(value):return json.dumps(value,sort_keys=True,default=str)
 def iso(value):return value.astimezone(dt.timezone.utc).isoformat() if isinstance(value,dt.datetime) else value
@@ -102,11 +110,24 @@ class PostgresStore:
             for r in q('SELECT agent_id,role,text FROM chat_messages ORDER BY agent_id,seq'):
                 s['chats'].setdefault(r['agent_id'],[]).append({'role':r['role'],'text':r['text']})
             s['events']=[{'id':r['id'],'time':iso(r['time']),'text':r['text'],'kind':r['kind'],'trade':r['order_id']} for r in conn.execute('SELECT * FROM events ORDER BY time DESC,seq DESC LIMIT %s',(EVENT_LIMIT,))]
-        seen.update(self.signatures(s));self.local.seen=seen
+            # Governor records: recent windows only (all rows stay in the database); numerics as exact text.
+            # COLLATE "C" orders ids by code point, matching governor.records, so reloads keep list order.
+            s['governorBatches']=[{'id':r['id'],'accountId':r['account_id'],'startedAt':iso(r['started_at']),'policyVersion':r['policy_version'],'inputs':r['inputs']}
+                for r in conn.execute('SELECT * FROM governor_batches ORDER BY started_at DESC,id COLLATE "C" DESC LIMIT %s',(BATCH_WINDOW,))]
+            s['governorDecisions']=[{**r['payload'],'batchId':r['batch_id'],'accountId':r['account_id'],'decidedAt':iso(r['decided_at'])}
+                for r in conn.execute('SELECT payload,batch_id,account_id,decided_at FROM governor_decisions ORDER BY decided_at DESC,proposal_id COLLATE "C" DESC LIMIT %s',(DECISION_WINDOW,))]
+            s['governorForecasts']=[{'proposalId':r['proposal_id'],'agentId':r['agent_id'],'marketId':r['market_id'],'submittedAt':iso(r['submitted_at']),'estimatedYesProbability':r['p'],'outcome':r['o'],'resolvedAt':iso(r['resolved_at'])}
+                for r in q('SELECT proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability::text AS p,outcome::text AS o,resolved_at FROM governor_forecasts ORDER BY submitted_at,proposal_id COLLATE "C"')]
+            s['governorBreakerEvents']=[{**r['payload'],'id':r['id'],'accountId':r['account_id']}
+                for r in conn.execute('SELECT id,account_id,payload FROM governor_breaker_events ORDER BY at DESC,id COLLATE "C" DESC LIMIT %s',(BREAKER_EVENT_WINDOW,))]
+        seen.update(self.signatures(s));seen['loaded']=True;self.local.seen=seen
         return s
 
     def signatures(self,s):
-        seen={'settings':signature(self.settings(s)),'events':{e['id'] for e in s['events']},'keys':set(s['keys'])}
+        seen={'settings':signature(self.settings(s)),'events':{e['id'] for e in s['events']},'keys':set(s['keys']),
+              'governorBatches':{b['id'] for b in s.get('governorBatches',[])},'governorDecisions':{d['proposalId'] for d in s.get('governorDecisions',[])},
+              'governorBreakerEvents':{e['id'] for e in s.get('governorBreakerEvents',[])}}
+        seen.update({('forecast',f['proposalId']):signature(f) for f in s.get('governorForecasts',[])})
         seen.update({('chat',agent):len(messages) for agent,messages in s['chats'].items()})
         for kind,rows in (('account',s['accounts']),('agent',s['agentConfigs']),('order',s['orders'])):
             seen.update({(kind,x['id']):signature(x) for x in rows})
@@ -121,6 +142,15 @@ class PostgresStore:
         seen=getattr(self.local,'seen',None) or {};changed=lambda kind,x:seen.get((kind,x['id']))!=signature(x)
         with self.connection() as conn,conn.transaction():
             cur=conn.cursor();run=lambda sql,rows:rows and cur.executemany(sql,rows)
+            # Without a load every governor row looks new. Saving fresh rows is fine, but one that already exists
+            # would collide (governor inserts have no ON CONFLICT), so refuse with a clear message first.
+            # Forecasts upsert and cannot collide. Runs in this transaction, under the workspace lock.
+            ids=([b['id'] for b in s.get('governorBatches',[])],[d['proposalId'] for d in s.get('governorDecisions',[])],
+                 [e['id'] for e in s.get('governorBreakerEvents',[])])
+            if not seen.get('loaded') and any(ids) and conn.execute('''SELECT EXISTS(SELECT 1 FROM governor_batches WHERE id=ANY(%s::text[]))
+                OR EXISTS(SELECT 1 FROM governor_decisions WHERE proposal_id=ANY(%s::text[]))
+                OR EXISTS(SELECT 1 FROM governor_breaker_events WHERE id=ANY(%s::text[])) AS clash''',ids).fetchone()['clash']:
+                raise ValueError('Load the workspace in this session before saving governor records that already exist.')
             settings=self.settings(s)
             if seen.get('settings')!=signature(settings):
                 cur.execute('UPDATE workspace_settings SET daily_cap=%s,automation=%s,daily_loss_cap=%s,market_cap=%s,exposure_cap=%s,slippage_max=%s,schema_version=%s,extra=%s',
@@ -143,9 +173,28 @@ class PostgresStore:
             # State lists events newest first; insert oldest first so seq follows insertion order.
             run('INSERT INTO events (id,time,kind,text,order_id) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
                 [(e['id'],e['time'],e['kind'],e['text'],e.get('trade')) for e in reversed(s['events']) if e['id'] not in seen.get('events',())])
+            # Governor batches, decisions and breaker events are written once. No ON CONFLICT clause: state only holds
+            # a recent window, so reusing an id that left it must fail the save loudly instead of being skipped.
+            run('INSERT INTO governor_batches (id,started_at,account_id,policy_version,inputs) VALUES (%s,%s,%s,%s,%s)',
+                [(b['id'],b['startedAt'],b['accountId'],b['policyVersion'],Jsonb(b['inputs'])) for b in reversed(s.get('governorBatches',[])) if b['id'] not in seen.get('governorBatches',())])
+            run('''INSERT INTO governor_decisions (proposal_id,batch_id,account_id,agent_id,market_id,side,decision,approved_budget,contracts,reason_codes,policy_version,decided_at,payload)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                [(d['proposalId'],d['batchId'],d['accountId'],d['agentId'],d['marketId'],d['side'],d['decision'],Decimal(d['approvedBudgetUsd']),Decimal(d['contracts']),
+                  list(d['reasonCodes']),d['policyVersion'],d['decidedAt'],Jsonb({k:v for k,v in d.items() if k not in DECISION_ROW_FIELDS}))
+                 for d in reversed(s.get('governorDecisions',[])) if d['proposalId'] not in seen.get('governorDecisions',())])
+            # Delete only forecasts record_forecast replaced, never rows that are merely outside a loaded window.
+            replaced=sorted(set(s.get('governorReplacedForecasts',[])))
+            if replaced:cur.execute('DELETE FROM governor_forecasts WHERE proposal_id = ANY(%s)',(replaced,))
+            run(FORECAST_UPSERT,[(f['proposalId'],f['agentId'],f['marketId'],f['submittedAt'],Decimal(f['estimatedYesProbability']),
+                None if f['outcome'] is None else Decimal(f['outcome']),f['resolvedAt'])
+                for f in s.get('governorForecasts',[]) if seen.get(('forecast',f['proposalId']))!=signature(f)])
+            run('INSERT INTO governor_breaker_events (id,at,account_id,action,payload) VALUES (%s,%s,%s,%s,%s)',
+                [(e['id'],e['at'],e['accountId'],e['action'],Jsonb({k:v for k,v in e.items() if k not in BREAKER_EVENT_ROW_FIELDS}))
+                 for e in reversed(s.get('governorBreakerEvents',[])) if e['id'] not in seen.get('governorBreakerEvents',())])
         seen=self.signatures(s)
         seen.update({('evaluations',o['id']):len(o['evaluations']) for o in s['orders']})
-        self.local.seen=seen
+        seen['loaded']=True;self.local.seen=seen
+        s['governorReplacedForecasts']=[]  # deleted above; nothing left to replace
 
 if __name__=='__main__':
     import os,sys

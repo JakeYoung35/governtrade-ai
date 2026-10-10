@@ -40,6 +40,8 @@ class VenueAdapter(ABC):
     @abstractmethod
     def get_quote(self,market_id,direction):pass
     @abstractmethod
+    def get_orderbook(self,market_id):pass
+    @abstractmethod
     def get_balance_positions(self):pass
     @abstractmethod
     def place_order(self,order):pass
@@ -72,15 +74,33 @@ class KalshiAdapter(VenueAdapter):
         except (ValueError,KeyError,TypeError):raise VenueError('Kalshi requires an API key ID and an unencrypted RSA PEM private key.') from None
     def get_markets(self,category):
         return self.request('GET','/markets?status=open&limit=100',public=True).get('markets',[])
-    def get_quote(self,market_id,direction):
+    def _market(self,market_id):
+        # Market, category and fee terms shared by quotes and order books.
         m=self.request('GET','/markets/'+quote(market_id,safe=''),public=True)['market']
         event=self.request('GET','/events/'+quote(m['event_ticker'],safe=''),public=True)['event']
         category={'financials':'economics','economics':'economics','politics':'politics','sports':'sports','crypto':'crypto','entertainment':'culture','mentions':'culture'}.get(event.get('category','').lower(),'other')
         series=self.request('GET','/series/'+quote(event['series_ticker'],safe=''),public=True)['series']
         fee_type=event.get('fee_type_override') or series['fee_type'];multiplier=event.get('fee_multiplier_override')
         multiplier=float(series['fee_multiplier'] if multiplier is None else multiplier)
+        supported=m.get('market_type')=='binary' and float(m.get('notional_value_dollars',1))==1 and fee_type.startswith('quadratic') and math.isfinite(multiplier) and 0<=multiplier<=100
+        return m,category,multiplier,supported
+    def get_quote(self,market_id,direction):
+        m,category,multiplier,supported=self._market(market_id)
         price=float(m.get('yes_ask_dollars' if direction=='Yes' else 'no_ask_dollars',0))
-        return {'id':market_id,'name':m.get('title',market_id),'agent':category,'instrument':'prediction','venue':self.venue,'price':price,'quoteAt':now(),'closeAt':m.get('close_time',now()),'slippage':0,'open':m.get('status')=='active','direction':direction,'executionReady':m.get('market_type')=='binary' and float(m.get('notional_value_dollars',1))==1 and fee_type.startswith('quadratic') and math.isfinite(multiplier) and 0<=multiplier<=100 and 0<price<1,'feeMultiplier':multiplier,'executionNote':'Only binary quadratic-fee markets with a valid ask are supported.'}
+        return {'id':market_id,'name':m.get('title',market_id),'agent':category,'instrument':'prediction','venue':self.venue,'price':price,'quoteAt':now(),'closeAt':m.get('close_time',now()),'slippage':0,'open':m.get('status')=='active','direction':direction,'executionReady':supported and 0<price<1,'feeMultiplier':multiplier,'executionNote':'Only binary quadratic-fee markets with a valid ask are supported.'}
+    def get_orderbook(self,market_id):
+        # Full bid depth for governor sizing, as Kalshi fixed-point dollar strings; asks are
+        # derived by the governor (YES ask = 1 - best NO bid). asOf is stamped after the book read.
+        m,category,multiplier,supported=self._market(market_id)
+        book=self.request('GET','/markets/'+quote(market_id,safe='')+'/orderbook',public=True).get('orderbook_fp')
+        # A missing or malformed book is an error, not an empty book that silently blocks every proposal.
+        if not isinstance(book,dict):raise VenueError('Kalshi returned an unrecognized order book.')
+        def levels(rows):
+            if rows is None:return []
+            if not isinstance(rows,list) or not all(isinstance(r,(list,tuple)) and len(r)==2 and all(isinstance(v,(str,int,float)) and not isinstance(v,bool) for v in r) for r in rows):
+                raise VenueError('Kalshi returned malformed order book levels.')
+            return [[str(p),str(q)] for p,q in rows]
+        return {'id':market_id,'name':m.get('title',market_id),'eventTicker':m['event_ticker'],'agent':category,'venue':self.venue,'open':m.get('status')=='active','executionReady':supported,'feeMultiplier':multiplier,'closeAt':m.get('close_time'),'yesBids':levels(book.get('yes_dollars')),'noBids':levels(book.get('no_dollars')),'asOf':now()}
     def get_balance_positions(self):
         scope='subaccount='+str(self.subaccount)
         b=self.request('GET','/portfolio/balance?'+scope)

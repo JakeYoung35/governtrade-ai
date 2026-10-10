@@ -11,6 +11,7 @@ NO_EQUITY = "noEquity"
 # Per-proposal eligibility.
 MARKET_NOT_IN_SNAPSHOT = "marketNotInSnapshot"
 MARKET_CLOSED = "marketClosed"
+MARKET_NOT_TRADABLE = "marketNotTradable"
 PROPOSAL_EXPIRED = "proposalExpired"
 STALE_QUOTE = "staleQuote"
 POSITION_OPEN = "positionAlreadyOpen"
@@ -54,6 +55,8 @@ def proposal_gate(proposal, book, portfolio, policy, now):
         return MARKET_NOT_IN_SNAPSHOT
     if not book.is_open:
         return MARKET_CLOSED
+    if not book.is_tradable:
+        return MARKET_NOT_TRADABLE
     if now >= proposal.expires_at:
         return PROPOSAL_EXPIRED
     age = now - book.taken_at
