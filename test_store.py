@@ -171,4 +171,15 @@ class StoreTests(unittest.TestCase):
    s=self.store.load();s['governorRequests'][0].update(status='decided',decision='rejected');self.store.save(s);self.store.save(s)
   loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorRequests'][0]['status'],'decided')
   self.assertEqual(self.count('governor_requests'),1)
+ def test_older_governor_request_is_found_for_retries(self):
+  from governor_service import GovernorService
+  s=self.workspace();g=s['agentConfigs'][0]['id']
+  payload={'schemaVersion':1,'proposalId':'old-1','agentId':g,'marketId':'MKT','side':'yes','estimatedYesProbability':0.45,'maxBudgetUsd':5,'reasoning':'Retry later.'}
+  with self.store.session():code,body=GovernorService(self.w).submit(s,payload);self.assertEqual(code,202);self.store.save(s)
+  with self.store.session():
+   self.assertEqual(self.store.find_governor_request(g,'old-1')['governorProposalId'],body['governorProposalId'])
+   self.assertIsNone(self.store.find_governor_request(g,'missing'))
+   s=self.store.load();s['governorRequests'].clear()  # as if outside the loaded window
+   again,view=GovernorService(self.w,find_request=self.store.find_governor_request).submit(s,payload)
+   self.assertEqual((again,view['governorProposalId']),(200,body['governorProposalId']))
 

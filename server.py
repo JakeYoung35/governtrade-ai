@@ -28,7 +28,7 @@ def save(env,s):
     with os.fdopen(fd,'w') as f:json.dump(s,f,allow_nan=False)
     tmp.replace(p)
 WORKSPACE=Workspace(Vault(DATA),lambda s:save('main',s))
-GOVERNOR=GovernorService(WORKSPACE)
+GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if STORE else None)
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw):super().__init__(*a,directory=str(ROOT/'static'),**kw)
     def valid_host(self):

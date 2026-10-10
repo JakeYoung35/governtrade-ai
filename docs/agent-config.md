@@ -1,6 +1,6 @@
 # Agent integration contract
 
-This branch owns account connections, agent configuration, user instructions and governance. The agentic teammate owns model calls and market selection. No AI worker or scheduler is started by the UI.
+The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. The agentic teammate's worker owns model calls and market selection. The UI starts no AI worker; the server runs only the governor's batch loop.
 
 ## Public agent contract (version 2)
 
@@ -72,9 +72,9 @@ All example fields except `maxEntryPrice` are required. `expiresAt` is also opti
 
 New submission response: HTTP `202`, with `governorProposalId`, the client `proposalId`, and `status: "queued"`. Persist the server-generated `governorProposalId` and use it for lookup; it is distinct from the client retry ID and any venue order ID.
 
-An identical retry returns HTTP `200` and the existing record without creating another proposal. Reusing the same agent/proposal ID with a changed payload returns `409`. Invalid submissions return `400` with field-level `errors` and a `schema` link. Unknown lookup IDs return `404`. Keep the retry payload unchanged, including any explicit expiry; a timeout is not a rejection.
+An identical retry returns HTTP `200` and the existing record without creating another proposal, also after the agent was paused and for older proposals (looked up in the database, or kept in slim form in the local JSON file). Reusing the same agent/proposal ID with a changed payload returns `409`. Invalid submissions return `400` with field-level `errors` and a `schema` link. Unknown lookup IDs return `404`. Keep the retry payload unchanged, including any explicit expiry; a timeout is not a rejection.
 
-Poll lookup for the governor decision and downstream order status. Request `status` is `queued` (waiting for the next batch, every few seconds), `decided` (the governor rejected it; see `decision.reasonCodes`), `submitted` (an order was created; see `order.status`, which can still be `awaiting approval`, `blocked`, `filled`, `cancelled` or `submission unknown`), `skipped` (approved, but the price moved above the governor's limit or the stake was under the app's $1 minimum; see `note`) or `executionFailed` / `rejected` (see `note`). Queue acceptance and governor approval do not confirm execution or a fill. Approved or resized stakes still pass the user's mandate and effective account ceiling; human approval may be required. The worker cannot approve trades, reset the breaker, or change policy.
+Poll lookup for the governor decision and downstream order status. Request `status` is `queued` (waiting for the next batch, every few seconds), `rejected` (the governor rejected it, see `decision.reasonCodes`, or it could not be evaluated, see `note`), `approved` (approved or resized; the order is being placed), `submitted` (an order was created; see `order.status`, which can still be `awaiting approval`, `blocked`, `filled`, `cancelled` or `submission unknown`), `skipped` (approved, but the price moved above the governor's limit or the stake was under the app's $1 minimum; see `note`) or `executionFailed` (see `note`). Queue acceptance and governor approval do not confirm execution or a fill. Approved or resized stakes still pass the user's mandate and effective account ceiling; human approval may be required. The worker cannot approve trades, reset the breaker, or change policy.
 
 The account comes from the saved agent configuration. The server obtains market metadata, order books, balances, and execution quotes. The worker supplies a price limit, not a trusted quote, and cannot supply account IDs, balances, approvals, environment, credentials, or rule overrides. No selling, leverage, transfers, withdrawals, or arbitrary broker payloads are exposed.
 
@@ -82,7 +82,7 @@ The account comes from the saved agent configuration. The server obtains market 
 
 ### Migration and implementation status
 
-The governed route is implemented (see [governor.md](governor.md) for how batches, caps, the loss breaker and scoring work) and was verified end to end against the Kalshi demo exchange. Check `GET /api/governor/schema` on the running revision before switching a worker.
+The governed route is implemented (see [governor.md](governor.md) for how batches, caps, the loss breaker and scoring work) and was verified end to end on 2026-10-10 against the Kalshi demo exchange (`external-api.demo.kalshi.co`): a proposal submitted through `GovernorService` was approved for 4 contracts at $0.53 and all 4 filled through `Workspace` and `KalshiAdapter`. The offline equivalents are `scripts/replay_demo.py` and `test_governor_service.py`. Check `GET /api/governor/schema` on the running revision before switching a worker.
 
 The legacy `/api/agent/proposals` route uses `direction`, `amount`, and `idempotencyKey`, and returns an immediate `order`. New workers must use the governor route. There is no automatic compatibility mapping: use `side`, `maxBudgetUsd`, and `proposalId`, and additionally provide `schemaVersion` and `estimatedYesProbability`. Do not fall back to the legacy route on governor errors. The legacy route still exists and bypasses the governor's sizing, conflict and breaker checks (it keeps the mandate and ceiling checks); retire or restrict it once workers have migrated.
 

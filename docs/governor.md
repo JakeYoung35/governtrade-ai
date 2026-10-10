@@ -108,5 +108,5 @@ reliability and the next stake. All balances and fills in the demo are simulated
 - Each order book costs four Kalshi requests (market, event, series, book); large batches may approach the
   30-second freshness window.
 - Every stored forecast is loaded on each request; fine for now, bounded loading is a follow-up.
-- Retries are recognised among the most recent 500 requests. A `proposalId` reused after that is refused by
-  Postgres (unique per agent) and treated as a new proposal in JSON mode, so always use unique ids.
+- A retry of any earlier `proposalId` returns the original record: Postgres looks older requests up in
+  `governor_requests`, and the JSON file keeps them in slim form. Use a new `proposalId` for each new proposal.

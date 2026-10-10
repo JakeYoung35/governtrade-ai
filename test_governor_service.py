@@ -169,7 +169,7 @@ class BatchTests(ServiceTest):
         self.submit(agentId="agent-2", proposalId="p-2", side="no", estimatedYesProbability=0.3)
         self.service.run_batch(self.s)
         outcomes = sorted((r["status"], r.get("decision")) for r in self.s["governorRequests"])
-        self.assertEqual(outcomes, [("decided", "rejected"), ("submitted", "approved")])
+        self.assertEqual(outcomes, [("rejected", "rejected"), ("submitted", "approved")])
         self.assertEqual(self.venue.calls, 1)
         rejected = next(d for d in self.s["governorDecisions"] if d["decision"] == "rejected")
         self.assertEqual(rejected["reasonCodes"], [rules.CONFLICT])
@@ -189,7 +189,7 @@ class BatchTests(ServiceTest):
     def test_unknown_market_is_rejected_without_an_order(self):
         view = self.run_one(marketId="KXNOPE-1")
         self.assertEqual(view["decision"]["reasonCodes"], [rules.MARKET_NOT_IN_SNAPSHOT])
-        self.assertEqual((view["status"], view["order"]), ("decided", None))
+        self.assertEqual((view["status"], view["order"]), ("rejected", None))
 
     def test_existing_position_counts_and_blocks_the_market(self):
         self.venue.positions = [{"ticker": MARKET, "position_fp": "10.00", "market_exposure_dollars": "5.00"}]
@@ -334,6 +334,83 @@ class GovernedOrderTests(ServiceTest):
         with self.assertRaisesRegex(ValueError, "Workers may only submit trade terms"):
             self.workspace.proposal(self.s, {"agentId": "agent", "marketId": MARKET, "direction": "Yes", "amount": 5,
                                              "reasoning": "x", "idempotencyKey": "k", "governedTerms": {"contracts": "99"}})
+
+
+class ReviewFixTests(ServiceTest):
+    """Follow-up review of the contract docs and the governor commits on main."""
+
+    def test_retry_after_the_agent_is_paused_returns_the_original(self):
+        code, body = self.submit()
+        self.s["agentConfigs"][0]["status"] = "paused"
+        again, view = self.submit()
+        self.assertEqual((again, view["governorProposalId"]), (200, body["governorProposalId"]))
+        self.assertEqual(self.submit(proposalId="p-new")[0], 400)  # new proposals still need an active agent
+
+    def test_retry_beyond_the_window_is_recognised_in_json_mode(self):
+        code, body = self.submit()
+        self.service.run_batch(self.s)
+        for i in range(3):
+            self.submit(proposalId=f"later-{i}", marketId=OTHER, maxBudgetUsd=2)
+            self.service.run_batch(self.s)
+        with patch.object(records, "REQUEST_WINDOW", 1):
+            compact = records.compact_for_json(self.s)
+        slim = next(r for r in compact["governorRequests"] if r["proposalId"] == "p-1")
+        self.assertNotIn("reasoning", slim)
+        self.s = json.loads(json.dumps(compact))
+        again, view = self.submit()
+        self.assertEqual((again, view["governorProposalId"]), (200, body["governorProposalId"]))
+        self.assertEqual(self.submit(maxBudgetUsd=21)[0], 409)
+
+    def test_retry_beyond_the_window_uses_the_store_lookup(self):
+        code, body = self.submit()
+        stored = copy.deepcopy(self.s["governorRequests"][0])
+        self.s["governorRequests"].clear()  # outside the loaded window
+        self.service.find_request = lambda agent, pid: stored if (agent, pid) == ("agent", "p-1") else None
+        again, view = self.submit()
+        self.assertEqual((again, view["governorProposalId"]), (200, body["governorProposalId"]))
+
+    def test_crash_mid_batch_leaves_no_queued_decision_and_resumes(self):
+        self.submit()
+        self.submit(agentId="agent-2", proposalId="p-2", marketId=OTHER)
+        real_execute = self.service._execute
+        self.service._execute = lambda *a: (_ for _ in ()).throw(RuntimeError("process killed"))
+        with self.assertRaises(RuntimeError):
+            self.service.run_batch(self.s)
+        decided = {d["proposalId"] for d in self.s["governorDecisions"]}
+        self.assertFalse([r for r in self.s["governorRequests"] if r["status"] == "queued" and r["governorProposalId"] in decided])
+        self.assertEqual(sorted(r["status"] for r in self.s["governorRequests"]), ["approved", "approved"])
+        self.service._execute = real_execute
+        self.service.run_batch(self.s)  # resumes instead of failing on the recorded decisions
+        self.assertEqual(sorted(r["status"] for r in self.s["governorRequests"]), ["submitted", "submitted"])
+        self.assertEqual(self.venue.calls, 2)
+        self.service.run_batch(self.s)
+        self.assertEqual(self.venue.calls, 2)  # resuming twice never orders twice
+
+    def test_expired_approved_request_is_skipped_on_resume(self):
+        code, body = self.submit()
+        request = self.request(body["governorProposalId"])
+        self.service._execute = lambda *a: (_ for _ in ()).throw(RuntimeError("process killed"))
+        with self.assertRaises(RuntimeError):
+            self.service.run_batch(self.s)
+        request["proposal"]["expiresAt"] = (utc_now() - timedelta(seconds=1)).isoformat()
+        self.service.run_batch(self.s)
+        self.assertEqual(request["status"], "skipped")
+        self.assertIn("expired", request["note"])
+
+    def test_paused_agents_queued_proposals_do_not_execute(self):
+        self.submit()
+        self.s["agentConfigs"][0]["status"] = "paused"
+        self.service.run_batch(self.s)
+        self.assertEqual((self.s["governorRequests"][0]["status"], self.venue.calls), ("rejected", 0))
+        self.assertIn("paused", self.s["governorRequests"][0]["note"])
+
+    def test_stakes_awaiting_user_approval_count_as_exposure(self):
+        first = self.submit(maxBudgetUsd=100, estimatedYesProbability=0.8)[1]  # above the $25 automatic limit
+        self.service.run_batch(self.s)
+        self.assertEqual(self.service.lookup(self.s, first["governorProposalId"])["order"]["status"], "awaiting approval")
+        second = self.submit(agentId="agent-2", proposalId="p-2")[1]
+        self.service.run_batch(self.s)
+        self.assertEqual(self.service.lookup(self.s, second["governorProposalId"])["decision"]["reasonCodes"], [rules.POSITION_OPEN])
 
 
 class SigningTests(unittest.TestCase):

@@ -7,10 +7,16 @@
   lookup()     a request's status, the governor's decision and the downstream order
   score_forecasts()  record outcomes of settled markets, so agent reliability (and sizing) updates
 
-State: s["governorRequests"], newest first; every queued request plus the newest REQUEST_WINDOW others.
-The governor package stays pure; this module is where it meets the venue, the clock and the app state.
+Request status: queued -> rejected (see decision.reasonCodes or note) | approved (execution pending)
+-> submitted (see the order) | skipped | executionFailed. Every status in a batch is recorded before any
+order is sent, and the next batch resumes approved requests, so a crash mid-batch cannot wedge the queue.
+
+State: s["governorRequests"], newest first (JSON mode keeps older ones in slim form; Postgres keeps them
+in governor_requests, reached through find_request). The governor package stays pure; this module is where
+it meets the venue, the clock and the app state.
 """
 import datetime as dt
+from types import SimpleNamespace
 import uuid
 
 from engine import event
@@ -23,7 +29,6 @@ from governor.money import CENT, ZERO, round_up, to_decimal
 from governor.policy import DEFAULT_POLICY
 from governor.snapshot import build_snapshot, order_book
 
-REQUEST_WINDOW = 500
 SCHEMA_PATH = "/api/governor/schema"
 
 
@@ -36,8 +41,11 @@ def _invalid(errors):
 
 
 class GovernorService:
-    def __init__(self, workspace, policy=DEFAULT_POLICY, clock=utc_now, new_id=lambda: str(uuid.uuid4())):
+    def __init__(self, workspace, policy=DEFAULT_POLICY, clock=utc_now, new_id=lambda: str(uuid.uuid4()),
+                 find_request=None):
+        """find_request(agent_id, proposal_id) returns an older stored request (Postgres) or None."""
         self.workspace, self.policy, self.clock, self.new_id = workspace, policy, clock, new_id
+        self.find_request = find_request
 
     def schema(self):
         return api.describe(self.policy)
@@ -53,16 +61,20 @@ class GovernorService:
         agent = next((a for a in s["agentConfigs"] if a["id"] == normalized["agentId"]), None)
         if agent is None:
             return _invalid([{"field": "agentId", "error": "is not a configured agent"}])
-        if agent.get("status") != "active" or not agent.get("mandate"):
-            return _invalid([{"field": "agentId", "error": "must be an active agent with a saved mandate"}])
         requests = s.setdefault("governorRequests", [])
         fingerprint = api.payload_hash(payload)
+        # A retry must reach its original record even if the agent was paused since, or the request has
+        # left the loaded window, so look it up before any status check.
         prior = next((r for r in requests if r["agentId"] == agent["id"] and r["proposalId"] == normalized["proposalId"]), None)
+        if prior is None and self.find_request:
+            prior = self.find_request(agent["id"], normalized["proposalId"])
         if prior:
             if prior["payloadHash"] != fingerprint:
                 return 409, {"error": "This proposalId was already used with a different payload.",
                              "governorProposalId": prior["governorProposalId"]}
             return 200, self._view(s, prior)
+        if agent.get("status") != "active" or not agent.get("mandate"):
+            return _invalid([{"field": "agentId", "error": "must be an active agent with a saved mandate"}])
         gid = self.new_id()
         proposal = Proposal(gid, agent["id"], normalized["marketId"], normalized["side"],
                             normalized["estimatedYesProbability"], normalized["maxBudgetUsd"], now,
@@ -72,10 +84,7 @@ class GovernorService:
                             "accountId": agent["accountId"], "payloadHash": fingerprint, "receivedAt": now.isoformat(),
                             "status": "queued", "proposal": records.proposal_to_dict(proposal),
                             "reasoning": normalized["reasoning"]})
-        queued = [r for r in requests if r["status"] == "queued"]
-        rest = [r for r in requests if r["status"] != "queued"][:REQUEST_WINDOW]
-        requests[:] = sorted(queued + rest, reverse=True,
-                             key=lambda r: (dt.datetime.fromisoformat(r["receivedAt"]), r["governorProposalId"]))
+        requests.sort(reverse=True, key=lambda r: (dt.datetime.fromisoformat(r["receivedAt"]), r["governorProposalId"]))
         return 202, {"governorProposalId": gid, "proposalId": normalized["proposalId"], "status": "queued"}
 
     def lookup(self, s, governor_proposal_id):
@@ -103,6 +112,7 @@ class GovernorService:
     def run_batch(self, s):
         """Decide every queued request, one batch per account. Returns a summary per account."""
         s["clock"] = self.clock().isoformat()
+        self._resume(s)
         queued = [r for r in s.get("governorRequests", []) if r["status"] == "queued"]
         return [self._run_account(s, account_id, sorted((r for r in queued if r["accountId"] == account_id),
                                                         key=lambda r: r["governorProposalId"]))
@@ -117,10 +127,10 @@ class GovernorService:
         if account is None or account.get("status") == "disconnected":
             self._reject_all(items, "The agent's venue account is not connected.")
             return {"accountId": account_id, "decided": 0, "note": "account not connected"}
-        known_agents = {a["id"] for a in s["agentConfigs"] if a.get("status") != "deleted"}
-        orphaned = [r for r in items if r["agentId"] not in known_agents]
-        self._reject_all(orphaned, "The agent was deleted before its proposal was decided.")
-        items = [r for r in items if r["agentId"] in known_agents]
+        live = {a["id"] for a in s["agentConfigs"] if a.get("status") == "active" and a.get("mandate")}
+        self._reject_all([r for r in items if r["agentId"] not in live],
+                         "The agent was paused or deleted before its proposal was decided.")
+        items = [r for r in items if r["agentId"] in live]
         if not items:
             return {"accountId": account_id, "decided": 0, "note": "no live agents"}
         try:
@@ -150,11 +160,14 @@ class GovernorService:
                                      reliability=reliability, policy=self.policy)
         records.record_batch(s, batch, decisions, now)
         by_id = {r["governorProposalId"]: r for r in items}
+        # Record every outcome before sending any order: execution saves state (a crash-safe reservation),
+        # and a request must never be saved as queued once its decision is recorded.
         for d in decisions:
-            request = by_id[d.proposal_id]
-            request.update(status="decided", batchId=batch["id"], decision=d.outcome)
+            by_id[d.proposal_id].update(status="rejected" if d.outcome == "rejected" else "approved",
+                                        batchId=batch["id"], decision=d.outcome)
+        for d in decisions:
             if d.outcome != "rejected":
-                self._execute(s, request, d, venue, snapshot.books[d.market_id])
+                self._execute(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id])
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
     def _portfolio(self, s, account, balance, snapshot, now):
@@ -197,12 +210,39 @@ class GovernorService:
             ticker = position["ticker"]
             agent, known = attribution.get(ticker, ("external", None))
             exposures.append(Exposure(ticker, agent, group(ticker, known), "yes" if quantity > ZERO else "no", amount))
-        for o in orders:  # budget still reserved for submissions whose venue result is unknown
-            if o.get("committed") and o.get("status") == "submission unknown":
+        for o in orders:  # budget the user may still approve, or reserved for submissions with an unknown result
+            if o.get("status") == "awaiting approval" or (o.get("committed") and o.get("status") == "submission unknown"):
                 market_id = o["market"]["id"]
                 exposures.append(Exposure(market_id, o["agent"], group(market_id, o.get("governorEventGroup")),
                                           "yes" if o["direction"] == "Yes" else "no", to_decimal(o["amount"], "amount")))
         return exposures
+
+    def _resume(self, s):
+        """Execute approved requests left without an order (e.g. a crash after a mid-batch save).
+
+        Safe to repeat: the order's idempotency key is the governor proposal id, so an order created before
+        the crash is returned rather than placed again. Expired proposals are skipped, never executed late.
+        """
+        for request in [r for r in s.get("governorRequests", []) if r["status"] == "approved"]:
+            decision = next((d for d in s.get("governorDecisions", []) if d["proposalId"] == request["governorProposalId"]), None)
+            account = next((a for a in s["accounts"] if a["id"] == request["accountId"]), None)
+            if decision is None or account is None:
+                request.update(status="executionFailed", note="The approved decision or its account is no longer available.")
+                continue
+            if self.clock() >= dt.datetime.fromisoformat(request["proposal"]["expiresAt"]):
+                request.update(status="skipped", note="The proposal expired before execution could resume.")
+                continue
+            try:
+                venue = self.workspace.venue(account)
+                book = order_book(venue.get_orderbook(decision["marketId"]))
+            except (ValueError, KeyError):
+                request.update(status="skipped", note="The market was unavailable when execution resumed.")
+                continue
+            self._execute(s, request, SimpleNamespace(
+                proposal_id=decision["proposalId"], agent_id=decision["agentId"], market_id=decision["marketId"],
+                side=decision["side"], approved_budget=to_decimal(decision["approvedBudgetUsd"], "approvedBudgetUsd"),
+                contracts=to_decimal(decision["contracts"], "contracts"),
+                limit_price=to_decimal(decision["limitPrice"], "limitPrice")), venue, book)
 
     def _execute(self, s, request, decision, venue, book):
         # The app authorizes whole cents, so round the approval up (by under a cent). The order itself buys exactly
