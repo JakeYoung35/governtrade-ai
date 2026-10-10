@@ -75,7 +75,7 @@ class Workspace:
             if a and (a['environment']!=environment or a.get('subaccount',0)!=subaccount):raise ValueError('Create a new connection to change Demo/Live or subaccount; audit history keeps its original account.')
             if not a and not credentials:raise ValueError('Kalshi credentials are required.')
             if credentials:
-                if set(credentials)!={'key_id','private_key'} or any(not isinstance(v,str) or not v.strip() for v in credentials.values()):raise ValueError('Enter the Kalshi key ID and RSA PEM private key.')
+                if set(credentials)!={'key_id','private_key'} or any(not isinstance(v,str) or not v.strip() for v in credentials.values()):raise ValueError('Enter the Kalshi key ID and PEM private key.')
                 for existing in s['accounts']:
                     if existing.get('credentialRef') and existing['id']!=b.get('id') and existing['venue']=='kalshi' and existing['environment']==environment and existing.get('subaccount',0)==subaccount and self.vault.get(existing['credentialRef']).get('key_id')==credentials['key_id']:raise ValueError('This Kalshi key and subaccount are already connected.')
                 test=adapter('kalshi',credentials,environment,subaccount);test.headers('GET',test.base+'/portfolio/balance')

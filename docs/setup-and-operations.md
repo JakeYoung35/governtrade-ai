@@ -70,8 +70,8 @@ Windows notes:
 
 Connected Accounts offers **Kalshi Demo** (virtual money at `external-api.demo.kalshi.co`) and **Kalshi Live** (real money at `external-api.kalshi.com`). Live requires an explicit real-money confirmation. Demo and Live need their own keys, created on the matching Kalshi site.
 
-- Create an **RSA** API key on Kalshi. The app does not yet support Ed25519 keys, which Kalshi recommends by default.
-- Enter the API key ID and the full RSA PEM private key, including the `-----BEGIN` and `-----END` lines.
+- Create an API key on Kalshi. Both Ed25519 (Kalshi's recommended default) and RSA keys are supported.
+- Enter the API key ID and the full PEM private key, including the `-----BEGIN` and `-----END` lines.
 - Choose subaccount 0 (primary) or a numbered subaccount from 1 to 63. Portfolio reads and orders are scoped to that subaccount.
 - Click **Test connection** to sync the balance.
 
