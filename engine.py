@@ -9,37 +9,12 @@ def markets(clock):
         names={'crypto':['BTC 15-minute Up/Down','ETH 15-minute Up/Down','BTC Spot'], 'sports':['Atlanta vs Boston — game winner','Championship — tournament winner','Season — division winner'], 'politics':['Election — candidate wins','Policy bill — passes','Election — turnout exceeds 60%'], 'economics':['Inflation — below 3%','Rates — next decision cut','GDP — above 2%'], 'culture':['Awards — best picture winner','Release — opening exceeds forecast','Music — album reaches number one']}[a]
         for i,name in enumerate(names): result.append({'id':f'{a}-{i}-{date}','agent':a,'name':name,'instrument':'spot' if name=='BTC Spot' else 'prediction','price':50000 if name=='BTC Spot' else [.5,.4,.6][i],'venue':'Demo Exchange','quoteAt':clock,'closeAt':(dt.datetime.fromisoformat(clock)+dt.timedelta(minutes=15 if a=='crypto' and i<2 else 1440)).isoformat(),'slippage':0.2})
     return result
-DEFAULT={'autoLimit':25,'dailyCap':100,'mandateCap':100,'marketCap':50,'exposureCap':500,'minimum':100,'slippage':1,'automation':True,'recurring':True,'alwaysApprove':False,'newMarketApproval':False,'notifications':True,'agents':[a[0] for a in AGENTS],'categories':[a[0] for a in AGENTS],'venues':['Demo Exchange'],'approvedMarkets':[]}
+DEFAULT={'autoLimit':25,'dailyCap':100,'dailyLossCap':50,'marketCap':50,'exposureCap':500,'minimum':100,'slippage':1,'automation':True,'alwaysApprove':False,'newMarketApproval':False,'notifications':True,'agents':[a[0] for a in AGENTS],'categories':[a[0] for a in AGENTS],'venues':['Demo Exchange'],'approvedMarkets':[]}
 def seed():
-    clock='2026-10-09T09:00:00';return {'clock':clock,'cash':1000.,'deposits':1000.,'reserved':0.,'realized':0.,'permissions':copy.deepcopy(DEFAULT),'disabled':[],'orders':[],'positions':[],'mandates':[],'chats':{a[0]:[] for a in AGENTS},'events':[],'keys':{},'markets':markets(clock)}
+    clock='2026-10-09T09:00:00';return {'mode':'demo','demoAgents':demo_agents(),'clock':clock,'cash':1000.,'deposits':1000.,'reserved':0.,'realized':0.,'permissions':{'dailyCap':500,'automation':True},'safety':copy.deepcopy(SAFETY),'disabled':[],'orders':[],'positions':[],'chats':{a[0]:[] for a in AGENTS},'events':[],'keys':{},'markets':markets(clock)}
 def event(s,text,kind='UPDATED',trade=None):s['events'].insert(0,{'id':uid(),'time':stamp(s),'text':text,'kind':kind,'trade':trade})
 def exposure(s):return round(sum(p['cost'] for p in s['positions'] if p['status']=='open'),2)
-def checks(s,o,approved=False):
-    p=s['permissions']; amount=o['amount']; market=o['market']; m=next((x for x in s['mandates'] if x['id']==o.get('mandate')),None); rows=[]
-    def c(name,ok,reason,approval=False):rows.append({'name':name,'outcome':'ALLOW' if ok else 'REQUIRE_APPROVAL' if approval else 'BLOCK','reason':reason})
-    c('Available cash',amount<=s['cash']-s['reserved'],'Trade must fit unreserved cash.')
-    c('Minimum cash reserve',s['cash']-s['reserved']-amount>=p['minimum'],f"Keep ${p['minimum']:.2f} available.")
-    c('Agent enabled',p['automation'] and o['agent'] not in s['disabled'] and o['agent'] in p['agents'],'Automation and selected agent must be enabled.')
-    c('Market category',market['agent'] in p['categories'],'Category must be permitted.')
-    c('Approved venue',market['venue'] in p['venues'],'Venue must be permitted.')
-    spent=sum(x['amount'] for x in s['orders'] if x.get('filled') and x['time'][:10]==s['clock'][:10])
-    c('Shared daily budget',spent+amount<=p['dailyCap'],f"${spent:.2f} spent; ${p['dailyCap']:.2f} daily cap.")
-    marketSpent=sum(x['amount'] for x in s['orders'] if x.get('filled') and x['market']['id']==market['id'])
-    c('Cumulative market budget',marketSpent+amount<=p['marketCap'],f"${marketSpent:.2f} invested in this market; ${p['marketCap']:.2f} cap.")
-    c('Open exposure',exposure(s)+amount<=p['exposureCap'],f"Maximum exposure ${p['exposureCap']:.2f}.")
-    c('Market open',s['clock']<market['closeAt'],'Contract must still be open.')
-    c('Fresh quote',(dt.datetime.fromisoformat(s['clock'])-dt.datetime.fromisoformat(market['quoteAt'])).total_seconds()<=300,'Quote expires after five simulated minutes; stale proposals require a new request.')
-    c('Slippage',market['slippage']<=p['slippage'],f"Quoted slippage {market['slippage']}%; maximum {p['slippage']}%.")
-    c('Valid order',amount>=1 and o['direction'] in (['Buy'] if market['instrument']=='spot' else ['Yes','No']),'Minimum $1; valid contract direction required.')
-    if m:
-        c('Active mandate',m['status']=='active' and m['start']<=s['clock']<m['end'] and p['recurring'],'Mandate must be active, unexpired, with recurring permission.')
-        c('Mandate total budget',m['spent']+amount<=min(m['budget'],p['mandateCap']),'Fees count toward the lifetime mandate budget.')
-        used=sum(x['amount'] for x in s['orders'] if x.get('filled') and x.get('mandate')==m['id'] and x['market']['id']==market['id'])
-        c('Mandate market budget',used+amount<=m['perMarket'],'Cumulative per-market spending cannot be bypassed by splitting orders.')
-    c('Automatic authorization',approved or (not p['alwaysApprove'] and amount<=p['autoLimit']),'Exact user approval required above automatic threshold or when every-trade approval is enabled.',True)
-    c('New market authorization',approved or not p['newMarketApproval'] or market['name'] in p['approvedMarkets'],'New markets require transaction-specific approval.',True)
-    outcome='BLOCK' if any(x['outcome']=='BLOCK' for x in rows) else 'REQUIRE_APPROVAL' if any(x['outcome']=='REQUIRE_APPROVAL' for x in rows) else 'ALLOW'
-    return {'time':stamp(s),'outcome':outcome,'checks':rows}
+def checks(s,o,approved=False):return layered_checks(s,o,approved)
 def evaluate(s,o,approved=False):
     e=checks(s,o,approved);o['evaluations'].append(e);o['decision']=e['outcome'];o['status']={'BLOCK':'blocked','REQUIRE_APPROVAL':'awaiting approval','ALLOW':'submitted'}[e['outcome']]
     event(s,f"{o['market']['name']} · ${o['amount']:.2f} · {e['outcome']}",e['outcome'],o['id'])
@@ -48,15 +23,13 @@ def evaluate(s,o,approved=False):
         s['reserved']+=o['amount'];o['status']='open'; price=MARKET_DATA.quote(o['market'])['price'];price=1-price if o['direction']=='No' else price
         fill=BROKER.fill(o['amount'],price);fee=fill['fee'];principal=fill['principal'];qty=fill['quantity'];s['cash']=round(s['cash']-o['amount'],2);s['reserved']=round(s['reserved']-o['amount'],2);o.update(status='filled',filled=True,fee=fee,quantity=qty,fillPrice=price,automatic=not approved)
         s['positions'].insert(0,{'id':uid(),'order':o['id'],'market':copy.deepcopy(o['market']),'direction':o['direction'],'quantity':qty,'price':price,'cost':o['amount'],'value':principal,'status':'open','pnl':-fee})
-        if o.get('mandate'):
-            m=next(x for x in s['mandates'] if x['id']==o['mandate']);m['spent']=round(m['spent']+o['amount'],2)
         event(s,'Simulated fill recorded; cash and position updated.','FILLED',o['id'])
     return o
 
-def propose(s,agent,market,amount,direction,request,key,mandate=None):
+def propose(s,agent,market,amount,direction,request,key):
     if key in s['keys']:return next(x for x in s['orders'] if x['id']==s['keys'][key])
     if not isinstance(amount,(float,int)) or not 0<amount<=1000000:raise ValueError('Enter a valid positive amount.')
-    o={'id':uid(),'agent':agent,'market':copy.deepcopy(market),'amount':round(amount,2),'direction':direction,'request':request,'time':stamp(s),'mandate':mandate,'status':'proposed','evaluations':[],'filled':False};s['orders'].insert(0,o);s['keys'][key]=o['id'];return evaluate(s,o)
+    o={'id':uid(),'agent':agent,'accountId':'demo-account','market':copy.deepcopy(market),'amount':round(amount,2),'direction':direction,'request':request,'time':stamp(s),'status':'proposed','evaluations':[],'filled':False};s['orders'].insert(0,o);s['keys'][key]=o['id'];return evaluate(s,o)
 def advance(s,hours):
     s['clock']=(dt.datetime.fromisoformat(s['clock'])+dt.timedelta(hours=hours)).isoformat()
     for pos in s['positions']:
@@ -64,14 +37,7 @@ def advance(s,hours):
             # Deterministic simulated settlement, never a forecast.
             settlement=BROKER.settlement(pos['market']['id'],pos['direction'],pos['quantity']);win=settlement['won'];payout=settlement['payout'];pos.update(status='settled',value=payout,pnl=round(payout-pos['cost'],2),settlement={'time':s['clock'],'won':win,'payout':payout});s['cash']=round(s['cash']+payout,2);s['realized']=round(s['realized']+pos['pnl'],2);next(x for x in s['orders'] if x['id']==pos['order'])['status']='settled';event(s,f"Simulated settlement: {pos['market']['name']} · payout ${payout:.2f}",'SETTLED',pos['order'])
     s['markets']=markets(s['clock'])
-    for m in s['mandates']:
-        if m['status']!='active':continue
-        if s['clock']>=m['end']:m['status']='expired';event(s,'Mandate expired; future trading stopped.','EXPIRED');continue
-        if s['clock']>=m['next']:
-            for market in [x for x in s['markets'] if x['agent']==m['agent'] and x['instrument']=='prediction']:
-                if m['budget']-m['spent']>=1:propose(s,m['agent'],market,min(m['perMarket'],m['budget']-m['spent']), 'Yes',m['request'],f"{m['id']}-{market['id']}-{s['clock']}",m['id'])
-            m['next']=(dt.datetime.fromisoformat(s['clock'])+dt.timedelta(hours=m['frequency'])).isoformat()
-    event(s,f"Simulation advanced {hours} hours. No background trading runs while the app is closed.")
+    event(s,f"Simulation advanced {hours} hours. Quotes and simulated settlements updated.")
 def action(s,b):
     a=b['action'];agent=b.get('agent','crypto')
     if a=='deposit':
@@ -79,45 +45,16 @@ def action(s,b):
         if not 0<n<=1000000:raise ValueError('Deposit must be between $0.01 and $1,000,000.')
         if b['key'] not in s['keys']:s['cash']=round(s['cash']+n,2);s['deposits']+=n;s['keys'][b['key']]='deposit';event(s,f'Added ${n:.2f} simulated funds.')
     elif a=='permissions':
-        p=copy.deepcopy(s['permissions'])
-        for k,v in b['values'].items():
-            if k not in DEFAULT:raise ValueError('Unknown permission.')
-            if type(DEFAULT[k]) in (int,float):
-                if type(v) not in (int,float) or v<0:raise ValueError('Limits must be nonnegative numbers.')
-            elif type(v)!=type(DEFAULT[k]):raise ValueError('Invalid permission type.')
-            p[k]=v
-        s['permissions']=p;event(s,'Trading permissions updated; next execution uses current rules.')
+        s['permissions'].update(validate_permissions(b['values']));event(s,'Account ceiling updated.')
     elif a=='toggle-agent':
-        if agent in s['disabled']:s['disabled'].remove(agent)
-        else:s['disabled'].append(agent)
-        event(s,f'{agent} agent status changed.')
+        x=next(x for x in s['demoAgents'] if x['id']==agent);x['status']='paused' if x['status']=='active' else 'active'
     elif a=='preview':
         market=next(x for x in s['markets'] if x['id']==b['market'])
         return checks(s,{'market':market,'amount':float(b['amount']),'agent':agent,'direction':b['direction']})
     elif a=='trade':
         market=next(x for x in s['markets'] if x['id']==b['market'])
-        if market['agent']!=agent:raise ValueError('Choose a market supported by this agent.')
+        if agent not in [a['id'] for a in s['demoAgents']]:raise ValueError('Select a demo agent.')
         return propose(s,agent,market,float(b['amount']),b['direction'],b.get('request','Structured trade'),b['key'])
-    elif a=='chat':
-        text=b['text'].strip();s['chats'][agent].append({'role':'customer','text':text});nums=re.findall(r'\$\s*(\d+(?:\.\d+)?)',text)
-        if re.search(r'five days|5 days|per market|multiple',text,re.I):reply='Create a mandate below. Confirm the total budget, cumulative per-market cap, duration, frequency and selection criteria. No trades execute before confirmation.'
-        elif nums:
-            market=next((x for x in s['markets'] if x['agent']==agent and (('btc' in text.lower() and 'BTC' in x['name']) or ('eth' in text.lower() and 'ETH' in x['name']) or x['name'].lower() in text.lower()) and (('spot' in text.lower())==(x['instrument']=='spot'))),None)
-            direction='Buy' if market and market['instrument']=='spot' else 'Yes' if re.search(r'\byes\b|\bup\b',text,re.I) else 'No' if re.search(r'\bno\b|\bdown\b',text,re.I) else None
-            if market and direction:
-                o=propose(s,agent,market,float(nums[0]),direction,text,b['key']);reply=f"Trade {o['id']}: {o['decision']} · {o['status']}. Open the trade details to review all policy checks."
-            else:reply='Please specify the exact market and direction. For example: “Invest $10 in BTC 15-minute Up/Down, Yes.” Or complete the structured trade form below. A 15-minute contract is different from spot crypto.'
-        else:reply='Please include a dollar amount, market and direction, or configure a scheduled mandate below.'
-        s['chats'][agent].append({'role':'agent','text':reply})
-    elif a=='mandate':
-        budget=float(b['budget']);per=float(b['perMarket']);days=int(b['days']);freq=int(b['frequency'])
-        if not 1<=budget<=s['permissions']['mandateCap'] or not 1<=per<=budget or not 1<=days<=30 or not 1<=freq<=120:raise ValueError('Check mandate budget, per-market cap, duration and frequency against your permissions.')
-        m={'id':uid(),'agent':agent,'budget':budget,'perMarket':per,'spent':0,'start':stamp(s),'end':(dt.datetime.fromisoformat(s['clock'])+dt.timedelta(days=days)).isoformat(),'next':(dt.datetime.fromisoformat(s['clock'])+dt.timedelta(hours=freq)).isoformat(),'frequency':freq,'criteria':'Demo rotation: available prediction contracts, Yes, within governance limits','status':'active','request':b.get('request','Confirmed structured mandate')};s['mandates'].insert(0,m);event(s,'Confirmed mandate activated; every due proposal will be independently checked.')
-    elif a=='mandate-status':
-        m=next(x for x in s['mandates'] if x['id']==b['id']);status=b['status']
-        if status not in ['paused','active','cancelled']:raise ValueError('Invalid status.')
-        if m['status'] in ['expired','cancelled'] or s['clock']>=m['end']:raise ValueError('Expired or cancelled mandates cannot resume.')
-        m['status']=status;event(s,f'Mandate {status}. Existing positions remain unchanged.')
     elif a=='decision':
         o=next(x for x in s['orders'] if x['id']==b['id'])
         if o['status']!='awaiting approval':return o
@@ -128,3 +65,101 @@ def action(s,b):
         if not 0<h<=120:raise ValueError('Advance between 0 and 120 hours.')
         advance(s,h)
     else:raise ValueError('Unknown action.')
+
+# User mandates and account ceilings are distinct policy layers.
+PERSONALITIES={
+ 'Conservative':{'autoLimit':10,'dailyCap':50,'minimum':200,'newMarketApproval':False},
+ 'Moderate':{'autoLimit':25,'dailyCap':100,'minimum':100,'newMarketApproval':False},
+ 'Aggressive':{'autoLimit':50,'dailyCap':100,'minimum':50,'newMarketApproval':False}}
+MAIN_DEFAULT={'dailyCap':100,'automation':True}
+SAFETY={'dailyLossCap':50,'marketCap':50,'exposureCap':500,'slippage':1}
+CATEGORIES=['crypto','sports','economics','politics','culture','other']
+DEMO_AGENTS=[
+ {'id':'demo-conservative','name':'Economics Scout','personality':'Conservative','mandate':copy.deepcopy(PERSONALITIES['Conservative']),'demoMarket':'economics','priorDailySpend':0},
+ {'id':'demo-moderate','name':'Sports Analyst','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate']),'demoMarket':'sports','priorDailySpend':0},
+ {'id':'demo-aggressive','name':'Momentum Trader','personality':'Aggressive','mandate':copy.deepcopy(PERSONALITIES['Aggressive']),'demoMarket':'crypto','priorDailySpend':80},
+ {'id':'demo-new-market','name':'Discovery Agent','personality':'Moderate','mandate':{**PERSONALITIES['Moderate'],'newMarketApproval':True},'demoMarket':'politics','priorDailySpend':0}]
+def main_seed():
+ return {'schemaVersion':3,'mode':'main','clock':dt.datetime.now(dt.timezone.utc).isoformat(),'accounts':[],'agentConfigs':[],'permissions':copy.deepcopy(MAIN_DEFAULT),'safety':copy.deepcopy(SAFETY),'orders':[],'events':[],'keys':{},'chats':{},'positions':[]}
+def migrate(s):
+ if s.get('mode')!='main':return s
+ if s.get('schemaVersion')==2:
+  old=s['permissions'];s['safety']={k:old.get(k,v) for k,v in SAFETY.items()};s['permissions']={k:old.get(k,v) for k,v in MAIN_DEFAULT.items()}
+  for a in s['accounts']:
+   a['ceiling']={'dailyCap':min(a.get('permissions',{}).get('dailyCap',s['permissions']['dailyCap']),s['permissions']['dailyCap'])};a.pop('permissions',None)
+   if a['venue']!='kalshi':a.update(status='disconnected',stale=True,error='Venue no longer supported.')
+  for a in s['agentConfigs']:
+   a.pop('category',None);a.pop('permissions',None);a.update(mandate=None,personality=None,status='draft',modelValidated=False)
+  s['schemaVersion']=3
+ return s
+
+def ceiling(s,account):
+ return {'dailyCap':min(s['permissions']['dailyCap'],account.get('ceiling',{}).get('dailyCap',s['permissions']['dailyCap'])),'automation':s['permissions']['automation']}
+def rules(s,agent):return copy.deepcopy(agent.get('mandate') or {})
+def usage(s,account_id,agent_id=None,market_id=None):
+ orders=[o for o in s['orders'] if o.get('accountId')==account_id and (not agent_id or o['agent']==agent_id) and (o.get('committed') or o.get('filled'))]
+ prior=next((a.get('priorDailySpend',0) for a in s.get('demoAgents',[]) if a['id']==agent_id),0)
+ proposals=[o for o in s['orders'] if o.get('accountId')==account_id and (not agent_id or o['agent']==agent_id)]
+ return {'lastAmount':proposals[-1]['amount'] if proposals else None,'daily':prior+sum(o['amount'] for o in orders if o['time'][:10]==s['clock'][:10]),'market':sum(o['amount'] for o in orders if not market_id or o['market']['id']==market_id),'held':sum(o['amount'] for o in orders if o['status'] in ('submission unknown','submitted','open'))}
+def validate_permissions(values):
+ import math
+ if not isinstance(values,dict) or set(values)-set(MAIN_DEFAULT):raise ValueError('Only total daily spending and the account kill switch are configurable here.')
+ for k,v in values.items():
+  if k=='dailyCap' and (type(v) not in (int,float) or not math.isfinite(v) or v<0):raise ValueError('Daily ceiling must be a finite nonnegative amount.')
+  if k=='automation' and type(v)!=bool:raise ValueError('Invalid kill switch setting.')
+ return copy.deepcopy(values)
+def validate_mandate(values,limit):
+ import math
+ if not isinstance(values,dict) or set(values)!=set(PERSONALITIES['Moderate']):raise ValueError('Complete the four mandate restrictions.')
+ for k in ('autoLimit','dailyCap','minimum'):
+  if type(values[k]) not in (float,int) or not math.isfinite(values[k]) or values[k]<0:raise ValueError('Mandate limits must be finite nonnegative amounts.')
+ if type(values['newMarketApproval'])!=bool:raise ValueError('Choose whether new markets require approval.')
+ if values['dailyCap']>limit or values['autoLimit']>values['dailyCap']:raise ValueError('Mandate spending cannot exceed the account ceiling; the automatic limit cannot exceed its daily cap.')
+ return copy.deepcopy(values)
+def result(rows,s):
+ decision='BLOCK' if any(r['outcome']=='BLOCK' for r in rows) else 'REQUIRE_APPROVAL' if any(r['outcome']=='REQUIRE_APPROVAL' for r in rows) else 'ALLOW'
+ layers={}
+ for layer in ('account_ceiling','agent_mandate','execution'):
+  relevant=[r for r in rows if r['layer']==layer];layers[layer]='BLOCK' if any(r['outcome']=='BLOCK' for r in relevant) else 'REQUIRE_APPROVAL' if any(r['outcome']=='REQUIRE_APPROVAL' for r in relevant) else 'ALLOW'
+ return {'time':stamp(s),'outcome':decision,'checks':rows,'layers':layers}
+def main_checks(s,o,approved=False):
+ return layered_checks(s,o,approved)
+def layered_checks(s,o,approved=False):
+ demo=s.get('mode')!='main';agents=s.get('demoAgents',[]) if demo else s['agentConfigs'];agent=next(x for x in agents if x['id']==o['agent']);m=o['market'];amount=o['amount'];rows=[]
+ account={'id':'demo-account','venue':'Demo Exchange','environment':'sandbox','status':'connected'} if demo else next(x for x in s['accounts'] if x['id']==agent['accountId'])
+ b={'cash':s['cash']-s['reserved'],'reserved':s['reserved'],'exposure':exposure(s),'dailyLoss':max(0,-s['realized'])} if demo else o.get('_balance')
+ policy=agent.get('mandate');p=policy or PERSONALITIES['Moderate'];cap=ceiling(s,account);safety=s.get('safety',SAFETY)
+ def c(name,ok,reason,layer='execution',approval=False):rows.append({'name':name,'outcome':'ALLOW' if ok else 'REQUIRE_APPROVAL' if approval else 'BLOCK','reason':reason,'layer':layer})
+ c('Mandate saved',bool(policy),'The user must save a mandate before this agent trades.','agent_mandate')
+ c('Agent enabled',agent.get('status','active')=='active','Paused, draft and deleted agents cannot trade.','agent_mandate')
+ c('Provider validated',demo or agent.get('modelValidated',False),'Provider key and selected model must be validated.','agent_mandate')
+ c('Account kill switch',cap['automation'],'The account kill switch stops every agent.','account_ceiling')
+ au=usage(s,account['id'],agent['id']);u=usage(s,account['id']);total=u['daily']+sum(x.get('priorDailySpend',0) for x in s.get('demoAgents',[])) if demo else max(u['daily'],(b or {}).get('externalDailySpend',0))+u['held']
+ c('Total daily spending',total+amount<=cap['dailyCap'],f"${total:.2f} used; account ceiling ${cap['dailyCap']:.2f}.",'account_ceiling')
+ if not demo:
+  global_spend=sum(x['amount'] for x in s['orders'] if x.get('committed') and x['time'][:10]==s['clock'][:10])
+  c('Workspace daily ceiling',global_spend+amount<=s['permissions']['dailyCap'],'Connected accounts also share the workspace ceiling.','account_ceiling')
+ c('Agent daily spending',au['daily']+amount<=p['dailyCap'],f"${au['daily']:.2f} used; this agent cap ${p['dailyCap']:.2f}.",'agent_mandate')
+ cash=b['cash'] if b else 0;held=u['held']
+ c('Fresh account balance',b is not None and account['status']=='connected','A fresh venue balance is required.')
+ c('Available cash',cash-held>=amount,'Available cash excludes venue reservations; unresolved submissions are additionally held.')
+ c('Minimum cash reserve',cash-held-amount>=p['minimum'],f"Keep ${p['minimum']:.2f} available for this agent.",'agent_mandate')
+ c('Approved venue',account['venue']==m['venue'],'The proposal uses its saved Kalshi account.')
+ used_markets={x['market']['id'] for x in s['orders'] if x['agent']==agent['id'] and x.get('filled')}
+ c('Automatic authorization',approved or amount<=p['autoLimit'],f"Above ${p['autoLimit']:.2f} requires approval.",'agent_mandate',True)
+ c('New market authorization',approved or not p['newMarketApproval'] or m['id'] in used_markets,'This agent must receive approval for a market it has not traded before.','agent_mandate',True)
+ # Retain existing execution guardrails; approvals cannot remove any hard restriction.
+ mu=sum(x['amount'] for x in s['orders'] if (x.get('committed') or x.get('filled')) and x['market']['id']==m['id'] and x['market']['venue']==m['venue'])
+ c('Cumulative market budget',mu+amount<=safety['marketCap'],'Split proposals share the existing hard market cap.')
+ c('Open exposure',b is not None and b['exposure']+held+amount<=safety['exposureCap'],'Fresh exposure and unresolved submissions must fit the hard limit.')
+ c('Daily loss',b is not None and b['dailyLoss']<=safety['dailyLossCap'],'The existing observed-loss guardrail remains enforced.')
+ age=(dt.datetime.fromisoformat(s['clock'])-dt.datetime.fromisoformat(m['quoteAt'])).total_seconds()
+ c('Fresh quote',0<=age<=(300 if demo else 60),'Stale venue quotes cannot execute.')
+ c('Market open',m.get('open',True) and s['clock']<m['closeAt'],'Market must still be open.')
+ c('Slippage',m['slippage']<=safety['slippage'],'The existing slippage limit is enforced.')
+ c('Valid order',amount>=1 and o['direction'] in ('Yes','No'),'Opening prediction orders require at least $1 and Yes/No.')
+ c('Execution capability',demo or m.get('executionReady',False),m.get('executionNote','Demo simulated execution.'))
+ c('Live confirmation',account['environment']=='sandbox' or account.get('liveEnabled',False),'Live accounts require explicit real-money confirmation.')
+ return result(rows,s)
+
+def demo_agents():return [{**copy.deepcopy(a),'accountId':'demo-account','status':'active','modelValidated':True} for a in DEMO_AGENTS]

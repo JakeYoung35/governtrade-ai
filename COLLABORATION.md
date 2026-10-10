@@ -2,7 +2,7 @@
 
 Shared repository: https://github.com/JakeYoung35/governtrade-ai
 
-Each collaborator has a separate copy of the source, a separate Codex chat, and separate simulated account data. Source changes become shared after committing, pushing and merging; this is not simultaneous editing of a single website.
+Each collaborator has a separate copy of the source, a separate Codex chat, and separate private account connections and demo data. Source changes become shared after committing, pushing and merging; this is not simultaneous editing of a single website.
 
 ## First-time setup for a collaborator
 
@@ -10,7 +10,7 @@ Each collaborator has a separate copy of the source, a separate Codex chat, and 
 2. Clone the repository through GitHub Desktop, or run `git clone https://github.com/JakeYoung35/governtrade-ai.git`.
 3. Add the cloned folder as a local project in your own Codex app.
 4. Ask Codex: “Read README.md and COLLABORATION.md. This is an existing application: preserve the GovernPay-style design and independent trade governance. Start the local preview and wait for my requested changes.”
-5. Install Python 3.12 or later if it is missing. The app has no third-party Python dependencies.
+5. Install Python 3.12 or later if it is missing. Install requirements.txt in a Python virtual environment; see README for secure vault setup.
 6. Run `python3 server.py` from the cloned folder. Windows may use `py -3 server.py`. Open http://localhost:3110.
 
 ## Before a new change
@@ -34,4 +34,4 @@ After merging, each collaborator switches to main and pulls. Refresh the preview
 - `python3 -m unittest discover -s . -p test_engine.py -v`
 - `node --check static/app.js` if Node.js is installed.
 
-Keep `.data/`, secrets and Python caches out of commits. The included .gitignore excludes the simulation store and caches. Your local balance and trade records do not sync through GitHub.
+Keep `.data/`, secrets and Python caches out of commits. The included .gitignore excludes the private encrypted credential store and account state and caches. Your local balance and trade records do not sync through GitHub.
