@@ -161,4 +161,14 @@ class StoreTests(unittest.TestCase):
    self.store.save(s)
   with self.store.session():s=self.store.load();s['governorForecasts'].pop();self.store.save(s)
   self.assertEqual(self.count('governor_forecasts'),2)
+ def test_governor_requests_round_trip_and_status_updates(self):
+  from governor_service import GovernorService
+  s=self.workspace();g=s['agentConfigs'][0]['id'];service=GovernorService(self.w)
+  payload={'schemaVersion':1,'proposalId':'req-1','agentId':g,'marketId':'MKT','side':'yes','estimatedYesProbability':0.45,'maxBudgetUsd':5,'reasoning':'Round trip.'}
+  with self.store.session():code,body=service.submit(s,payload);self.assertEqual(code,202);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorRequests'][0]['status'],'queued')
+  with self.store.session():
+   s=self.store.load();s['governorRequests'][0].update(status='decided',decision='rejected');self.store.save(s);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorRequests'][0]['status'],'decided')
+  self.assertEqual(self.count('governor_requests'),1)
 
