@@ -1,6 +1,14 @@
 # Agent integration contract
 
-The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. The agentic teammate's worker owns model calls and market selection. The UI starts no AI worker; the server runs only the governor's batch loop.
+The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. Proposals reach the governor two ways: the in-app agent chat (below) and an external worker using the governed proposal API.
+
+## In-app agent chat
+
+When the user sends a chat message, `agent_chat.py` calls the agent's configured model (`agent_llm.py`: OpenAI chat completions, Anthropic messages or Gemini `generateContent`, with tool calling) using the agent's saved key. The model gets four tools: `find_series` and `list_markets` (Kalshi market discovery by category and keywords), `get_market` (asks, rules and tradability for one ticker) and `propose_trade`. Each `propose_trade` is validated against the governed proposal schema below, with errors returned to the model so it can correct itself, and the reply's proposals are submitted through `GovernorService.submit` with `proposalId` `chat-<message index>-<n>`. At most 5 proposals per message. `propose_trade` is withheld while the agent is paused, has no mandate, its account is disconnected, or all-agent trading is off.
+
+The model never places orders and never sees credentials other than its own key; venue reads use public Kalshi endpoints. A turn plans under the workspace lock, calls the model with the lock released, then saves the reply and submits under the lock, like a governor pass. One turn per agent runs at a time. The UI shows each proposal's governor decision and order status under the agent's reply, polling `GET /api/chat/proposals` (same-origin, no venue refresh) until the governor decides.
+
+Because the app now answers chat messages itself, an external worker must not also trade on the chat instructions from `GET /api/worker`, or each instruction would be traded twice.
 
 ## Public agent contract (version 2)
 

@@ -8,6 +8,7 @@ from vault import Vault
 from store import PostgresStore
 from governor.records import compact_for_json
 from governor_service import GovernorService
+from agent_chat import AgentChat
 ROOT=Path(__file__).parent;DATA=ROOT/'.data';DATA.mkdir(exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
 # DATABASE_URL moves the main workspace to Postgres; the presenter demo always stays in local JSON.
 STORE=PostgresStore(os.environ['DATABASE_URL']) if os.environ.get('DATABASE_URL') else None
@@ -29,6 +30,7 @@ def save(env,s):
     tmp.replace(p)
 WORKSPACE=Workspace(Vault(DATA),lambda s:save('main',s))
 GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if STORE else None)
+AGENT_CHAT=AgentChat(WORKSPACE,GOVERNOR)
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw):super().__init__(*a,directory=str(ROOT/'static'),**kw)
     def valid_host(self):
@@ -64,10 +66,25 @@ class Handler(SimpleHTTPRequestHandler):
                 if code==202:save('main',s)
             self.json(code,body)
         except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
-    def response(self,env,s,result=None):return {'state':WORKSPACE.public(s) if env=='main' else s,'agents':AGENTS,'result':result,'csrf':CSRF}
+    def response(self,env,s,result=None):return {'state':{**WORKSPACE.public(s),'chatProposals':AGENT_CHAT.proposal_views(s)} if env=='main' else s,'agents':AGENTS,'result':result,'csrf':CSRF}
+    def agent_chat(self,b):
+        # Three phases like a governor pass (agent_chat.py): the model and market reads run with the lock released.
+        with locked('main'):
+            s=read('main');job=AGENT_CHAT.begin(s,b)
+            try:save('main',s)
+            except Exception:AGENT_CHAT.release(job['agentId']);raise
+        result=AGENT_CHAT.run(job)
+        try:
+            with locked('main'):s=read('main');summary=AGENT_CHAT.finish(s,job,result);save('main',s)
+        finally:AGENT_CHAT.release(job['agentId'])  # finish releases too; this covers a failed read or save
+        self.json(200,self.response('main',s,summary))
     def do_GET(self):
         if not self.valid_host():return self.json(403,{'error':'Localhost access only.'})
         if self.path.startswith('/api/governor/'):return self.governor_get()
+        if self.path=='/api/chat/proposals':
+            # Light poll for the chat UI while proposals are being decided: no venue refresh, unlike /api/state.
+            if self.headers.get('Origin') and self.headers['Origin']!=f"http://{self.headers.get('Host')}":return self.json(403,{'error':'Cross-origin access denied.'})
+            with locked('main'):return self.json(200,{'chatProposals':AGENT_CHAT.proposal_views(read('main'))})
         if self.path.startswith('/api/worker'):
             if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
             s=read('main');return self.json(200,{'agents':WORKSPACE.public(s)['agentConfigs'],'instructions':s['chats']})
@@ -91,6 +108,7 @@ class Handler(SimpleHTTPRequestHandler):
             size=int(self.headers.get('Content-Length',0))
             if not 0<size<=100000:raise ValueError('Request too large or empty.')
             b=json.loads(self.rfile.read(size));env='main' if proposal else 'demo' if b.get('env')=='demo' else 'main'
+            if not proposal and env=='main' and b.get('action')=='chat':return self.agent_chat(b)
             with locked(env):
                 s=read(env)
                 if proposal:result=WORKSPACE.proposal(s,b)

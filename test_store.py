@@ -40,7 +40,7 @@ class StoreTests(unittest.TestCase):
   s=self.workspace()
   with self.store.session():
    self.w.refresh(s,s['accounts'][0]);self.proposal(s,10,'filled');self.proposal(s,40,'pending')
-   self.w.action(s,{'action':'chat','agent':s['agentConfigs'][0]['id'],'text':'Buy BTC'});self.store.save(s)
+   s['chats'][s['agentConfigs'][0]['id']]+=[{'role':'customer','text':'Buy BTC'},{'role':'agent','text':'Proposed.'}];self.store.save(s)
   self.assertEqual(self.reload(),s)
  def test_repeated_saves_do_not_duplicate_rows(self):
   s=self.workspace()
