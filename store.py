@@ -140,11 +140,17 @@ class PostgresStore:
         from psycopg.types.json import Jsonb
         j=lambda v:None if v is None else Jsonb(v)
         seen=getattr(self.local,'seen',None) or {};changed=lambda kind,x:seen.get((kind,x['id']))!=signature(x)
-        # Governor rows are write-once with no ON CONFLICT, so without a load they would all look new and collide.
-        if not seen.get('loaded') and any(s.get(k) for k in ('governorBatches','governorDecisions','governorForecasts','governorBreakerEvents')):
-            raise ValueError('Load the workspace in this session before saving governor records.')
         with self.connection() as conn,conn.transaction():
             cur=conn.cursor();run=lambda sql,rows:rows and cur.executemany(sql,rows)
+            # Without a load every governor row looks new. Saving fresh rows is fine, but one that already exists
+            # would collide (governor inserts have no ON CONFLICT), so refuse with a clear message first.
+            # Forecasts upsert and cannot collide. Runs in this transaction, under the workspace lock.
+            ids=([b['id'] for b in s.get('governorBatches',[])],[d['proposalId'] for d in s.get('governorDecisions',[])],
+                 [e['id'] for e in s.get('governorBreakerEvents',[])])
+            if not seen.get('loaded') and any(ids) and conn.execute('''SELECT EXISTS(SELECT 1 FROM governor_batches WHERE id=ANY(%s::text[]))
+                OR EXISTS(SELECT 1 FROM governor_decisions WHERE proposal_id=ANY(%s::text[]))
+                OR EXISTS(SELECT 1 FROM governor_breaker_events WHERE id=ANY(%s::text[])) AS clash''',ids).fetchone()['clash']:
+                raise ValueError('Load the workspace in this session before saving governor records that already exist.')
             settings=self.settings(s)
             if seen.get('settings')!=signature(settings):
                 cur.execute('UPDATE workspace_settings SET daily_cap=%s,automation=%s,daily_loss_cap=%s,market_cap=%s,exposure_cap=%s,slippage_max=%s,schema_version=%s,extra=%s',
