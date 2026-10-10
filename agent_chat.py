@@ -14,8 +14,9 @@ from decimal import Decimal
 import re
 import threading
 import time
+import uuid
 
-from adapters import VenueError
+from adapters import KalshiAdapter, VenueError, adapter
 from agent_llm import TIMEOUT_SECONDS, ModelError, connect, post_json
 from engine import event
 from governor import api
@@ -28,8 +29,10 @@ TURN_SECONDS = 120  # wall-clock budget for one chat turn, across all its model 
 MAX_PROPOSALS = 5  # proposals per chat turn
 # Dollar amounts the user typed: "$25", "$1,000.50", "25 dollars", "25 usd", "25 bucks".
 AMOUNT = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?|\b(\d+)(\.\d{1,2})?\s*(?:dollars|usd|bucks)\b", re.IGNORECASE)
-# Proposal ids made from chat turns: chat-<index of the user's message>-<n>, unique per agent.
-PROPOSAL_ID = re.compile(r"^chat-(\d+)-(\d+)$")
+# Proposal ids made from chat turns: chat-<index of the user's message>-<n>, unique per agent. The prefix is
+# reserved: the worker route refuses it, so a worker's proposal can never take a chat proposal's id.
+CHAT_PROPOSAL_PREFIX = "chat-"
+PROPOSAL_ID = re.compile(r"^" + re.escape(CHAT_PROPOSAL_PREFIX) + r"(\d+)-(\d+)$")
 # The reply older builds saved for every message; it is not useful context for the model.
 LEGACY_REPLY = "Instruction saved for the agentic integration."
 
@@ -38,9 +41,7 @@ BROWSE_TOOLS = [
      "description": "Find Kalshi market series (recurring market families, e.g. 'NFL Game' or 'Bitcoin price "
                     "Above/below') in a category, ranked by keyword matches. Use a series ticker with list_markets.",
      "parameters": {"type": "object", "required": ["category"], "properties": {
-         "category": {"type": "string", "enum": ["Crypto", "Sports", "Economics", "Financials", "Politics", "Elections",
-                                                 "Entertainment", "Climate and Weather", "Science and Technology",
-                                                 "Companies", "World", "Commodities", "Health"]},
+         "category": {"type": "string", "enum": list(KalshiAdapter.SERIES_CATEGORIES)},
          "keywords": {"type": "string", "description": "Words to match, e.g. 'nfl game' or 'bitcoin price'."}}}},
     {"name": "list_markets",
      "description": "Open markets in a series that can be bought now, with YES/NO asks in dollars per contract "
@@ -88,10 +89,19 @@ def stated_amounts(text):
     return [a for a in amounts if a > 0]
 
 
+def public_market_data(account):
+    """A venue adapter without credentials: the agent's tools only use public market reads, so chat works even
+    while the account is disconnected, and the model's turn never touches the account's keys."""
+    return adapter(account["venue"], {}, account["environment"], account.get("subaccount", 0))
+
+
 class AgentChat:
-    def __init__(self, workspace, governor, connect=connect, clock=utc_now):
+    def __init__(self, workspace, governor, connect=connect, clock=utc_now, market_data=None):
         self.workspace, self.governor, self.connect, self.clock = workspace, governor, connect, clock
-        self._busy = set()  # agents with a chat turn in progress; one at a time keeps replies in order
+        self.market_data = market_data or public_market_data
+        # Agent id -> the token of its chat turn in progress. One turn per agent keeps replies in order, and only
+        # the turn that holds the slot can release it.
+        self._busy = {}
         self._lock = threading.Lock()
 
     # Phase 1, under the workspace lock.
@@ -109,10 +119,11 @@ class AgentChat:
         if not agent.get("modelValidated") or not agent.get("modelCredentialRef"):
             raise ValueError("Validate this agent's model key before chatting.")
         account = next(a for a in s["accounts"] if a["id"] == agent["accountId"])
+        turn = str(uuid.uuid4())
         with self._lock:
             if agent["id"] in self._busy:
                 raise ValueError("Your agent is still working on your last message.")
-            self._busy.add(agent["id"])
+            self._busy[agent["id"]] = turn
         try:
             key = self.workspace.vault.get(agent["modelCredentialRef"])["api_key"]
             chat = s["chats"].setdefault(agent["id"], [])
@@ -126,16 +137,18 @@ class AgentChat:
                 amounts = stated_amounts(previous)
             chat.append({"role": "customer", "text": text.strip()})
         except Exception:
-            self.release(agent["id"])
+            self.release(agent["id"], turn)
             raise
-        return {"agentId": agent["id"], "messageIndex": len(chat) - 1, "text": text.strip(), "history": history,
-                "amounts": amounts,
+        return {"agentId": agent["id"], "turn": turn, "messageIndex": len(chat) - 1, "text": text.strip(),
+                "history": history, "amounts": amounts,
                 "agent": {k: agent.get(k) for k in ("name", "provider", "model", "personality", "mandate")},
                 "account": dict(account), "key": key, "blocked": self._trading_blocked(s, agent, account)}
 
-    def release(self, agent_id):
+    def release(self, agent_id, turn):
+        """Free the agent for its next message, only if `turn` still holds it (safe to call more than once)."""
         with self._lock:
-            self._busy.discard(agent_id)
+            if self._busy.get(agent_id) == turn:
+                del self._busy[agent_id]
 
     def _trading_blocked(self, s, agent, account):
         """Why this agent cannot propose trades right now, or None."""
@@ -165,7 +178,7 @@ class AgentChat:
             return post_json(url, headers, body, timeout=min(TIMEOUT_SECONDS, remaining))
 
         try:
-            venue = self.workspace.venue(job["account"])
+            venue = self.market_data(job["account"])
             tools = BROWSE_TOOLS + ([] if job["blocked"] else [PROPOSE_TOOL])
             conversation = self.connect(job["agent"]["provider"], job["agent"]["model"], job["key"],
                                         self._system_prompt(job), tools, job["history"] + [("user", job["text"])],
@@ -183,8 +196,8 @@ class AgentChat:
                     "proposals": proposals, "error": None}
         except ModelError as e:
             return {"reply": "", "proposals": proposals, "error": str(e)}
-        except (VenueError, ValueError, KeyError):
-            return {"reply": "", "proposals": proposals, "error": "The agent could not reach its Kalshi account."}
+        except VenueError:  # only creating the market-data adapter; tool calls report venue errors to the model
+            return {"reply": "", "proposals": proposals, "error": "The agent could not reach Kalshi."}
         except Exception as e:  # never let a provider or tool fault escape the request
             return {"reply": "", "proposals": proposals, "error": f"The agent hit an unexpected error ({type(e).__name__})."}
 
@@ -238,6 +251,8 @@ class AgentChat:
                 return self._propose(job, venue, markets, proposals, args)
         except VenueError as e:
             return {"error": str(e)}
+        except Exception as e:  # e.g. an unexpected Kalshi payload: report it, and keep the turn and its proposals
+            return {"error": f"{call.name} failed ({type(e).__name__}). Try another market or series."}
         return {"error": f"Unknown tool {call.name}."}
 
     def _market(self, venue, markets, market_id):
@@ -263,7 +278,7 @@ class AgentChat:
             return {"accepted": False, "error": f"Nobody is selling {side.upper()} contracts in this market right now."}
         if any(p["marketId"] == market["marketId"] and p["side"] == side for p in proposals):
             return {"accepted": False, "error": "You already proposed this market and side in this message."}
-        payload = {"schemaVersion": api.SCHEMA_VERSION, "proposalId": f"chat-{job['messageIndex']}-{len(proposals)}",
+        payload = {"schemaVersion": api.SCHEMA_VERSION, "proposalId": f"{CHAT_PROPOSAL_PREFIX}{job['messageIndex']}-{len(proposals)}",
                    "agentId": job["agentId"], "marketId": market["marketId"], "side": side,
                    "estimatedYesProbability": args.get("estimatedYesProbability"),
                    "maxBudgetUsd": args.get("maxBudgetUsd"), "reasoning": args.get("reasoning")}
@@ -317,7 +332,7 @@ class AgentChat:
                       "PROPOSED")
             return {"messageIndex": job["messageIndex"], "proposals": submitted}
         finally:
-            self.release(job["agentId"])
+            self.release(job["agentId"], job["turn"])
 
     def proposal_views(self, s):
         """Governor status of every chat proposal, per agent, for the chat UI."""

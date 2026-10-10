@@ -10,7 +10,7 @@ from urllib.error import HTTPError
 
 import agent_chat
 import agent_llm
-from adapters import VenueError
+from adapters import KalshiAdapter, VenueError
 from agent_chat import LEGACY_REPLY, MAX_PROPOSALS, AgentChat
 from agent_llm import ModelError, ModelTurn, ToolCall
 from governor_service import GovernorService
@@ -87,6 +87,9 @@ class ChatTest(unittest.TestCase):
         self.workspace.venue = lambda account: self.venue
         self.governor = GovernorService(self.workspace)
         self.workspace.refresh(self.s, self.s["accounts"][0])
+        market_data = patch("agent_chat.public_market_data", lambda account: self.venue)  # the tools' public reads
+        market_data.start()
+        self.addCleanup(market_data.stop)
 
     def chat(self, model, text="Put $20 on Cleveland to win", agent="agent"):
         service = AgentChat(self.workspace, self.governor, connect=model)
@@ -202,12 +205,43 @@ class GuardTests(ChatTest):
         self.chat(ScriptedModel(ModelTurn("Back.")))  # not stuck as busy
         self.assertEqual(self.s["chats"]["agent"][-1]["text"], "Back.")
 
-    def test_an_unexpected_tool_failure_is_contained(self):
-        self.venue.find_series = lambda *a: 1 / 0
-        model = ScriptedModel(calls(("find_series", {"category": "Sports"})))
+    def test_an_unexpected_tool_failure_goes_back_to_the_model(self):
+        self.venue.find_series = lambda *a: 1 / 0  # e.g. a Kalshi payload the adapter cannot parse
+        model = ScriptedModel(calls(propose(), ("find_series", {"category": "Sports"})), ModelTurn("Proposed Cleveland."))
+        self.chat(model)
+        self.assertEqual(model.results[0][1], {"error": "find_series failed (ZeroDivisionError). Try another market or series."})
+        self.assertEqual(self.s["chats"]["agent"][1]["text"], "Proposed Cleveland.")
+        self.assertEqual(self.s["governorRequests"][0]["proposalId"], "chat-0-0")
+
+    def test_a_provider_error_after_a_proposal_keeps_the_proposal(self):
+        model = ScriptedModel(calls(propose()), ModelError("The model provider is rate limiting or out of credit."))
         self.chat(model)
         self.assertEqual(self.s["chats"]["agent"][1]["text"],
-                         "I couldn't respond: The agent hit an unexpected error (ZeroDivisionError).")
+                         "I couldn't respond: The model provider is rate limiting or out of credit. "
+                         "I had already sent 1 proposal to the governor; see below.")
+        self.assertEqual(self.s["governorRequests"][0]["status"], "queued")
+
+    def test_a_disconnected_account_can_still_answer_questions(self):
+        account = self.s["accounts"][0]
+        account.update(status="disconnected", stale=True)
+        account.pop("credentialRef")  # as Workspace's account-disconnect leaves it
+        model = ScriptedModel(calls(("list_markets", {"seriesTicker": "KXNFLGAME"})), ModelTurn("Cleveland is 52 cents."))
+        self.chat(model, text="What does Cleveland cost?")
+        self.assertNotIn("propose_trade", model.opened["tools"])
+        self.assertIn("not connected", model.opened["system"])
+        self.assertEqual(model.results[0][0]["markets"][0]["marketId"], MARKET)
+        self.assertEqual(self.s["chats"]["agent"][1]["text"], "Cleveland is 52 cents.")
+
+    def test_a_late_release_cannot_free_the_next_turn(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(ModelTurn("ok")))
+        first = service.begin(self.s, {"agent": "agent", "text": "first"})
+        service.finish(self.s, first, service.run(first))
+        second = service.begin(self.s, {"agent": "agent", "text": "second"})
+        service.release("agent", first["turn"])  # the server's outer release for the first turn, arriving late
+        with self.assertRaisesRegex(ValueError, "still working"):
+            service.begin(self.s, {"agent": "agent", "text": "third"})
+        service.release("agent", second["turn"])
+        service.begin(self.s, {"agent": "agent", "text": "third"})
 
     def test_one_turn_at_a_time_per_agent(self):
         service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(ModelTurn("ok")))
@@ -400,6 +434,26 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(body["contents"][1]["parts"][0], call_part)
         self.assertEqual(body["contents"][2]["parts"][0]["functionResponse"], {"name": "get_market", "response": {"title": "T"}})
 
+    def test_openai_keeps_only_the_calls_it_answers(self):
+        sent, post = self.recorder(
+            {"choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "get_market", "arguments": "{}"}},
+                {"id": "c2", "type": "custom", "custom": {"name": "x", "input": ""}}]}}]},
+            {"choices": [{"message": {"role": "assistant", "content": "Done."}}]})
+        conversation = agent_llm.connect("openai", "gpt-5", "key", "system", self.TOOLS, [("user", "a")], post=post)
+        turn = conversation.step()
+        self.assertEqual([c.id for c in turn.tool_calls], ["c1"])
+        conversation.add_tool_results([(turn.tool_calls[0], {})])
+        conversation.step()
+        assistant = sent[1][2]["messages"][2]
+        self.assertEqual([c["id"] for c in assistant["tool_calls"]], ["c1"])  # every kept call has a tool response
+
+    def test_malformed_tool_calls_are_model_errors(self):
+        sent, post = self.recorder({"content": [{"type": "tool_use", "name": "get_market"}]})  # no id
+        conversation = agent_llm.connect("anthropic", "m", "key", "system", self.TOOLS, [("user", "a")], post=post)
+        with self.assertRaisesRegex(ModelError, "unreadable"):
+            conversation.step()
+
     def test_gemini_without_candidates_is_a_model_error(self):
         sent, post = self.recorder({"promptFeedback": {"blockReason": "SAFETY"}})
         conversation = agent_llm.connect("google", "gemini-3.5-flash", "key", "system", [], [("user", "a")], post=post)
@@ -414,6 +468,23 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(str(caught.exception), "The model provider rejected the API key.")
         with self.assertRaisesRegex(ModelError, "not supported"):
             agent_llm.connect("other", "m", "k", "s", [], [])
+
+
+class AdapterTests(unittest.TestCase):
+    """Market discovery tolerates nulls and missing fields in Kalshi payloads."""
+
+    def test_null_titles_missing_tickers_and_empty_asks(self):
+        venue = KalshiAdapter({}, "sandbox")
+        responses = {
+            "/series": {"series": [{"ticker": "KXNFLGAME", "title": None, "tags": None}, {"title": "no ticker"}, "junk"]},
+            "/events": {"events": [{"title": None, "markets": [
+                {"ticker": "KX-A", "status": "active", "yes_ask_dollars": "", "no_ask_dollars": "0.40", "title": None},
+                {"ticker": "KX-B", "status": "active", "yes_ask_dollars": None, "no_ask_dollars": None}]}]},
+        }
+        venue.request = lambda method, path, public=False: responses[path.split("?")[0]]
+        self.assertEqual(venue.find_series("Sports", "nfl"), [{"seriesTicker": "KXNFLGAME", "title": "", "frequency": None}])
+        self.assertEqual(venue.list_markets("KXNFLGAME"), [{"marketId": "KX-A", "event": "", "outcome": "", "yesAsk": None,
+                                                            "noAsk": 0.4, "closeTime": None, "volume": 0.0}])
 
 
 class HttpTests(unittest.TestCase):
@@ -432,7 +503,7 @@ class HttpTests(unittest.TestCase):
         workspace.refresh(s, s["accounts"][0])
         Path(self.tmp.name, "main.json").write_text(json.dumps(s))
         governor = GovernorService(workspace)
-        self.chat = AgentChat(workspace, governor)
+        self.chat = AgentChat(workspace, governor, market_data=lambda account: self.venue)
         patches = [patch.object(server, "DATA", Path(self.tmp.name)), patch.object(server, "STORE", None),
                    patch.object(server, "WORKSPACE", workspace), patch.object(server, "GOVERNOR", governor),
                    patch.object(server, "AGENT_CHAT", self.chat)]
@@ -445,10 +516,10 @@ class HttpTests(unittest.TestCase):
         self.addCleanup(self.httpd.shutdown)
         self.addCleanup(self.tmp.cleanup)
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, token=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.httpd.server_address[1], timeout=5)
         headers = {"Host": "localhost", "Content-Type": "application/json", "X-CSRF-Token": self.server.CSRF,
-                   "Cookie": f"governtrade={self.server.SESSION}"}
+                   "Cookie": f"governtrade={self.server.SESSION}", **({"Authorization": f"Bearer {token}"} if token else {})}
         conn.request(method, path, body=None if body is None else json.dumps(body), headers=headers)
         response = conn.getresponse()
         data = json.loads(response.read() or b"{}")
@@ -475,6 +546,19 @@ class HttpTests(unittest.TestCase):
         code, light = self.call("GET", "/api/chat/proposals")
         self.assertEqual(light["chatProposals"]["agent"][0]["proposalId"], "chat-0-0")
         self.assertNotIn("sk-test-secret", Path(self.tmp.name, "main.json").read_text())
+
+    def test_workers_get_no_chat_instructions_and_cannot_use_chat_ids(self):
+        with patch.dict("os.environ", {"GOVERNTRADE_AGENT_TOKEN": "worker-token"}):
+            self.chat.connect = ScriptedModel(ModelTurn("Hi."))
+            self.call("POST", "/api/action", {"action": "chat", "agent": "agent", "text": "Put $20 on Cleveland"})
+            code, body = self.call("GET", "/api/worker", token="worker-token")
+            self.assertEqual((code, body["instructions"], body["chatHandledBy"]), (200, {}, "app"))
+            payload = {"schemaVersion": 1, "proposalId": "chat-0-0", "agentId": "agent", "marketId": MARKET, "side": "yes",
+                       "estimatedYesProbability": 0.6, "maxBudgetUsd": 5, "reasoning": "r"}
+            code, body = self.call("POST", "/api/governor/proposals", payload, token="worker-token")
+            self.assertEqual((code, body["errors"][0]["field"]), (400, "proposalId"))
+            code, body = self.call("POST", "/api/governor/proposals", {**payload, "proposalId": "w-1"}, token="worker-token")
+            self.assertEqual(code, 202)
 
     def test_bad_chat_requests_are_400s(self):
         self.chat.connect = ScriptedModel()

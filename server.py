@@ -8,7 +8,7 @@ from vault import Vault
 from store import PostgresStore
 from governor.records import compact_for_json
 from governor_service import GovernorService
-from agent_chat import AgentChat
+from agent_chat import AgentChat,CHAT_PROPOSAL_PREFIX
 import hosting
 ROOT=Path(__file__).parent;DATA=Path(os.environ.get('GOVERNTRADE_DATA_DIR',str(ROOT/'.data')));DATA.mkdir(parents=True,exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
 # DATABASE_URL moves the main workspace to Postgres; the presenter demo always stays in local JSON.
@@ -84,6 +84,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not 0<size<=100000:raise ValueError('Request too large or empty.')
             payload=json.loads(self.rfile.read(size))
         except ValueError:return self.json(400,{'error':'Invalid JSON.','errors':[{'field':'','error':'body must be one JSON object of at most 100 kB'}],'schema':'/api/governor/schema'})
+        if isinstance(payload,dict) and str(payload.get('proposalId','')).startswith(CHAT_PROPOSAL_PREFIX):
+            return self.json(400,{'error':'Invalid proposal.','errors':[{'field':'proposalId','error':f'must not start with "{CHAT_PROPOSAL_PREFIX}", which is reserved for the in-app agent chat'}],'schema':'/api/governor/schema'})
         try:
             with locked('main'):
                 s=read('main');code,body=GOVERNOR.submit(s,payload)
@@ -96,11 +98,11 @@ class Handler(SimpleHTTPRequestHandler):
         with locked('main'):
             s=read('main');job=AGENT_CHAT.begin(s,b)
             try:save('main',s)
-            except Exception:AGENT_CHAT.release(job['agentId']);raise
+            except Exception:AGENT_CHAT.release(job['agentId'],job['turn']);raise
         result=AGENT_CHAT.run(job)
         try:
             with locked('main'):s=read('main');summary=AGENT_CHAT.finish(s,job,result);save('main',s)
-        finally:AGENT_CHAT.release(job['agentId'])  # finish releases too; this covers a failed read or save
+        finally:AGENT_CHAT.release(job['agentId'],job['turn'])  # covers a failed read or save; a no-op once finish released it
         self.json(200,self.response('main',s,summary))
     def do_GET(self):
         if not self.entry_access():return
@@ -111,7 +113,9 @@ class Handler(SimpleHTTPRequestHandler):
             with locked('main'):return self.json(200,{'chatProposals':AGENT_CHAT.proposal_views(read('main'))})
         if self.path.startswith('/api/worker'):
             if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
-            s=read('main');return self.json(200,{'agents':WORKSPACE.public(s)['agentConfigs'],'instructions':s['chats']})
+            # The in-app agent answers chat messages itself (agent_chat.py), so they are no longer offered to workers
+            # as instructions: a worker trading on them would place every trade twice.
+            s=read('main');return self.json(200,{'agents':WORKSPACE.public(s)['agentConfigs'],'instructions':{},'chatHandledBy':'app'})
         if self.path.startswith('/api/state'):
             if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             env='demo' if 'demo' in self.path else 'main'

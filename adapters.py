@@ -84,16 +84,16 @@ class KalshiAdapter(VenueAdapter):
     def find_series(self,category,keywords='',limit=20):
         if category not in self.SERIES_CATEGORIES:raise VenueError('Unknown Kalshi category.')
         words=[w for w in str(keywords).lower().split() if w]
-        rows=self.request('GET','/series?'+urlencode({'category':category}),public=True).get('series') or []
+        rows=[r for r in self.request('GET','/series?'+urlencode({'category':category}),public=True).get('series') or [] if isinstance(r,dict) and isinstance(r.get('ticker'),str)]
         # Rank by keyword matches in the ticker, title or tags (a whole word counts double), then shorter titles,
         # which are the broader series (e.g. "NFL Game" before "NFL Game to Tie"). No keywords: Kalshi's order.
         def score(r):
-            text=' '.join([r.get('ticker',''),r.get('title',''),*(t for t in r.get('tags') or [] if isinstance(t,str))]).lower()
+            text=' '.join([r['ticker'],str(r.get('title') or ''),*(t for t in r.get('tags') or [] if isinstance(t,str))]).lower()
             tokens=set(text.replace('/',' ').replace('-',' ').split())
             return sum(2 if w in tokens else 1 if w in text else 0 for w in words)
-        scored=[(score(r),len(r.get('title','')),i,r) for i,r in enumerate(rows)]
+        scored=[(score(r),len(str(r.get('title') or '')),i,r) for i,r in enumerate(rows)]
         found=[r for points,length,i,r in sorted(scored,key=lambda x:(-x[0],x[1] if words else 0,x[2])) if points or not words]
-        return [{'seriesTicker':r['ticker'],'title':r.get('title',''),'frequency':r.get('frequency')} for r in found[:limit]]
+        return [{'seriesTicker':r['ticker'],'title':str(r.get('title') or ''),'frequency':r.get('frequency')} for r in found[:limit]]
     def list_markets(self,series_ticker,limit=25):
         # Open markets in a series that have an ask on at least one side, soonest close first.
         events=self.request('GET','/events?'+urlencode({'status':'open','with_nested_markets':'true','series_ticker':series_ticker,'limit':100}),public=True).get('events') or []
@@ -102,7 +102,7 @@ class KalshiAdapter(VenueAdapter):
             for m in e.get('markets') or []:
                 yes,no=float(m.get('yes_ask_dollars') or 0),float(m.get('no_ask_dollars') or 0)
                 if m.get('status')=='active' and (0<yes<1 or 0<no<1):
-                    rows.append({'marketId':m['ticker'],'event':e.get('title',''),'outcome':m.get('yes_sub_title') or m.get('title',''),'yesAsk':yes if 0<yes<1 else None,'noAsk':no if 0<no<1 else None,'closeTime':m.get('close_time'),'volume':float(m.get('volume_fp') or 0)})
+                    rows.append({'marketId':m['ticker'],'event':str(e.get('title') or ''),'outcome':str(m.get('yes_sub_title') or m.get('title') or ''),'yesAsk':yes if 0<yes<1 else None,'noAsk':no if 0<no<1 else None,'closeTime':m.get('close_time'),'volume':float(m.get('volume_fp') or 0)})
         rows.sort(key=lambda r:(r['closeTime'] or '',-r['volume']))
         return rows[:limit]
     def market_summary(self,market_id):

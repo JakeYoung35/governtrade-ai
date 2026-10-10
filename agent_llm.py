@@ -91,9 +91,12 @@ class AnthropicConversation:
         content = data.get("content") if isinstance(data, dict) else None
         if not isinstance(content, list):
             raise ModelError("The model provider sent an unreadable response.")
+        try:
+            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+            calls = tuple(ToolCall(b["id"], b["name"], _arguments(b.get("input"))) for b in content if b.get("type") == "tool_use")
+        except (KeyError, TypeError, AttributeError):
+            raise ModelError("The model provider sent an unreadable response.") from None
         self.messages.append({"role": "assistant", "content": content})
-        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-        calls = tuple(ToolCall(b["id"], b["name"], _arguments(b.get("input"))) for b in content if b.get("type") == "tool_use")
         return ModelTurn(text.strip(), calls)
 
     def add_tool_results(self, results):
@@ -117,11 +120,15 @@ class OpenAIConversation:
         data = self.post(self.URL, {"Authorization": "Bearer " + self.key}, body)
         try:
             message = data["choices"][0]["message"]
-        except (KeyError, IndexError, TypeError):
+            # Only function calls can be answered; keeping any other kind in the history would leave a call without
+            # a tool response, which OpenAI rejects on the next request.
+            raw_calls = [c for c in message.get("tool_calls") or [] if c.get("type", "function") == "function"]
+            calls = tuple(ToolCall(c["id"], c["function"]["name"], _arguments(c["function"].get("arguments")))
+                          for c in raw_calls)
+        except (KeyError, IndexError, TypeError, AttributeError):
             raise ModelError("The model provider sent an unreadable response.") from None
-        self.messages.append({k: v for k, v in message.items() if k in ("role", "content", "tool_calls")})
-        calls = tuple(ToolCall(c["id"], c["function"]["name"], _arguments(c["function"].get("arguments")))
-                      for c in message.get("tool_calls") or [] if c.get("type", "function") == "function")
+        self.messages.append({"role": "assistant", "content": message.get("content"),
+                              **({"tool_calls": raw_calls} if raw_calls else {})})
         return ModelTurn((message.get("content") or "").strip(), calls)
 
     def add_tool_results(self, results):
@@ -170,11 +177,14 @@ class GeminiConversation:
         self.contents.append(content)  # sent back unchanged, including any thought signatures
         text = "".join(p.get("text", "") for p in content["parts"] if not p.get("thought"))
         calls = []
-        for part in content["parts"]:
-            if "functionCall" in part:
-                self.calls += 1  # Gemini calls carry no id; responses are matched by name and order
-                calls.append(ToolCall(f"gemini-{self.calls}", part["functionCall"]["name"],
-                                      _arguments(part["functionCall"].get("args"))))
+        try:
+            for part in content["parts"]:
+                if "functionCall" in part:
+                    self.calls += 1  # Gemini calls carry no id; responses are matched by name and order
+                    calls.append(ToolCall(f"gemini-{self.calls}", part["functionCall"]["name"],
+                                          _arguments(part["functionCall"].get("args"))))
+        except (KeyError, TypeError, AttributeError):
+            raise ModelError("The model provider sent an unreadable response.") from None
         return ModelTurn(text.strip(), tuple(calls))
 
     def add_tool_results(self, results):

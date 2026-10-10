@@ -8,7 +8,9 @@ When the user sends a chat message, `agent_chat.py` calls the agent's configured
 
 The model never places orders and never sees credentials other than its own key; venue reads use public Kalshi endpoints. A turn plans under the workspace lock, calls the model with the lock released, then saves the reply and submits under the lock, like a governor pass. One turn per agent runs at a time. The UI shows each proposal's governor decision and order status under the agent's reply, polling `GET /api/chat/proposals` (same-origin, no venue refresh) until the governor decides.
 
-Because the app now answers chat messages itself, an external worker must not also trade on the chat instructions from `GET /api/worker`, or each instruction would be traded twice.
+The amounts the user types are enforced in code: a proposal above the largest dollar amount in the message, or proposals together above their sum, are refused, and with no amount (in the message, or in the previous one when the user is answering the agent's question) no proposal is accepted. A turn has a 120-second budget across its model calls. Market tools use public Kalshi reads without the account's credentials, so the agent can still answer questions while its account is disconnected.
+
+Because the app answers chat messages itself, `GET /api/worker` no longer returns them: `instructions` is always `{}` and `chatHandledBy` is `"app"`, so a worker built for the old contract cannot trade each message a second time. Proposal ids starting with `chat-` are reserved for chat proposals; the worker route rejects them with a `proposalId` field error.
 
 ## Public agent contract (version 2)
 
@@ -42,7 +44,7 @@ Internal stored configs additionally contain `modelCredentialRef`, an opaque vau
 
 ## Worker HTTP boundary
 
-Set `GOVERNTRADE_AGENT_TOKEN` to a random secret in both server and trusted worker environments. Use `Authorization: Bearer ...`. `GET /api/worker` returns public configurations and saved chat instructions. Consume only newly observed customer messages and persist your own cursor; do not repeatedly trade on historical messages. This token does not implement per-agent isolation; the trusted worker can submit for configured agents. Host is localhost only.
+Set `GOVERNTRADE_AGENT_TOKEN` to a random secret in both server and trusted worker environments. Use `Authorization: Bearer ...`. `GET /api/worker` returns public agent configurations. Chat messages are answered by the in-app agent and are not returned (`instructions` is `{}`). This token does not implement per-agent isolation; the trusted worker can submit for configured agents. Host is localhost only.
 
 ### Governed proposal contract (schema version 1)
 
