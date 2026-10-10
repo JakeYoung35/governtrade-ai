@@ -78,7 +78,7 @@ class KalshiAdapter(VenueAdapter):
         fee_type=event.get('fee_type_override') or series['fee_type'];multiplier=event.get('fee_multiplier_override')
         multiplier=float(series['fee_multiplier'] if multiplier is None else multiplier)
         price=float(m.get('yes_ask_dollars' if direction=='Yes' else 'no_ask_dollars',0))
-        return {'id':market_id,'name':m.get('title',market_id),'agent':category,'instrument':'prediction','venue':self.venue,'price':price,'quoteAt':now(),'closeAt':m.get('close_time',now()),'slippage':0,'open':m.get('status')=='active','direction':direction,'executionReady':fee_type.startswith('quadratic') and math.isfinite(multiplier) and 0<=multiplier<=100 and 0<price<1,'feeMultiplier':multiplier,'executionNote':'Only binary quadratic-fee markets with a valid ask are supported.'}
+        return {'id':market_id,'name':m.get('title',market_id),'agent':category,'instrument':'prediction','venue':self.venue,'price':price,'quoteAt':now(),'closeAt':m.get('close_time',now()),'slippage':0,'open':m.get('status')=='active','direction':direction,'executionReady':m.get('market_type')=='binary' and float(m.get('notional_value_dollars',1))==1 and fee_type.startswith('quadratic') and math.isfinite(multiplier) and 0<=multiplier<=100 and 0<price<1,'feeMultiplier':multiplier,'executionNote':'Only binary quadratic-fee markets with a valid ask are supported.'}
     def get_balance_positions(self):
         b=self.request('GET','/portfolio/balance');positions=self.pages('/portfolio/positions?limit=100','market_positions')
         cash=float(b['balance_dollars']) if 'balance_dollars' in b else b['balance']/100;value=b['portfolio_value']/100
@@ -162,7 +162,7 @@ class CoinbaseAdapter(VenueAdapter):
         if self.environment=='sandbox':
             return self.request('POST','/orders',{'client_order_id':order['id'],'product_id':m['id'],'side':'BUY','order_configuration':{'market_market_ioc':{'quote_size':str(budget)}}})
         summary=self.request('GET','/transaction_summary?product_type=SPOT');rate=Decimal(summary['fee_tier']['taker_fee_rate'])
-        if not Decimal('0')<=rate<=Decimal('.1') or summary.get('has_cost_plus_commission') or summary.get('goods_and_services_tax',{}).get('rate') not in (None,'','0','0.0'):
+        if not Decimal('0')<=rate<=Decimal('.1') or summary.get('has_cost_plus_commission') or Decimal(summary.get('goods_and_services_tax',{}).get('rate') or '0')!=0:
             raise VenueError('Unsupported Coinbase fee or tax schedule; trade not submitted.')
         # Conservative commission reserve: at least 1%, plus $0.02 rounding reserve.
         fee_rate=max(rate,Decimal('.01'));quantity=((budget-Decimal('.02'))/(price*(1+fee_rate))/inc).to_integral_value(rounding=ROUND_DOWN)*inc
