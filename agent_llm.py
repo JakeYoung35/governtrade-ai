@@ -43,6 +43,20 @@ def post_json(url, headers, body, timeout=TIMEOUT_SECONDS):
     except HTTPError as e:
         reason = {400: "rejected the request", 401: "rejected the API key", 403: "denied access to this model",
                   404: "does not offer this model", 429: "is rate limiting or out of credit"}.get(e.code, f"returned HTTP {e.code}")
+        if e.code in (400, 429):
+            # Classify billing failures without echoing arbitrary provider text into saved chats.
+            try:
+                payload = json.loads(e.read(8192))
+                error = payload.get("error", {}) if isinstance(payload, dict) else {}
+                message = str(error.get("message", "")).lower() if isinstance(error, dict) else ""
+                code = error.get("code") if isinstance(error, dict) else None
+                if code == "insufficient_quota" or any(phrase in message for phrase in (
+                        "credit balance is too low", "insufficient credit", "out of credit", "exhausted your credits")):
+                    reason = "is out of API credit or has reached its spending limit; check your provider billing settings"
+                elif "billing" in message:
+                    reason = "reported a billing issue; check your provider billing settings"
+            except (OSError, ValueError, TypeError):
+                pass  # Empty, malformed or unreadable error bodies retain the HTTP-status fallback.
         raise ModelError(f"The model provider {reason}.") from None
     except (URLError, TimeoutError, OSError, ValueError):
         raise ModelError("The model provider could not be reached or sent an unreadable response.") from None

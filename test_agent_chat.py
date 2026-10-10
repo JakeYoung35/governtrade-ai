@@ -593,6 +593,30 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelError, "not supported"):
             agent_llm.connect("other", "m", "k", "s", [], [])
 
+    def test_credit_and_billing_errors_are_actionable_without_echoing_provider_text(self):
+        import io
+        for status, payload, expected in [
+            (400, {"error": {"message": "Your credit balance is too low to access the Anthropic API. sk-secret"}}, "out of API credit"),
+            (429, {"error": {"code": "insufficient_quota", "message": "sk-secret"}}, "spending limit"),
+            (400, {"error": {"message": "Check your billing details. sk-secret"}}, "billing issue"),
+            (400, {"error": {"message": "Invalid request: sk-secret"}}, "rejected the request"),
+            (429, {"error": {"message": "Too many requests"}}, "rate limiting"),
+        ]:
+            with self.subTest(status=status, payload=payload):
+                error = HTTPError("https://api.example", status, "error", {}, io.BytesIO(json.dumps(payload).encode()))
+                with patch("agent_llm.urlopen", side_effect=error), self.assertRaises(ModelError) as caught:
+                    agent_llm.post_json("https://api.example", {"x-api-key": "sk-secret"}, {})
+                self.assertIn(expected, str(caught.exception))
+                self.assertNotIn("sk-secret", str(caught.exception))
+
+    def test_unreadable_error_bodies_keep_status_fallback(self):
+        import io
+        for body in (b"", b"not json", b"[]", b'{"error":null}', b"x" * 9000):
+            with self.subTest(body=body[:30]):
+                error = HTTPError("https://api.example", 400, "error", {}, io.BytesIO(body))
+                with patch("agent_llm.urlopen", side_effect=error), self.assertRaisesRegex(ModelError, "rejected the request"):
+                    agent_llm.post_json("https://api.example", {}, {})
+
 
 class AdapterTests(unittest.TestCase):
     """Market discovery tolerates nulls and missing fields in Kalshi payloads."""
