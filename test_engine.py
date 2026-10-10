@@ -128,6 +128,13 @@ class FollowupTests(MainTests):
   self.w.action(self.s,{'action':'account-disconnect','id':'other'})
   public={a['id']:a for a in self.w.public(self.s)['accounts']}
   self.assertTrue(public['account']['hasCredentials']);self.assertFalse(public['other']['hasCredentials']);self.assertNotIn('credentialRef',public['account'])
+ def test_disconnected_account_requires_new_credentials(self):
+  self.w.action(self.s,{'action':'account-disconnect','id':'account'})
+  with self.assertRaisesRegex(ValueError,'Kalshi credentials are required'):self.w.action(self.s,{'action':'account-save','id':'account','connectionType':'kalshi-demo','name':'Kalshi'})
+  with self.assertRaisesRegex(ValueError,'no saved credentials'):self.w.action(self.s,{'action':'account-test','id':'account'})
+  self.assertEqual(self.g['status'],'paused')
+  with self.assertRaisesRegex(ValueError,'Reconnect'):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
+  self.assertEqual(self.g['status'],'paused')
 
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
