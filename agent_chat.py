@@ -35,10 +35,12 @@ SCALE = {"k": 1000, "thousand": 1000, "m": 1000000, "million": 1000000}
 # count: after a staking verb ("put $10"), or followed by what they are placed on ("$10 on", "$10 worth").
 STAKE_VERBS = {"put", "bet", "spend", "risk", "wager", "use", "stake", "invest", "buy", "place", "allocate", "spread",
                "commit", "add"}
-STAKE_AFTER = {"on", "worth", "in", "into", "for", "each", "across", "of", "total"}
+STAKE_AFTER = {"on", "worth"}
 # An amount right after one of these words, or followed by "or above", is a price level, never a stake.
 LEVEL_BEFORE = {"above", "below", "over", "under", "at", "than", "reach", "reaches", "hit", "hits", "between", "to",
-                "from", "near", "around", "exceed", "exceeds", "past", "beyond", "tops"}
+                "from", "near", "around", "exceed", "exceeds", "past", "beyond", "tops",
+                "hitting", "reaching", "cross", "crosses", "crossing", "top", "topping", "exceeding",
+                "worth", "is", "equals"}
 LEVEL_AFTER = re.compile(r"^\s*(?:or|and)\s+(?:above|more|higher|over|below|less|lower|under|up)\b", re.IGNORECASE)
 # Proposal ids made from chat turns: chat-<index of the user's message>-<n>, unique per agent. The prefix is
 # reserved: the worker route refuses it, so a worker's proposal can never take a chat proposal's id.
@@ -113,6 +115,10 @@ def stated_amounts(text):
         if amount <= 0 or level:
             continue
         (stakes if set(before) & STAKE_VERBS or (after and after[0] in STAKE_AFTER) else others).append(amount)
+    # Widely different candidate stakes can still contain an unrecognized price target.
+    # Keep only the smallest budget; larger allocations need a separate clarified instruction.
+    if len(stakes) > 1 and max(stakes) >= 10 * min(stakes):
+        return [min(stakes)]
     return stakes or ([min(others)] if others else [])
 
 

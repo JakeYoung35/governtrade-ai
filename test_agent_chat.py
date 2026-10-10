@@ -295,6 +295,42 @@ class LimitTests(ChatTest):
             with self.subTest(text=text):
                 self.assertEqual([str(a) for a in agent_chat.stated_amounts(text)], expected)
 
+    def test_price_targets_and_ambiguous_stakes_remain_conservative(self):
+        cases = {
+            "Put $10 on BTC hitting $120k in October": ["10"],
+            "Will Bitcoin be worth $100,000 in December? Put $5 on yes": ["5"],
+            "Bet $5 that gas is $4 for the week": ["5"],
+            "Put $10 each on the Eagles and the Chiefs": ["10"],
+            "Bitcoin closing under $90,000, $10 please": [],
+            "Bitcoin hitting $120k in October": [],
+            "Will Bitcoin be worth $100,000 in December?": [],
+            "Gas is $4 for the week": [],
+            "Put $10 on BTC reaching $120k": ["10"],
+            "Put $10 on BTC crossing $120k": ["10"],
+            "Put $10 on BTC topping $120k": ["10"],
+            "Put $10 on BTC exceeding $120k": ["10"],
+            "Put $5 on A and $50 on B": ["5"],
+            "Put $5 on A and $10 on B": ["5", "10"],
+            "Buy $10 worth of Cleveland": ["10"],
+            "Buy Cleveland for $20": ["20"],
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual([str(a) for a in agent_chat.stated_amounts(text)], expected)
+
+    def test_gas_price_cannot_increase_the_total_budget(self):
+        self.venue.books["KX-2"] = ("0.40", "0.62", "100")
+        model = ScriptedModel(calls(propose(maxBudgetUsd=5), propose(marketId="KX-2", maxBudgetUsd=4)), ModelTurn("Done."))
+        self.chat(model, text="Bet $5 that gas is $4 for the week")
+        self.assertTrue(model.results[0][0]["accepted"])
+        self.assertIn("Together these proposals exceed the $5", model.results[0][1]["error"])
+
+    def test_hitting_price_cannot_raise_the_proposal_budget(self):
+        model = ScriptedModel(calls(propose(maxBudgetUsd=50)), ModelTurn("Done."))
+        self.chat(model, text="Put $10 on BTC hitting $120k in October")
+        self.assertIn("above the $10 the user gave", model.results[0][0]["error"])
+        self.assertEqual(self.s.get("governorRequests", []), [])
+
     def test_proposals_above_the_users_amount_are_refused(self):
         model = ScriptedModel(calls(propose(maxBudgetUsd=1000000), propose(maxBudgetUsd=20)), ModelTurn("Done."))
         self.chat(model, text="Put $20 on Cleveland")
