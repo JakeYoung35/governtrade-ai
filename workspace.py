@@ -36,7 +36,7 @@ class Workspace:
         if e['outcome']=='ALLOW':
             o['committed']=True;o['status']='submission unknown';self.persist(s) # crash-safe budget reservation before network request
             try:
-                response=v.place_order(o)
+                response=v.place_order(o);o['executedAt']=now() # venue response time; balance reads that start later include this order
                 if not response.get('success',True):o.update(status='rejected',committed=False)
                 else:
                     o['venueOrderId']=response.get('order_id') or response.get('success_response',{}).get('order_id');o['status']='submitted';o['automatic']=not approved
