@@ -52,7 +52,7 @@ Agent mandates can be stricter than account limits, but cannot override them.
 
 ## Security and execution safeguards
 
-- Account and AI-provider credentials are encrypted locally and displayed only as masks.
+- Account and AI-provider credentials are encrypted in each workspace’s vault and displayed only as masks. Hosted credentials stay on persistent server storage; local credentials stay on your computer.
 - Agents trade through their saved account; they cannot select a different account or supply their own approvals, balances, or policy overrides.
 - Execution requires fresh account data and market quotes.
 - Approving a trade triggers another governance check.
@@ -98,7 +98,7 @@ Still in development:
 
 **Chat currently saves your instructions; it does not independently call an AI model or start trading.** A trusted worker can submit proposals through the governed API.
 
-This is a local prototype, not a production-certified financial service.
+This is a prototype, not a production-certified financial service. The Google sign-in implementation adds personal workspaces; its hosting configuration and end-to-end sign-in must be completed before opening public account connections.
 
 ## Run locally
 
@@ -119,7 +119,13 @@ Then open http://localhost:3113/.
 
 Keep the server on localhost. The welcome screen is local workspace entry, not hosted user authentication. Never commit credentials or share private keys in chat.
 
-For Render deployment, see [Render hosting setup](docs/render-hosting.md). Hosted instances bind to Render's public port, but the shared workspace stays locked until an access password is configured. This is private workspace access, not public signup.
+## Personal accounts on the hosted app
+
+When Google sign-in is configured, each person signs in with their own Google account. There is no shared website password. Each user gets separate connected accounts, encrypted credentials, agents, mandates, approvals, trade history and simulated demo state. Signing out revokes that session; sessions expire after eight hours.
+
+The backend verifies Google's signed identity token and derives the workspace identity from Google's stable account ID. Email addresses and IDs submitted by the browser cannot select another person's workspace. Existing local or shared workspace data is not imported automatically.
+
+For Render deployment, see [Render hosting setup](docs/render-hosting.md). Personal workspaces require Google sign-in configuration, a persistent disk and a server encryption key. Legacy global worker tokens are disabled in personal-workspace mode until user-scoped worker authorization is implemented. Local development and password-protected private shared workspaces remain available when Google sign-in is not configured.
 
 ## Documentation
 
