@@ -119,6 +119,8 @@ Then open http://localhost:3113/.
 
 Keep the server on localhost. The welcome screen is local workspace entry, not hosted user authentication. Never commit credentials or share private keys in chat.
 
+For Render deployment, see [Render hosting setup](docs/render-hosting.md). Hosted instances bind to Render's public port, but the shared workspace stays locked until an access password is configured. This is private workspace access, not public signup.
+
 ## Documentation
 
 - [Setup and operations](docs/setup-and-operations.md)
