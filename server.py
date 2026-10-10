@@ -1,18 +1,26 @@
-import json,os,secrets,threading,hmac
+import contextlib,json,os,secrets,threading,hmac
 from pathlib import Path
 from urllib.parse import urlsplit
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
 from engine import seed,main_seed,action,AGENTS,migrate
 from workspace import Workspace
 from vault import Vault
+from store import PostgresStore
 ROOT=Path(__file__).parent;DATA=ROOT/'.data';DATA.mkdir(exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
+# DATABASE_URL moves the main workspace to Postgres; the presenter demo always stays in local JSON.
+STORE=PostgresStore(os.environ['DATABASE_URL']) if os.environ.get('DATABASE_URL') else None
+@contextlib.contextmanager
+def locked(env):
+    with LOCK,(STORE.session() if STORE and env=='main' else contextlib.nullcontext()):yield
 def read(env):
+    if env=='main' and STORE:return migrate(STORE.load())
     p=DATA/(env+'.json');s=json.loads(p.read_text()) if p.exists() else (seed() if env=='demo' else main_seed())
     if env=='main' and s.get('schemaVersion') not in (2,3):
         if p.exists() and not (DATA/'legacy-simulation.json').exists():p.rename(DATA/'legacy-simulation.json')
         s=main_seed()
     return migrate(s) if env=='main' else (s if s.get('demoAgents') else seed())
 def save(env,s):
+    if env=='main' and STORE:return STORE.save(s)
     p=DATA/(env+'.json');tmp=p.with_suffix('.tmp');fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
     with os.fdopen(fd,'w') as f:json.dump(s,f,allow_nan=False)
     tmp.replace(p)
@@ -35,7 +43,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path.startswith('/api/state'):
             if self.headers.get('Origin') and self.headers['Origin']!=f"http://{self.headers.get('Host')}":return self.json(403,{'error':'Cross-origin access denied.'})
             env='demo' if 'demo' in self.path else 'main'
-            with LOCK:
+            with locked(env):
                 s=read(env)
                 if env=='main':WORKSPACE.action(s,{'action':'refresh'});save(env,s)
                 self.json(200,self.response(env,s))
@@ -52,7 +60,7 @@ class Handler(SimpleHTTPRequestHandler):
             size=int(self.headers.get('Content-Length',0))
             if not 0<size<=100000:raise ValueError('Request too large or empty.')
             b=json.loads(self.rfile.read(size));env='main' if proposal else 'demo' if b.get('env')=='demo' else 'main'
-            with LOCK:
+            with locked(env):
                 s=read(env)
                 if proposal:result=WORKSPACE.proposal(s,b)
                 elif env=='main':result=WORKSPACE.action(s,b)
@@ -65,4 +73,5 @@ class Handler(SimpleHTTPRequestHandler):
         except (KeyError,StopIteration,TypeError,ImportError):self.json(400,{'error':'Invalid configuration or request. Check required fields and installed dependencies.'})
         except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
 if __name__=='__main__':
+    if STORE:applied=STORE.migrate();print('Postgres storage: '+(', '.join(applied)+' applied.' if applied else 'schema up to date.'),flush=True)
     port=int(os.environ.get('PORT','3110'));print(f'GovernTrade AI: http://localhost:{port}',flush=True);ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
