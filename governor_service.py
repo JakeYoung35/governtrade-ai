@@ -127,7 +127,11 @@ class GovernorService:
             if items and account.get("status") != "disconnected":
                 plans[account["id"]] = {"account": copy.deepcopy(account),
                                         "requestIds": sorted(r["governorProposalId"] for r in items),
-                                        "markets": sorted({r["proposal"]["marketId"] for r in items})}
+                                        "markets": sorted({r["proposal"]["marketId"] for r in items}),
+                                        # Order statuses when the venue read starts: an order that commits or fills
+                                        # while the lock is released may be missing from the fetched positions.
+                                        "orderStatuses": {o["id"]: o.get("status") for o in s["orders"]
+                                                          if o.get("accountId") == account["id"]}}
         return plans
 
     def fetch(self, plans):
@@ -200,12 +204,13 @@ class GovernorService:
             return {"accountId": account_id, "decided": 0, "note": fetched["error"]}
         venue = self.workspace.venue(account)
         started = fetched["startedAt"]
-        balance = self.workspace.apply_balance(s, account, fetched["balance"])
+        balance = self._newest_balance(s, account, fetched["balance"])
+        in_flight = self._in_flight(s, account, fetched.get("orderStatuses"))
         books = fetched["books"]
         snapshot_id = self.new_id()
         snapshot = build_snapshot(books, snapshot_id=snapshot_id, taken_at=started)
         now = self.clock()
-        portfolio = self._portfolio(s, account, balance, snapshot, now)
+        portfolio = self._portfolio(s, account, balance, snapshot, now, in_flight)
         proposals = [records.proposal_from_dict(r["proposal"]) for r in items]
         reliability = records.reliability(s, self.policy)
         decisions = decide(proposals, snapshot, portfolio, reliability, now, self.policy)
@@ -224,7 +229,32 @@ class GovernorService:
                 self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id])
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
-    def _portfolio(self, s, account, balance, snapshot, now):
+    def _newest_balance(self, s, account, fetched):
+        """The fetched balance, unless the account was refreshed after it was read (e.g. after a fill while the
+        lock was released). Applying the older read would roll the account's balance and positions back."""
+        current = account.get("balance")
+        if fetched is not None and current and not account.get("stale"):
+            try:
+                if dt.datetime.fromisoformat(current["asOf"]) > dt.datetime.fromisoformat(fetched["asOf"]):
+                    return current
+            except (KeyError, TypeError, ValueError):
+                pass  # an unreadable timestamp: fall back to the fetched read
+        return self.workspace.apply_balance(s, account, fetched)
+
+    def _in_flight(self, s, account, planned_statuses):
+        """Orders that committed or filled after the plan was taken, so the fetched positions may not include them.
+
+        Counted as exposure in addition to the positions. If the venue read already included one, it is counted
+        twice: conservative, and limited to the few seconds the lock was released. Without a plan (run_batch
+        fetching under the lock) nothing is in flight.
+        """
+        if planned_statuses is None:
+            return []
+        return [o for o in s["orders"] if o.get("accountId") == account["id"]
+                and planned_statuses.get(o["id"]) != o.get("status")
+                and (o.get("filled") or (o.get("committed") and o.get("status") in ("submitted", "open")))]
+
+    def _portfolio(self, s, account, balance, snapshot, now, in_flight=()):
         state = records.breaker_state(s, account["id"])
         paused = s["permissions"].get("automation") is False
         if balance is None:
@@ -240,11 +270,12 @@ class GovernorService:
                 "base": None if result.base is None else str(result.base)}, self.new_id())
             event(s, f"Loss breaker latched: {result.state.reason}", "BREAKER")
         return Portfolio(equity, max(ZERO, to_decimal(balance["cash"], "cash")),
-                         self._exposures(s, account, balance, snapshot, now), paused=paused,
+                         self._exposures(s, account, balance, snapshot, now, in_flight), paused=paused,
                          breaker_latched=result.state.latched, valuation_stale=bool(account.get("stale")))
 
-    def _exposures(self, s, account, balance, snapshot, now):
-        """Venue positions are the source of truth for loss-at-risk; filled orders attribute them to agents."""
+    def _exposures(self, s, account, balance, snapshot, now, in_flight=()):
+        """Venue positions are the source of truth for loss-at-risk; filled orders attribute them to agents.
+        in_flight orders (see _in_flight) are added on top, at their actual cost if known."""
         orders = [o for o in s["orders"] if o.get("accountId") == account["id"]]
         attribution = {}
         for o in reversed(orders):  # orders are newest first, so the newest fill per market wins
@@ -277,6 +308,11 @@ class GovernorService:
                 market_id = o["market"]["id"]
                 exposures.append(Exposure(market_id, o["agent"], group(market_id, o.get("governorEventGroup")),
                                           "yes" if o["direction"] == "Yes" else "no", to_decimal(o["amount"], "amount")))
+        for o in in_flight:
+            market_id = o["market"]["id"]
+            exposures.append(Exposure(market_id, o["agent"], group(market_id, o.get("governorEventGroup")),
+                                      "yes" if o["direction"] == "Yes" else "no",
+                                      to_decimal(o.get("actualCost") or o["amount"], "amount")))
         return exposures
 
     def _resume(self, s):
