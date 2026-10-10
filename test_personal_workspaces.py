@@ -67,7 +67,7 @@ class PersonalHttpTests(unittest.TestCase):
         env = {'RENDER':'true','RENDER_EXTERNAL_HOSTNAME':'app.onrender.com',
                'GOVERNTRADE_GOOGLE_CLIENT_ID':'client','GOVERNTRADE_DATA_DIR':self.temp.name,
                'GOVERNTRADE_PERSISTENT_STORAGE':'true','GOVERNTRADE_MASTER_KEY':Fernet.generate_key().decode(),
-               'GOVERNTRADE_AGENT_TOKEN':'legacy-worker'}
+               'GOVERNTRADE_AGENT_TOKEN':'legacy-worker','GOVERNTRADE_ALLOWED_EMAILS':'*'}
         for p in (patch.dict(os.environ, env, clear=True), patch.object(server,'DATA',Path(self.temp.name)),
                   patch.object(server,'STORE',None)):
             p.start();self.addCleanup(p.stop)
@@ -113,14 +113,14 @@ class PersonalHttpTests(unittest.TestCase):
     def test_two_users_isolate_state_vaults_demo_and_foreign_resource_mutations(self):
         alice,ac,aid=self.login('alice');bob,bc,bid=self.login('bob')
         for uid,secret in ((aid,'alice-secret'),(bid,'bob-secret')):
-            with tenancy.activate(server.DATA,uid,lambda s:server.save('main',s)),server.locked('main'):
+            with tenancy.activate(server.DATA,uid,server.tenant_save),server.locked('main'):
                 state=server.read('main');state['chats']['private']=[{'role':'customer','text':secret}]
                 state['accounts']=[{'id':'same-account-id','name':secret,'venue':'kalshi','environment':'demo',
                                     'status':'disconnected','stale':True,'ceiling':{}}]
                 server.workspace().vault.put({'api_key':secret},'same-reference')
                 server.save('main',state)
         # Knowledge of another user's resource ID is insufficient to mutate it.
-        with tenancy.activate(server.DATA,aid,lambda s:server.save('main',s)),server.locked('main'):
+        with tenancy.activate(server.DATA,aid,server.tenant_save),server.locked('main'):
             state=server.read('main')
             state['agentConfigs']=[{'id':'alice-only-agent','accountId':'same-account-id','name':'Alice agent',
                                     'provider':'openai','model':'test','status':'paused','mandate':None}]
@@ -134,9 +134,9 @@ class PersonalHttpTests(unittest.TestCase):
         self.assertEqual(self.call('GET','/api/state?main',alice)[2]['state']['permissions']['dailyCap'],42)
         self.assertNotEqual(self.call('GET','/api/state?main',bob)[2]['state']['permissions']['dailyCap'],42)
         self.assertEqual(self.call('POST','/api/action',bob,ac,{'action':'permissions','values':{'dailyCap':1}})[0],403)
-        with tenancy.activate(server.DATA,aid,lambda s:server.save('main',s)):
+        with tenancy.activate(server.DATA,aid,server.tenant_save):
             self.assertEqual(server.workspace().vault.get('same-reference')['api_key'],'alice-secret')
-        with tenancy.activate(server.DATA,bid,lambda s:server.save('main',s)):
+        with tenancy.activate(server.DATA,bid,server.tenant_save):
             self.assertEqual(server.workspace().vault.get('same-reference')['api_key'],'bob-secret')
         self.call('POST','/api/action',alice,ac,{'env':'demo','action':'reset'})
         self.assertFalse((server.DATA/'users'/bid/'demo.json').exists())
@@ -151,7 +151,7 @@ class PersonalHttpTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             self.assertEqual(list(pool.map(set_cap,[(alice,ac,11),(bob,bc,22)])),[200,200])
         for uid,expected in ((aid,11),(bid,22)):
-            with tenancy.activate(server.DATA,uid,lambda s:server.save('main',s)):
+            with tenancy.activate(server.DATA,uid,server.tenant_save):
                 self.assertEqual(server.read('main')['permissions']['dailyCap'],expected)
                 with patch.object(server.governor(),'plan',return_value={}) as plan:
                     self.assertFalse(server.governor_pass(False));plan.assert_called_once()

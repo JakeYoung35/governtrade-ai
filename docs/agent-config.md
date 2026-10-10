@@ -1,6 +1,16 @@
 # Agent integration contract
 
-The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. The agentic teammate's worker owns model calls and market selection. The UI starts no AI worker; the server runs only the governor's batch loop.
+The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. Proposals reach the governor two ways: the in-app agent chat (below) and an external worker using the governed proposal API.
+
+## In-app agent chat
+
+When the user sends a chat message, `agent_chat.py` calls the agent's configured model (`agent_llm.py`: OpenAI chat completions, Anthropic messages or Gemini `generateContent`, with tool calling) using the agent's saved key. The model gets four tools: `find_series` and `list_markets` (Kalshi market discovery by category and keywords), `get_market` (asks, rules and tradability for one ticker) and `propose_trade`. Each `propose_trade` is validated against the governed proposal schema below, with errors returned to the model so it can correct itself, and the reply's proposals are submitted through `GovernorService.submit` with `proposalId` `chat-<message index>-<n>`. At most 5 proposals per message. `propose_trade` is withheld while the agent is paused, has no mandate, its account is disconnected, or all-agent trading is off.
+
+The model never places orders and never sees credentials other than its own key; venue reads use public Kalshi endpoints. A turn plans under the workspace lock, calls the model with the lock released, then saves the reply and submits under the lock, like a governor pass. One turn per agent runs at a time. The UI shows each proposal's governor decision and order status under the agent's reply, polling `GET /api/chat/proposals` (same-origin, no venue refresh) until the governor decides.
+
+The amounts the user types are enforced in code: a proposal above the largest dollar amount in the message, or proposals together above their sum, are refused, and with no amount (in the message, or in the previous one when the user is answering the agent's question) no proposal is accepted. A turn has a 120-second budget across its model calls. Market tools use public Kalshi reads without the account's credentials, so the agent can still answer questions while its account is disconnected.
+
+Because the app answers chat messages itself, `GET /api/worker` no longer returns them: `instructions` is always `{}` and `chatHandledBy` is `"app"`, so a worker built for the old contract cannot trade each message a second time. Proposal ids starting with `chat-` are reserved for chat proposals; the worker route rejects them with a `proposalId` field error.
 
 ## Public agent contract (version 2)
 
@@ -34,7 +44,7 @@ Internal stored configs additionally contain `modelCredentialRef`, an opaque vau
 
 ## Worker HTTP boundary
 
-Set `GOVERNTRADE_AGENT_TOKEN` to a random secret in both server and trusted worker environments. Use `Authorization: Bearer ...`. `GET /api/worker` returns public configurations and saved chat instructions. Consume only newly observed customer messages and persist your own cursor; do not repeatedly trade on historical messages. This token does not implement per-agent isolation; the trusted worker can submit for configured agents. Host is localhost only.
+Set `GOVERNTRADE_AGENT_TOKEN` to a random secret in both server and trusted worker environments. Use `Authorization: Bearer ...`. `GET /api/worker` returns public agent configurations. Chat messages are answered by the in-app agent and are not returned (`instructions` is `{}`). This token does not implement per-agent isolation; the trusted worker can submit for configured agents. Host is localhost only.
 
 ### Governed proposal contract (schema version 1)
 

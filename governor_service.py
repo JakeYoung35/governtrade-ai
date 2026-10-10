@@ -99,9 +99,26 @@ class GovernorService:
         request = next((r for r in s.get("governorRequests", []) if r["governorProposalId"] == governor_proposal_id), None)
         return None if request is None else self._view(s, request)
 
-    def _view(self, s, request):
-        decision = next((d for d in s.get("governorDecisions", []) if d["proposalId"] == request["governorProposalId"]), None)
-        order = next((o for o in s["orders"] if o["id"] == request.get("orderId")), None) if request.get("orderId") else None
+    def views(self, s, requests, orders=None):
+        """_view for many requests, indexing decisions and orders once instead of scanning them per request."""
+        decisions = {}
+        if orders is None:
+            orders = {o["id"]: o for o in s["orders"]}
+        for d in s.get("governorDecisions", []):
+            decisions.setdefault(d["proposalId"], d)  # first match wins, as in _view
+        return [self._view(s, r, decisions, orders) for r in requests]
+
+    def _view(self, s, request, decisions=None, orders=None):
+        if decisions is None:
+            decision = next((d for d in s.get("governorDecisions", []) if d["proposalId"] == request["governorProposalId"]), None)
+        else:
+            decision = decisions.get(request["governorProposalId"])
+        if not request.get("orderId"):
+            order = None
+        elif orders is None:
+            order = next((o for o in s["orders"] if o["id"] == request["orderId"]), None)
+        else:
+            order = orders.get(request["orderId"])
         return {
             "governorProposalId": request["governorProposalId"], "proposalId": request["proposalId"],
             "agentId": request["agentId"], "marketId": request["proposal"]["marketId"],
@@ -504,5 +521,5 @@ class GovernorService:
             "reliability": {agent: {"score": str(r.score), "resolvedCount": r.resolved_count}
                             for agent, r in records.reliability(s, self.policy).items()},
             "recentDecisions": [{k: v for k, v in d.items() if k != "trace"} for d in s.get("governorDecisions", [])[:50]],
-            "recentRequests": [self._view(s, r) for r in s.get("governorRequests", [])[:50]],
+            "recentRequests": self.views(s, s.get("governorRequests", [])[:50]),
         }

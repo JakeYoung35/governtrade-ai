@@ -147,9 +147,7 @@ class Workspace:
                 o['status']='cancelled';event(s,'Approval window expired; the governor sized this trade for earlier market conditions.','EXPIRED',o['id']);return o
             if b['approve'] is True:return self.evaluate(s,o,True)
             o['status']='denied';event(s,'User denied exact proposal.','DENIED',o['id'])
-        elif action=='chat':
-            agent=next(x for x in s['agentConfigs'] if x['id']==b['agent']);s['chats'][agent['id']].append({'role':'customer','text':str(b['text'])[:8000]});s['chats'][agent['id']].append({'role':'agent','text':'Instruction saved for the agentic integration. No model was called and no trade was proposed. Your teammate’s worker will consume instructions and submit through the governed proposal API.'})
-        else:raise ValueError('Unsupported user action.')
+        else:raise ValueError('Unsupported user action.')  # chat runs in agent_chat.py, outside the workspace lock
     def public(self,s):
         # Governor records (batch inputs with order books, traces, forecasts) are large and not used by the UI.
         public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor')})

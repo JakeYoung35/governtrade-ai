@@ -30,7 +30,8 @@ SCHEMA = {
         "schemaVersion": {"const": SCHEMA_VERSION},
         "proposalId": {"type": "string", "pattern": _ID.pattern,
                        "description": "Your idempotency key, unique per agent. Retrying with the same id and payload "
-                                      "returns the original result. A UUID is recommended."},
+                                      "returns the original result. A UUID is recommended. Ids starting with \"chat-\" "
+                                      "are reserved for the in-app agent chat."},
         "agentId": {"type": "string", "description": "The configured agent id from GET /api/worker."},
         "marketId": {"type": "string", "minLength": 1, "maxLength": 200,
                      "description": "Kalshi market ticker, e.g. KXNFLGAME-26OCT18BALCLE-CLE."},
