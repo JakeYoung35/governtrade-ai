@@ -9,8 +9,11 @@ from dataclasses import dataclass, field
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-TIMEOUT_SECONDS = 90
+TIMEOUT_SECONDS = 60  # per model call; agent_chat.py also bounds the whole turn
+# Output caps per model call. OpenAI and Gemini count reasoning ("thinking") tokens toward their cap, so it is
+# higher there; agent_chat.py still truncates the saved reply to fit the database.
 MAX_OUTPUT_TOKENS = 2048
+MAX_OUTPUT_TOKENS_WITH_REASONING = 8192
 
 
 class ModelError(Exception):
@@ -78,7 +81,10 @@ class AnthropicConversation:
         self.messages = [{"role": role, "content": text} for role, text in _alternating(history)]
 
     def step(self):
-        body = {"model": self.model, "max_tokens": MAX_OUTPUT_TOKENS, "system": self.system, "messages": self.messages}
+        # The system prompt and tools are identical on every step of a turn, so cache them (tools come first in the
+        # cache order, so a breakpoint on the system block covers both).
+        body = {"model": self.model, "max_tokens": MAX_OUTPUT_TOKENS, "messages": self.messages,
+                "system": [{"type": "text", "text": self.system, "cache_control": {"type": "ephemeral"}}]}
         if self.tools:
             body["tools"] = self.tools
         data = self.post(self.URL, {"x-api-key": self.key, "anthropic-version": "2023-06-01"}, body)
@@ -105,7 +111,7 @@ class OpenAIConversation:
             {"role": role, "content": text} for role, text in _alternating(history)]
 
     def step(self):
-        body = {"model": self.model, "messages": self.messages}
+        body = {"model": self.model, "messages": self.messages, "max_completion_tokens": MAX_OUTPUT_TOKENS_WITH_REASONING}
         if self.tools:
             body["tools"] = self.tools
         data = self.post(self.URL, {"Authorization": "Bearer " + self.key}, body)
@@ -151,7 +157,8 @@ class GeminiConversation:
         self.calls = 0
 
     def step(self):
-        body = {"systemInstruction": {"parts": [{"text": self.system}]}, "contents": self.contents}
+        body = {"systemInstruction": {"parts": [{"text": self.system}]}, "contents": self.contents,
+                "generationConfig": {"maxOutputTokens": MAX_OUTPUT_TOKENS_WITH_REASONING}}
         if self.tools:
             body["tools"] = self.tools
         data = self.post(self.URL.format(model=self.model), {"x-goog-api-key": self.key}, body)

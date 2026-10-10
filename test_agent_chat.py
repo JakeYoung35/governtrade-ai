@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+import agent_chat
 import agent_llm
 from adapters import VenueError
 from agent_chat import LEGACY_REPLY, MAX_PROPOSALS, AgentChat
@@ -49,7 +50,7 @@ class ScriptedModel:
         self.results = []
         self.opened = None
 
-    def __call__(self, provider, model, key, system, tools, history):
+    def __call__(self, provider, model, key, system, tools, history, post=None):
         self.opened = {"provider": provider, "model": model, "key": key, "system": system,
                        "tools": [t["name"] for t in tools], "history": history}
         return self
@@ -139,8 +140,9 @@ class ProposalTests(ChatTest):
         markets = [f"KX-{i}" for i in range(MAX_PROPOSALS + 1)]
         for m in markets:
             self.venue.books[m] = ("0.40", "0.62", "100")
-        model = ScriptedModel(calls(propose(), propose(), *[propose(marketId=m) for m in markets]), ModelTurn("Done."))
-        self.chat(model)
+        model = ScriptedModel(calls(propose(maxBudgetUsd=5), propose(maxBudgetUsd=5),
+                                    *[propose(marketId=m, maxBudgetUsd=5) for m in markets]), ModelTurn("Done."))
+        self.chat(model, text="Spread $100 across the games")
         results = model.results[0]
         self.assertTrue(results[0]["accepted"])
         self.assertIn("already proposed", results[1]["error"])
@@ -239,6 +241,94 @@ class GuardTests(ChatTest):
         self.assertEqual(self.s.get("governorRequests", []), [])
 
 
+class LimitTests(ChatTest):
+    """Review fixes: the user's amount is enforced in code, replies fit the database, and a turn has a deadline."""
+
+    def test_amounts_are_read_from_the_message(self):
+        cases = {"Put $25 on it": ["25"], "$1,000.50 and $3": ["1000.50", "3"], "25 dollars on PHI": ["25"],
+                 "bet 12.5 USD": ["12.5"], "ten bucks": [], "Buy 3 contracts": [], "$0": []}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual([str(a) for a in agent_chat.stated_amounts(text)], expected)
+
+    def test_proposals_above_the_users_amount_are_refused(self):
+        model = ScriptedModel(calls(propose(maxBudgetUsd=1000000), propose(maxBudgetUsd=20)), ModelTurn("Done."))
+        self.chat(model, text="Put $20 on Cleveland")
+        self.assertIn("above the $20 the user gave", model.results[0][0]["error"])
+        self.assertTrue(model.results[0][1]["accepted"])
+        self.assertEqual(self.s["governorRequests"][0]["proposal"]["requestedBudget"], "20")
+
+    def test_proposals_together_stay_within_the_users_amounts(self):
+        self.venue.books["KX-2"] = ("0.40", "0.62", "100")
+        model = ScriptedModel(calls(propose(maxBudgetUsd=10), propose(marketId="KX-2", maxBudgetUsd=10)), ModelTurn("Done."))
+        self.chat(model, text="$10 on Cleveland, and the rest elsewhere")  # one amount: $10 in total
+        self.assertTrue(model.results[0][0]["accepted"])
+        self.assertIn("Together these proposals exceed the $10", model.results[0][1]["error"])
+
+    def test_no_amount_means_no_proposal(self):
+        model = ScriptedModel(calls(propose()), ModelTurn("How much?"))
+        self.chat(model, text="Bet on Cleveland")
+        self.assertIn("ask how much", model.opened["system"])
+        self.assertIn("has not given a dollar amount", model.results[0][0]["error"])
+        self.assertEqual(self.s.get("governorRequests", []), [])
+
+    def test_an_answer_to_a_follow_up_uses_the_previous_amount(self):
+        self.chat(ScriptedModel(ModelTurn("Which team?")), text="Put $20 on the Browns game")
+        model = ScriptedModel(calls(propose()), ModelTurn("Done."))
+        self.chat(model, text="Cleveland")
+        self.assertTrue(model.results[0][0]["accepted"])
+        self.assertIn("at most $20", model.opened["system"])
+
+    def test_a_long_reply_is_trimmed_but_keeps_the_governor_notes(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(calls(propose()), ModelTurn("x" * 9000)))
+        job = service.begin(self.s, {"agent": "agent", "text": "Put $20 on Cleveland"})
+        result = service.run(job)
+        self.s["agentConfigs"][0]["status"] = "paused"  # so the governor refuses it and adds a note
+        service.finish(self.s, job, result)
+        reply = self.s["chats"]["agent"][1]["text"]
+        self.assertLessEqual(len(reply), agent_chat.MAX_REPLY_CHARS)
+        self.assertTrue(reply.endswith("must be an active agent with a saved mandate."))
+        self.assertIn("x…", reply)
+
+    def test_a_turn_stops_at_its_deadline_and_keeps_what_it_proposed(self):
+        clock = [0.0]
+
+        class SlowModel(ScriptedModel):
+            def step(self):
+                clock[0] += 70  # each model call takes 70 s
+                return super().step()
+
+        model = SlowModel(calls(propose()), calls(("get_market", {"marketId": MARKET})), ModelTurn("never reached"))
+        with patch("agent_chat.time.monotonic", lambda: clock[0]):
+            self.chat(model)
+        self.assertEqual(self.s["chats"]["agent"][1]["text"],
+                         "I couldn't respond: The agent took too long and stopped. "
+                         "I had already sent 1 proposal to the governor; see below.")
+        self.assertEqual(self.s["governorRequests"][0]["proposalId"], "chat-0-0")
+
+    def test_each_model_call_gets_only_the_time_left(self):
+        clock, seen = [0.0], []
+
+        def connect(provider, model, key, system, tools, history, post):
+            clock[0] = 100  # 20 s of the 120 s turn left
+            with patch("agent_chat.post_json", lambda url, headers, body, timeout: seen.append(timeout) or {}):
+                post("https://api.example", {}, {})
+            clock[0] = 119.5
+            with self.assertRaisesRegex(ModelError, "took too long"):
+                post("https://api.example", {}, {})
+            raise ModelError("stop here")
+
+        with patch("agent_chat.time.monotonic", lambda: clock[0]):
+            self.chat(connect)
+        self.assertEqual(seen, [20.0])
+
+    def test_proposal_views_match_single_lookups(self):
+        self.chat(ScriptedModel(calls(propose()), ModelTurn("Done.")))
+        self.governor.run_batch(self.s)
+        request = self.s["governorRequests"][0]
+        self.assertEqual(self.governor.views(self.s, [request]), [self.governor.lookup(self.s, request["governorProposalId"])])
+
+
 class ProviderTests(unittest.TestCase):
     """Each provider's request and response format, with a recorded post() instead of the network."""
 
@@ -267,7 +357,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(conversation.step().text, "Done.")
         url, headers, body = sent[1]
         self.assertEqual((url, headers["x-api-key"]), ("https://api.anthropic.com/v1/messages", "key"))
-        self.assertEqual((body["system"], body["tools"][0]["input_schema"]["required"]), ("system", ["marketId"]))
+        self.assertEqual(body["system"], [{"type": "text", "text": "system", "cache_control": {"type": "ephemeral"}}])
+        self.assertEqual((body["max_tokens"], body["tools"][0]["input_schema"]["required"]), (2048, ["marketId"]))
         self.assertEqual(body["messages"][0], {"role": "user", "content": "a\n\nb"})  # merged; leading reply dropped
         self.assertEqual(body["messages"][2]["content"][0],
                          {"type": "tool_result", "tool_use_id": "tu_1", "content": json.dumps({"title": "T"})})
@@ -286,6 +377,7 @@ class ProviderTests(unittest.TestCase):
         url, headers, body = sent[1]
         self.assertEqual((url, headers["Authorization"]), ("https://api.openai.com/v1/chat/completions", "Bearer key"))
         self.assertEqual(body["messages"][0], {"role": "system", "content": "system"})
+        self.assertEqual(body["max_completion_tokens"], agent_llm.MAX_OUTPUT_TOKENS_WITH_REASONING)
         self.assertEqual(body["tools"][0]["function"]["name"], "get_market")
         self.assertEqual([m["role"] for m in body["messages"]], ["system", "user", "assistant", "tool", "tool"])
         self.assertEqual(body["messages"][3]["tool_call_id"], "c1")
@@ -304,6 +396,7 @@ class ProviderTests(unittest.TestCase):
         self.assertTrue(url.endswith("/models/gemini-3.5-flash:generateContent"))
         self.assertEqual(headers["x-goog-api-key"], "key")
         self.assertEqual(body["tools"][0]["functionDeclarations"][0]["parameters"]["type"], "OBJECT")
+        self.assertEqual(body["generationConfig"], {"maxOutputTokens": agent_llm.MAX_OUTPUT_TOKENS_WITH_REASONING})
         self.assertEqual(body["contents"][1]["parts"][0], call_part)
         self.assertEqual(body["contents"][2]["parts"][0]["functionResponse"], {"name": "get_market", "response": {"title": "T"}})
 

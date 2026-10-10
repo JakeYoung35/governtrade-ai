@@ -10,18 +10,24 @@ The model never places orders. Each proposal goes through GovernorService.submit
 gets no credentials and no tools that change mandates or ceilings.
 """
 import datetime as dt
+from decimal import Decimal
 import re
 import threading
+import time
 
 from adapters import VenueError
-from agent_llm import ModelError, connect
+from agent_llm import TIMEOUT_SECONDS, ModelError, connect, post_json
 from engine import event
 from governor import api
 
 HISTORY_MESSAGES = 20  # earlier chat messages sent as context
 MAX_MESSAGE_CHARS = 2000
+MAX_REPLY_CHARS = 6000  # chat_messages.text allows 8,000; leaves room for the governor notes
 MAX_STEPS = 10  # model calls per chat turn
+TURN_SECONDS = 120  # wall-clock budget for one chat turn, across all its model calls
 MAX_PROPOSALS = 5  # proposals per chat turn
+# Dollar amounts the user typed: "$25", "$1,000.50", "25 dollars", "25 usd", "25 bucks".
+AMOUNT = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?|\b(\d+)(\.\d{1,2})?\s*(?:dollars|usd|bucks)\b", re.IGNORECASE)
 # Proposal ids made from chat turns: chat-<index of the user's message>-<n>, unique per agent.
 PROPOSAL_ID = re.compile(r"^chat-(\d+)-(\d+)$")
 # The reply older builds saved for every message; it is not useful context for the model.
@@ -73,6 +79,15 @@ def utc_now():
     return dt.datetime.now(dt.timezone.utc)
 
 
+def stated_amounts(text):
+    """The dollar amounts in a user's message, as Decimals."""
+    amounts = []
+    for match in AMOUNT.finditer(text):
+        whole, cents = (match.group(1), match.group(2)) if match.group(1) else (match.group(3), match.group(4))
+        amounts.append(Decimal(whole.replace(",", "") + (cents or "")))
+    return [a for a in amounts if a > 0]
+
+
 class AgentChat:
     def __init__(self, workspace, governor, connect=connect, clock=utc_now):
         self.workspace, self.governor, self.connect, self.clock = workspace, governor, connect, clock
@@ -103,11 +118,18 @@ class AgentChat:
             chat = s["chats"].setdefault(agent["id"], [])
             history = [("user" if m["role"] == "customer" else "assistant", m["text"]) for m in chat[-HISTORY_MESSAGES:]
                        if not (m["role"] == "agent" and m["text"].startswith(LEGACY_REPLY))]
+            # The amounts the user typed bound what this turn may propose. A reply to the agent's follow-up question
+            # ("Which team?" "Philadelphia") has none, so it uses the user's previous message.
+            amounts = stated_amounts(text)
+            if not amounts:
+                previous = next((m["text"] for m in reversed(chat) if m["role"] == "customer"), "")
+                amounts = stated_amounts(previous)
             chat.append({"role": "customer", "text": text.strip()})
         except Exception:
             self.release(agent["id"])
             raise
         return {"agentId": agent["id"], "messageIndex": len(chat) - 1, "text": text.strip(), "history": history,
+                "amounts": amounts,
                 "agent": {k: agent.get(k) for k in ("name", "provider", "model", "personality", "mandate")},
                 "account": dict(account), "key": key, "blocked": self._trading_blocked(s, agent, account)}
 
@@ -130,15 +152,28 @@ class AgentChat:
     # Phase 2, with the lock released: model calls and public market reads only, no state changes.
 
     def run(self, job):
-        """Talk to the model until it answers. Returns {reply, proposals, error}; never raises."""
+        """Talk to the model until it answers, within MAX_STEPS calls and TURN_SECONDS. Returns
+        {reply, proposals, error}; never raises. Proposals the model made before an early stop are kept: each was
+        validated and is within the amounts the user typed."""
         proposals = []
+        deadline = time.monotonic() + TURN_SECONDS
+
+        def post(url, headers, body):  # each model call gets at most the time left in the turn
+            remaining = deadline - time.monotonic()
+            if remaining <= 1:
+                raise ModelError("The agent took too long and stopped.")
+            return post_json(url, headers, body, timeout=min(TIMEOUT_SECONDS, remaining))
+
         try:
             venue = self.workspace.venue(job["account"])
             tools = BROWSE_TOOLS + ([] if job["blocked"] else [PROPOSE_TOOL])
             conversation = self.connect(job["agent"]["provider"], job["agent"]["model"], job["key"],
-                                        self._system_prompt(job), tools, job["history"] + [("user", job["text"])])
+                                        self._system_prompt(job), tools, job["history"] + [("user", job["text"])],
+                                        post=post)
             markets = {}
             for _ in range(MAX_STEPS):
+                if time.monotonic() >= deadline:
+                    raise ModelError("The agent took too long and stopped.")
                 turn = conversation.step()
                 if not turn.tool_calls:
                     return {"reply": turn.text, "proposals": proposals, "error": None}
@@ -147,11 +182,11 @@ class AgentChat:
             return {"reply": "I couldn't finish within my step limit. Try a more specific request.",
                     "proposals": proposals, "error": None}
         except ModelError as e:
-            return {"reply": "", "proposals": [], "error": str(e)}
+            return {"reply": "", "proposals": proposals, "error": str(e)}
         except (VenueError, ValueError, KeyError):
-            return {"reply": "", "proposals": [], "error": "The agent could not reach its Kalshi account."}
+            return {"reply": "", "proposals": proposals, "error": "The agent could not reach its Kalshi account."}
         except Exception as e:  # never let a provider or tool fault escape the request
-            return {"reply": "", "proposals": [], "error": f"The agent hit an unexpected error ({type(e).__name__})."}
+            return {"reply": "", "proposals": proposals, "error": f"The agent hit an unexpected error ({type(e).__name__})."}
 
     def _system_prompt(self, job):
         agent, account = job["agent"], job["account"]
@@ -169,10 +204,14 @@ class AgentChat:
             lines.append(f"You cannot propose trades right now because {job['blocked']}. "
                          "You can still look up markets and answer questions; tell the user what to change.")
         else:
+            amounts = job["amounts"]
             lines += [
-                "When the user asks for a trade, call propose_trade once per position. Use the dollar amount the user "
-                "gave as maxBudgetUsd, never more; if they gave none, ask before proposing. Give your honest "
-                "probability that the market resolves YES. If the request is ambiguous, ask a short question instead.",
+                "When the user asks for a trade, call propose_trade once per position. Give your honest probability "
+                "that the market resolves YES. If the request is ambiguous, ask a short question instead.",
+                (f"The user's message gives these dollar amounts: {', '.join('$%s' % a for a in amounts)}. Each "
+                 f"proposal's maxBudgetUsd must be at most ${max(amounts)}, and together at most ${sum(amounts)}; the "
+                 "app refuses anything larger." if amounts else
+                 "The user has not given a dollar amount, so the app refuses proposals; ask how much to commit."),
                 "You do not place orders. The portfolio governor sizes each proposal and may reduce or reject it, "
                 "then the user's mandate applies: trades above the automatic limit wait for the user's approval.",
                 f"Mandate: automatic limit ${mandate.get('autoLimit')}, daily cap ${mandate.get('dailyCap')}, "
@@ -230,9 +269,17 @@ class AgentChat:
                    "maxBudgetUsd": args.get("maxBudgetUsd"), "reasoning": args.get("reasoning")}
         if args.get("maxEntryPrice") is not None:
             payload["maxEntryPrice"] = args["maxEntryPrice"]
-        _, errors = api.parse_submission(payload, received_at=self.clock(), policy=self.governor.policy)
+        normalized, errors = api.parse_submission(payload, received_at=self.clock(), policy=self.governor.policy)
         if errors:
             return {"accepted": False, "errors": errors}
+        # The prompt asks for the user's amount; this enforces it, whatever the model or market text says.
+        amounts, budget = job["amounts"], Decimal(normalized["maxBudgetUsd"])
+        if not amounts:
+            return {"accepted": False, "error": "The user has not given a dollar amount. Ask them how much to commit."}
+        if budget > max(amounts):
+            return {"accepted": False, "error": f"maxBudgetUsd is above the ${max(amounts)} the user gave."}
+        if sum((Decimal(str(p["maxBudgetUsd"])) for p in proposals), budget) > sum(amounts):
+            return {"accepted": False, "error": f"Together these proposals exceed the ${sum(amounts)} the user gave."}
         proposals.append(payload)
         return {"accepted": True, "proposalId": payload["proposalId"],
                 "next": "Queued for the portfolio governor when you reply. It decides the stake; the user sees the result."}
@@ -253,9 +300,15 @@ class AgentChat:
                     notes.append(f"The governor did not accept the {payload['marketId']} proposal: {detail}.")
             if result["error"]:
                 reply = f"I couldn't respond: {result['error']}"
+                if submitted:
+                    reply += f" I had already sent {len(submitted)} proposal{'s' if len(submitted) > 1 else ''} to the governor; see below."
             else:
                 reply = result["reply"] or ("I sent your trade to the portfolio governor." if submitted else
                                             "I don't have an answer for that.")
+            # A long model answer must not fail the save (and lose the proposals); trim it, never the governor's notes.
+            room = MAX_REPLY_CHARS - sum(len(n) + 2 for n in notes)
+            if len(reply) > room:
+                reply = reply[:room - 1].rstrip() + "…"
             reply = "\n\n".join([reply, *notes])
             s["chats"].setdefault(job["agentId"], []).append({"role": "agent", "text": reply})
             queued = sum(p["code"] == 202 for p in submitted)
@@ -269,12 +322,11 @@ class AgentChat:
     def proposal_views(self, s):
         """Governor status of every chat proposal, per agent, for the chat UI."""
         views = {}
-        for request in s.get("governorRequests", []):
+        requests = [r for r in s.get("governorRequests", []) if PROPOSAL_ID.match(r["proposalId"])]
+        orders = {o["id"]: o for o in s["orders"]}
+        for request, view in zip(requests, self.governor.views(s, requests)):
             match = PROPOSAL_ID.match(request["proposalId"])
-            if not match:
-                continue
-            view = self.governor.lookup(s, request["governorProposalId"])
-            order = next((o for o in s["orders"] if o["id"] == request.get("orderId")), None) if request.get("orderId") else None
+            order = orders.get(request.get("orderId"))
             views.setdefault(request["agentId"], []).append({
                 **view, "messageIndex": int(match.group(1)), "position": int(match.group(2)),
                 "maxBudgetUsd": request["proposal"]["requestedBudget"],
