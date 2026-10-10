@@ -1,7 +1,10 @@
 """Request-local tenant contexts; the same context scopes state, vaults and the governor."""
 import contextlib
 import contextvars
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows: no fcntl; the thread lock still serializes a single local server.
+    fcntl = None
 import os
 import re
 import threading
@@ -26,8 +29,11 @@ class Tenant:
 
     @contextlib.contextmanager
     def locked(self):
-        # Serialize across threads and processes sharing this persistent disk.
+        # Serialize across threads; where fcntl exists (Linux/Render), also across processes sharing this disk.
         with self.lock:
+            if fcntl is None:
+                yield
+                return
             fd = os.open(self.directory / 'workspace.lock', os.O_CREAT | os.O_RDWR, 0o600)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
