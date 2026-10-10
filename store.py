@@ -1,0 +1,154 @@
+"""Postgres storage for the main workspace, enabled by DATABASE_URL.
+
+Loads and saves the same state dict as the JSON store, so engine and workspace logic are unchanged.
+Credentials stay in the local encrypted vault; only opaque vault references are stored here.
+A request holds a session-level advisory lock, so writers are serialized across server processes.
+The isolated presenter demo always stays in local JSON.
+"""
+import contextlib, datetime as dt, json, threading
+from pathlib import Path
+from engine import main_seed
+
+MIGRATIONS=Path(__file__).parent/'migrations'
+LOCK_KEY=0x476f7654726164  # "GovTrad"
+EVENT_LIMIT=500  # Older events stay in the database; only recent ones are loaded into state.
+SAFETY_COLUMNS={'dailyLossCap':'daily_loss_cap','marketCap':'market_cap','exposureCap':'exposure_cap','slippage':'slippage_max'}
+TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion'}
+ACCOUNT_FIELDS={'id','name','venue','environment','subaccount','liveEnabled','credentialRef','credentialMasks','status','stale','error','ceiling','baseline','balance'}
+AGENT_FIELDS={'id','accountId','name','provider','model','modelValidated','modelCredentialRef','modelKeyMask','status','personality','mandate'}
+ORDER_FIELDS={'id','agent','accountId','market','direction','amount','request','status','decision','committed','filled','automatic','venueOrderId','quantity','actualCost','time','evaluations'}
+
+ACCOUNT_UPSERT='''INSERT INTO accounts (id,name,venue,environment,subaccount,live_enabled,credential_ref,credential_masks,status,stale,error,ceiling_daily_cap,baseline_day,baseline_equity,balance,extra,created_at)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp())
+ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name,venue=EXCLUDED.venue,environment=EXCLUDED.environment,subaccount=EXCLUDED.subaccount,live_enabled=EXCLUDED.live_enabled,
+credential_ref=EXCLUDED.credential_ref,credential_masks=EXCLUDED.credential_masks,status=EXCLUDED.status,stale=EXCLUDED.stale,error=EXCLUDED.error,ceiling_daily_cap=EXCLUDED.ceiling_daily_cap,
+baseline_day=EXCLUDED.baseline_day,baseline_equity=EXCLUDED.baseline_equity,balance=EXCLUDED.balance,extra=EXCLUDED.extra'''
+AGENT_UPSERT='''INSERT INTO agents (id,account_id,name,provider,model,model_validated,model_credential_ref,model_key_mask,status,personality,auto_limit,daily_cap,minimum_reserve,new_market_approval,extra,created_at)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,clock_timestamp())
+ON CONFLICT (id) DO UPDATE SET account_id=EXCLUDED.account_id,name=EXCLUDED.name,provider=EXCLUDED.provider,model=EXCLUDED.model,model_validated=EXCLUDED.model_validated,
+model_credential_ref=EXCLUDED.model_credential_ref,model_key_mask=EXCLUDED.model_key_mask,status=EXCLUDED.status,personality=EXCLUDED.personality,auto_limit=EXCLUDED.auto_limit,
+daily_cap=EXCLUDED.daily_cap,minimum_reserve=EXCLUDED.minimum_reserve,new_market_approval=EXCLUDED.new_market_approval,extra=EXCLUDED.extra'''
+ORDER_UPSERT='''INSERT INTO orders (id,agent_id,account_id,market_id,market,direction,amount,reasoning,status,decision,committed,filled,automatic,venue_order_id,quantity,actual_cost,extra,created_at)
+VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+ON CONFLICT (id) DO UPDATE SET market_id=EXCLUDED.market_id,market=EXCLUDED.market,amount=EXCLUDED.amount,reasoning=EXCLUDED.reasoning,status=EXCLUDED.status,decision=EXCLUDED.decision,
+committed=EXCLUDED.committed,filled=EXCLUDED.filled,automatic=EXCLUDED.automatic,venue_order_id=EXCLUDED.venue_order_id,quantity=EXCLUDED.quantity,actual_cost=EXCLUDED.actual_cost,extra=EXCLUDED.extra'''
+
+def signature(value):return json.dumps(value,sort_keys=True,default=str)
+def iso(value):return value.astimezone(dt.timezone.utc).isoformat() if isinstance(value,dt.datetime) else value
+def present(row,mapping):return {key:row[column] for key,column in mapping.items() if row[column] is not None}
+
+class PostgresStore:
+    def __init__(self,url,search_path=None):
+        self.url=url;self.search_path=search_path;self.local=threading.local()
+    def connect(self):
+        import psycopg
+        from psycopg.rows import dict_row
+        from psycopg.types.numeric import FloatLoader
+        from psycopg.types.string import TextLoader
+        options='-c TimeZone=UTC'+(f' -c search_path={self.search_path}' if self.search_path else '')
+        conn=psycopg.connect(self.url,autocommit=True,row_factory=dict_row,options=options,connect_timeout=15)
+        # The engine does float arithmetic and compares ids as strings.
+        conn.adapters.register_loader('numeric',FloatLoader);conn.adapters.register_loader('uuid',TextLoader)
+        return conn
+    @contextlib.contextmanager
+    def session(self):
+        """Hold one connection and the workspace lock for a whole request (load, persist, save)."""
+        conn=self.connect();conn.execute('SELECT pg_advisory_lock(%s)',(LOCK_KEY,));self.local.conn=conn;self.local.seen={}
+        try:yield
+        finally:self.local.conn=None;conn.close()  # Closing the session releases the advisory lock.
+    @contextlib.contextmanager
+    def connection(self):
+        conn=getattr(self.local,'conn',None)
+        if conn:yield conn;return
+        with self.connect() as conn:yield conn
+    def migrate(self):
+        with self.connection() as conn:
+            conn.execute('SELECT pg_advisory_lock(%s)',(LOCK_KEY+1,))
+            conn.execute('CREATE TABLE IF NOT EXISTS schema_migrations (version int PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())')
+            done={r['version'] for r in conn.execute('SELECT version FROM schema_migrations')};applied=[]
+            for path in sorted(MIGRATIONS.glob('[0-9]*.sql')):
+                version=int(path.name.split('_')[0])
+                if version not in done:
+                    with conn.transaction():conn.execute(path.read_text())
+                    applied.append(path.name)
+            conn.execute('SELECT pg_advisory_unlock(%s)',(LOCK_KEY+1,))
+            return applied
+
+    def load(self):
+        s=main_seed();seen={}
+        with self.connection() as conn,conn.transaction():
+            q=lambda sql:conn.execute(sql).fetchall()
+            settings=q('SELECT * FROM workspace_settings')[0]
+            s.update(settings['extra']);s['schemaVersion']=settings['schema_version']
+            s['permissions']={**s['permissions'],**settings['extra'].get('permissionExtras',{}),'dailyCap':settings['daily_cap'],'automation':settings['automation']};s.pop('permissionExtras',None)
+            s['safety']={key:settings[column] for key,column in SAFETY_COLUMNS.items()}
+            for r in q('SELECT * FROM accounts ORDER BY created_at,id'):
+                a={**r['extra'],**present(r,{'id':'id','name':'name','venue':'venue','environment':'environment','subaccount':'subaccount','liveEnabled':'live_enabled','credentialRef':'credential_ref','credentialMasks':'credential_masks','status':'status','stale':'stale','balance':'balance'}),'error':r['error']}
+                a['ceiling']=dict(a.pop('ceilingExtras',{}))
+                if r['ceiling_daily_cap'] is not None:a['ceiling']['dailyCap']=r['ceiling_daily_cap']
+                if r['baseline_day']:a['baseline']={'day':r['baseline_day'].isoformat(),'equity':r['baseline_equity']}
+                s['accounts'].append(a)
+            for r in q('SELECT * FROM agents ORDER BY created_at,id'):
+                g={**r['extra'],**present(r,{'id':'id','accountId':'account_id','name':'name','provider':'provider','model':'model','modelValidated':'model_validated','modelCredentialRef':'model_credential_ref','modelKeyMask':'model_key_mask','status':'status'}),'personality':r['personality']}
+                g['mandate']=None if r['auto_limit'] is None else {'autoLimit':r['auto_limit'],'dailyCap':r['daily_cap'],'minimum':r['minimum_reserve'],'newMarketApproval':r['new_market_approval']}
+                s['agentConfigs'].append(g);s['chats'][g['id']]=[]
+            evaluations={}
+            for r in q('SELECT * FROM order_evaluations ORDER BY order_id,seq'):
+                evaluations.setdefault(r['order_id'],[]).append({'time':iso(r['evaluated_at']),'outcome':r['outcome'],'checks':r['checks'],'layers':r['layers']})
+            for r in q('SELECT * FROM orders ORDER BY created_at DESC,id DESC'):
+                o={**r['extra'],**present(r,{'id':'id','agent':'agent_id','accountId':'account_id','market':'market','direction':'direction','amount':'amount','request':'reasoning','status':'status','decision':'decision','committed':'committed','filled':'filled','automatic':'automatic','venueOrderId':'venue_order_id','quantity':'quantity','actualCost':'actual_cost'})}
+                o['time']=iso(r['created_at']);o['evaluations']=evaluations.get(o['id'],[]);seen[('evaluations',o['id'])]=len(o['evaluations'])
+                s['orders'].append(o)
+            s['keys']={f"{r['agent_id']}:{r['key']}":r['order_id'] for r in q('SELECT * FROM idempotency_keys')}
+            for r in q('SELECT agent_id,role,text FROM chat_messages ORDER BY agent_id,seq'):
+                s['chats'].setdefault(r['agent_id'],[]).append({'role':r['role'],'text':r['text']})
+            s['events']=[{'id':r['id'],'time':iso(r['time']),'text':r['text'],'kind':r['kind'],'trade':r['order_id']} for r in conn.execute('SELECT * FROM events ORDER BY time DESC,seq DESC LIMIT %s',(EVENT_LIMIT,))]
+        seen.update(self.signatures(s));self.local.seen=seen
+        return s
+
+    def signatures(self,s):
+        seen={'settings':signature(self.settings(s)),'events':{e['id'] for e in s['events']},'keys':set(s['keys'])}
+        seen.update({('chat',agent):len(messages) for agent,messages in s['chats'].items()})
+        for kind,rows in (('account',s['accounts']),('agent',s['agentConfigs']),('order',s['orders'])):
+            seen.update({(kind,x['id']):signature(x) for x in rows})
+        return seen
+    def settings(self,s):
+        return {'permissions':s['permissions'],'safety':s.get('safety',{}),'schemaVersion':s.get('schemaVersion',3),'extra':{**{k:v for k,v in s.items() if k not in TOP_FIELDS},'permissionExtras':{k:v for k,v in s['permissions'].items() if k not in ('dailyCap','automation')}}}
+
+    def save(self,s):
+        """Write rows changed since this request's load; append-only rows are written exactly once."""
+        from psycopg.types.json import Jsonb
+        j=lambda v:None if v is None else Jsonb(v)
+        seen=getattr(self.local,'seen',None) or {};changed=lambda kind,x:seen.get((kind,x['id']))!=signature(x)
+        with self.connection() as conn,conn.transaction():
+            cur=conn.cursor();run=lambda sql,rows:rows and cur.executemany(sql,rows)
+            settings=self.settings(s)
+            if seen.get('settings')!=signature(settings):
+                cur.execute('UPDATE workspace_settings SET daily_cap=%s,automation=%s,daily_loss_cap=%s,market_cap=%s,exposure_cap=%s,slippage_max=%s,schema_version=%s,extra=%s',
+                    (s['permissions']['dailyCap'],s['permissions']['automation'],*(settings['safety'][k] for k in SAFETY_COLUMNS),settings['schemaVersion'],Jsonb(settings['extra'])))
+            run(ACCOUNT_UPSERT,[(a['id'],a['name'],a['venue'],a['environment'],a.get('subaccount',0),a.get('liveEnabled',False),a.get('credentialRef'),j(a.get('credentialMasks')),a['status'],a.get('stale',True),a.get('error'),
+                (a.get('ceiling') or {}).get('dailyCap'),(a.get('baseline') or {}).get('day'),(a.get('baseline') or {}).get('equity'),j(a.get('balance')),Jsonb({**{k:v for k,v in a.items() if k not in ACCOUNT_FIELDS},'ceilingExtras':{k:v for k,v in a.get('ceiling',{}).items() if k!='dailyCap'}}))
+                for a in s['accounts'] if changed('account',a)])
+            run(AGENT_UPSERT,[(g['id'],g['accountId'],g['name'],g['provider'],g['model'],g.get('modelValidated',False),g.get('modelCredentialRef'),g.get('modelKeyMask'),g['status'],g.get('personality'),
+                *((g['mandate'][k] for k in ('autoLimit','dailyCap','minimum','newMarketApproval')) if g.get('mandate') else (None,)*4),Jsonb({k:v for k,v in g.items() if k not in AGENT_FIELDS}))
+                for g in s['agentConfigs'] if changed('agent',g)])
+            run(ORDER_UPSERT,[(o['id'],o['agent'],o['accountId'],o['market']['id'],Jsonb(o['market']),o['direction'],o['amount'],o.get('request'),o['status'],o.get('decision'),o.get('committed'),o.get('filled',False),
+                o.get('automatic'),o.get('venueOrderId'),o.get('quantity'),o.get('actualCost'),Jsonb({k:v for k,v in o.items() if k not in ORDER_FIELDS}),o['time'])
+                for o in s['orders'] if changed('order',o)])
+            run('INSERT INTO order_evaluations (order_id,seq,evaluated_at,outcome,checks,layers) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+                [(o['id'],i,e['time'],e['outcome'],Jsonb(e['checks']),Jsonb(e['layers'])) for o in s['orders'] for i,e in enumerate(o['evaluations']) if i>=seen.get(('evaluations',o['id']),0)])
+            run('INSERT INTO idempotency_keys (agent_id,key,order_id) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING',
+                [(*scoped.split(':',1),order) for scoped,order in s['keys'].items() if scoped not in seen.get('keys',())])
+            run('INSERT INTO chat_messages (agent_id,seq,role,text) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+                [(agent,i,m['role'],m['text']) for agent,messages in s['chats'].items() for i,m in enumerate(messages) if i>=seen.get(('chat',agent),0)])
+            # State lists events newest first; insert oldest first so seq follows insertion order.
+            run('INSERT INTO events (id,time,kind,text,order_id) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+                [(e['id'],e['time'],e['kind'],e['text'],e.get('trade')) for e in reversed(s['events']) if e['id'] not in seen.get('events',())])
+        seen=self.signatures(s)
+        seen.update({('evaluations',o['id']):len(o['evaluations']) for o in s['orders']})
+        self.local.seen=seen
+
+if __name__=='__main__':
+    import os,sys
+    if sys.argv[1:]!=['migrate'] or not os.environ.get('DATABASE_URL'):sys.exit('Usage: DATABASE_URL=... python store.py migrate')
+    applied=PostgresStore(os.environ['DATABASE_URL']).migrate();print('Applied: '+', '.join(applied) if applied else 'Database schema is up to date.')

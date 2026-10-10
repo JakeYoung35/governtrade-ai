@@ -15,7 +15,16 @@ class Workspace:
             if not all(math.isfinite(float(b[k])) and float(b[k])>=0 for k in ('cash','positionValue','exposure')):raise VenueError('Venue returned invalid balance values.')
             equity=b['cash']+b.get('reserved',0)+b['positionValue'];day=now()[:10]
             if a.get('baseline',{}).get('day')!=day:a['baseline']={'day':day,'equity':equity}
-            b['dailyLoss']=max(0,a['baseline']['equity']-equity);a.update(balance=b,status='connected',stale=False,error=None);return b
+            observed=max(0,a['baseline']['equity']-equity)
+            # No verified venue user ID is exposed by the implemented API. Retain
+            # the worst observed loss for every Kalshi connection in this environment.
+            # This conservative workspace gate survives replacement keys/subaccounts.
+            ledger=s.setdefault('dailyLossLedger',{});scope=a['venue']+':'+a['environment']
+            prior=ledger.get(scope,{})
+            legacy=max((x.get('balance',{}).get('dailyLoss',0) for x in s['accounts'] if x['id']!=a['id'] and x['venue']==a['venue'] and x['environment']==a['environment'] and x.get('baseline',{}).get('day')==day),default=0)
+            loss=max(observed,legacy,prior.get('loss',0) if prior.get('day')==day else 0)
+            ledger[scope]={'day':day,'loss':loss}
+            b['dailyLoss']=loss;a.update(balance=b,status='connected',stale=False,error=None);return b
         except (ValueError,KeyError,ImportError):a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.');return None
     def evaluate(self,s,o,approved=False):
         a=next(x for x in s['accounts'] if x['id']==o['accountId']);v=self.venue(a);s['clock']=now();b=self.refresh(s,a)
@@ -76,7 +85,7 @@ class Workspace:
                 test=adapter('kalshi',credentials,environment,subaccount);test.headers('GET',test.base+'/portfolio/balance')
             if a and any(o.get('committed') and o['accountId']==a['id'] and o['status'] in ('submitted','open','submission unknown') for o in s['orders']):raise ValueError('Reconcile outstanding submissions before rotating keys.')
             reference=self.vault.put(credentials,a.get('credentialRef') if a else None) if credentials else a['credentialRef']
-            if not a:a={'id':str(uuid.uuid4()),'ceiling':{'dailyCap':s['permissions']['dailyCap']}};s['accounts'].append(a)
+            if not a:a={'id':str(uuid.uuid4()),'ceiling':{}};s['accounts'].append(a)
             a.update(name=str(b.get('name',kind))[:100],venue='kalshi',environment=environment,connectionType=kind,subaccount=subaccount,liveEnabled=environment=='live',credentialRef=reference,status='disconnected',stale=True,error=None)
             if credentials:a['credentialMasks']=masks(credentials)
             a.pop('balance',None);event(s,'Kalshi connection saved. Test connection to sync balances.')
@@ -85,6 +94,7 @@ class Workspace:
         elif action=='account-disconnect':
             a=next(x for x in s['accounts'] if x['id']==b['id'])
             if any(o.get('committed') and o['accountId']==a['id'] and o['status'] in ('submitted','open','submission unknown') for o in s['orders']):raise ValueError('Reconcile outstanding submissions at the venue before disconnecting.')
+            if self.refresh(s,a) is None:raise ValueError('Sync the account successfully before disconnecting so observed loss is preserved.')
             self.vault.delete(a['credentialRef']);a.update(status='disconnected',stale=True);a.pop('credentialRef',None)
             for agent in s['agentConfigs']:
                 if agent['accountId']==a['id']:agent['status']='paused'

@@ -26,7 +26,11 @@ class Vault:
     def write(self, values):
         self.directory.mkdir(exist_ok=True);temporary=self.path.with_suffix('.tmp')
         fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
-        with os.fdopen(fd,'wb') as f:f.write(self.cipher().encrypt(json.dumps(values).encode()))
+        try:
+            with os.fdopen(fd,'wb') as f:f.write(self.cipher().encrypt(json.dumps(values).encode()))
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
         temporary.replace(self.path);os.chmod(self.path,0o600)
     def put(self, credentials, reference=None):
         values=self.read();reference=reference or str(uuid.uuid4());values[reference]=credentials;self.write(values);return reference
