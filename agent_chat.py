@@ -9,7 +9,6 @@ The model never places orders. Each proposal goes through GovernorService.submit
 (maxBudgetUsd is only a ceiling) and the user's mandate, account ceiling and approvals still apply. The model
 gets no credentials and no tools that change mandates or ceilings.
 """
-import datetime as dt
 from decimal import Decimal
 import re
 import threading
@@ -20,12 +19,13 @@ from adapters import KalshiAdapter, VenueError, adapter
 from agent_llm import TIMEOUT_SECONDS, ModelError, connect, post_json
 from engine import event
 from governor import api
+from governor_service import utc_now
 
 HISTORY_MESSAGES = 20  # earlier chat messages sent as context
 MAX_MESSAGE_CHARS = 2000
 MAX_REPLY_CHARS = 6000  # chat_messages.text allows 8,000; leaves room for the governor notes
 MAX_STEPS = 10  # model calls per chat turn
-TURN_SECONDS = 120  # wall-clock budget for one chat turn, across all its model calls
+TURN_SECONDS = 120  # shared deadline for model calls, tools and individual venue requests
 MAX_PROPOSALS = 5  # proposals per chat turn
 # Dollar amounts the user typed: "$25", "$1,000.50", "$5k", "$2 million", "25 dollars", "25 usd", "25 bucks".
 AMOUNT = re.compile(r"\$\s?(?P<a>\d{1,3}(?:,\d{3})+|\d+)(?P<ac>\.\d{1,2})?(?:\s?(?P<as>k|m|thousand|million)\b)?"
@@ -89,10 +89,6 @@ PROPOSE_TOOL = {
 }
 
 
-def utc_now():
-    return dt.datetime.now(dt.timezone.utc)
-
-
 def _words(text):
     return re.findall(r"[a-z]+", text.lower())
 
@@ -109,7 +105,12 @@ def stated_amounts(text):
                                (match.group("b"), match.group("bc"), match.group("bs")))
         amount = Decimal(whole.replace(",", "") + (cents or "")) * SCALE.get((scale or "").lower(), 1)
         before, after = _words(text[:match.start()])[-2:], _words(text[match.end():])[:1]
-        level = ((before[-1:] and before[-1] in LEVEL_BEFORE) or (between and before[-1:] == ["and"])
+        # Only immediate stake/budget grammar overrides ambiguous level words.
+        prefix = text[:match.start()]
+        explicit = bool(re.search(r"\b(?:" + "|".join(STAKE_VERBS) +
+                                  r")\s+(?:(?:up to|around|about|at most)\s+)?$", prefix, re.I)
+                        or re.search(r"\b(?:budget|max|limit)\s+(?:is\s+)?$", prefix, re.I))
+        level = not explicit and ((before[-1:] and before[-1] in LEVEL_BEFORE) or (between and before[-1:] == ["and"])
                  or bool(LEVEL_AFTER.match(text[match.end():])))
         between = bool(before[-1:] == ["between"])  # "between $X and $Y": $Y is a level too
         if amount <= 0 or level:
@@ -163,11 +164,13 @@ class AgentChat:
             history = [("user" if m["role"] == "customer" else "assistant", m["text"]) for m in chat[-HISTORY_MESSAGES:]
                        if not (m["role"] == "agent" and m["text"].startswith(LEGACY_REPLY))]
             # The amounts the user typed bound what this turn may propose. A reply to the agent's follow-up question
-            # ("Which team?" "Philadelphia") has none, so it uses the user's previous message.
+            # ("Which team?" "Philadelphia") may inherit an unused allowance from a completed turn.
             amounts = stated_amounts(text)
-            if not amounts:
-                previous = next((m["text"] for m in reversed(chat) if m["role"] == "customer"), "")
-                amounts = stated_amounts(previous)
+            # Persisted in workspace settings (JSON and Postgres), not transient history or the
+            # bounded governor request window. Consume before running: a crash cannot renew it.
+            allowance = s.setdefault("chatAllowances", {}).pop(agent["id"], None)
+            if not amounts and allowance and allowance["replyIndex"] == len(chat) - 1:
+                amounts = [Decimal(a) for a in allowance["amounts"]]
             chat.append({"role": "customer", "text": text.strip()})
         except Exception:
             self.release(agent["id"], turn)
@@ -212,6 +215,7 @@ class AgentChat:
 
         try:
             venue = self.market_data(job["account"])
+            venue.deadline = deadline
             tools = BROWSE_TOOLS + ([] if job["blocked"] else [PROPOSE_TOOL])
             conversation = self.connect(job["agent"]["provider"], job["agent"]["model"], job["key"],
                                         self._system_prompt(job), tools, job["history"] + [("user", job["text"])],
@@ -221,9 +225,11 @@ class AgentChat:
                 if time.monotonic() >= deadline:
                     raise ModelError("The agent took too long and stopped.")
                 turn = conversation.step()
+                if time.monotonic() >= deadline:
+                    raise ModelError("The agent took too long and stopped.")
                 if not turn.tool_calls:
                     return {"reply": turn.text, "proposals": proposals, "error": None}
-                conversation.add_tool_results([(call, self._tool(job, call, venue, markets, proposals))
+                conversation.add_tool_results([(call, self._tool(job, call, venue, markets, proposals, deadline))
                                                for call in turn.tool_calls])
             return {"reply": "I couldn't finish within my step limit. Try a more specific request.",
                     "proposals": proposals, "error": None}
@@ -268,8 +274,10 @@ class AgentChat:
                      "briefly: what you proposed and why, or what you need from the user.")
         return "\n".join(lines)
 
-    def _tool(self, job, call, venue, markets, proposals):
+    def _tool(self, job, call, venue, markets, proposals, deadline):
         """Run one tool call. Every failure is returned to the model as {"error": ...} so it can correct itself."""
+        if time.monotonic() >= deadline:
+            raise ModelError("The agent took too long and stopped.")
         args = call.arguments
         try:
             if call.name == "find_series":
@@ -339,8 +347,18 @@ class AgentChat:
         try:
             submitted = []
             notes = []
+            agent = next((a for a in s["agentConfigs"] if a["id"] == job["agentId"]), {})
+            account = next((a for a in s["accounts"] if a["id"] == agent.get("accountId")), {})
+            blocked = self._trading_blocked(s, agent, account)
             for payload in result["proposals"]:
-                code, body = self.governor.submit(s, payload)
+                if blocked:
+                    notes.append(f"No proposal was sent because {blocked}.")
+                    break
+                try:
+                    code, body = self.governor.submit(s, payload)
+                except Exception:
+                    notes.append(f"Submission of {payload['marketId']} could not be confirmed. Check its status before retrying.")
+                    continue
                 submitted.append({"proposalId": payload["proposalId"], "code": code,
                                   "governorProposalId": body.get("governorProposalId")})
                 if code not in (200, 202):
@@ -353,12 +371,19 @@ class AgentChat:
             else:
                 reply = result["reply"] or ("I sent your trade to the portfolio governor." if submitted else
                                             "I don't have an answer for that.")
-            # A long model answer must not fail the save (and lose the proposals); trim it, never the governor's notes.
-            room = MAX_REPLY_CHARS - sum(len(n) + 2 for n in notes)
+            if blocked and result["proposals"]:
+                reply = "Trading settings changed while I was working."
+            # Even unexpectedly verbose provider/governor errors must fit the storage limit.
+            note_text = "\n\n".join(notes)[:MAX_REPLY_CHARS]
+            room = max(0, MAX_REPLY_CHARS - len(note_text) - (2 if note_text else 0))
             if len(reply) > room:
-                reply = reply[:room - 1].rstrip() + "…"
-            reply = "\n\n".join([reply, *notes])
+                reply = (reply[:room - 1].rstrip() + "…") if room else ""
+            reply = "\n\n".join(part for part in (reply, note_text) if part)
             s["chats"].setdefault(job["agentId"], []).append({"role": "agent", "text": reply})
+            if not result["proposals"] and not result["error"] and not blocked and job["amounts"]:
+                s.setdefault("chatAllowances", {})[job["agentId"]] = {
+                    "replyIndex": len(s["chats"][job["agentId"]]) - 1,
+                    "amounts": [str(a) for a in job["amounts"]]}
             queued = sum(p["code"] == 202 for p in submitted)
             if queued:
                 event(s, f"{job['agent']['name']} sent {queued} chat proposal{'s' if queued > 1 else ''} to the portfolio governor.",
@@ -372,7 +397,7 @@ class AgentChat:
         views = {}
         requests = [r for r in s.get("governorRequests", []) if PROPOSAL_ID.match(r["proposalId"])]
         orders = {o["id"]: o for o in s["orders"]}
-        for request, view in zip(requests, self.governor.views(s, requests)):
+        for request, view in zip(requests, self.governor.views(s, requests, orders=orders)):
             match = PROPOSAL_ID.match(request["proposalId"])
             order = orders.get(request.get("orderId"))
             views.setdefault(request["agentId"], []).append({

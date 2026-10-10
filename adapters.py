@@ -27,11 +27,15 @@ class VenueAdapter(ABC):
         if environment not in ('sandbox','live'):raise VenueError('Invalid environment.')
         self.credentials=credentials;self.environment=environment
     def request(self,method,path,body=None,public=False):
+        timeout=15
+        if getattr(self,'deadline',None) is not None:
+            timeout=min(timeout,self.deadline-time.monotonic())
+            if timeout<=0:raise VenueError('Market lookup deadline exceeded.')
         raw=json.dumps(body).encode() if body is not None else None
         url=self.base+path;headers={'Content-Type':'application/json'}
         if not public:headers.update(self.headers(method,url))
         try:
-            with urlopen(Request(url,data=raw,method=method,headers=headers),timeout=15) as r:return json.load(r)
+            with urlopen(Request(url,data=raw,method=method,headers=headers),timeout=timeout) as r:return json.load(r)
         except HTTPError as e:raise VenueError(f'{self.venue} returned HTTP {e.code}. Check credentials, environment and permissions.') from None
         except (URLError,TimeoutError,ValueError):raise VenueError(f'{self.venue} request failed. No confirmed execution result.') from None
     def test_connection(self):return self.get_balance_positions()
@@ -103,13 +107,13 @@ class KalshiAdapter(VenueAdapter):
                 yes,no=float(m.get('yes_ask_dollars') or 0),float(m.get('no_ask_dollars') or 0)
                 if m.get('status')=='active' and (0<yes<1 or 0<no<1):
                     rows.append({'marketId':m['ticker'],'event':str(e.get('title') or ''),'outcome':str(m.get('yes_sub_title') or m.get('title') or ''),'yesAsk':yes if 0<yes<1 else None,'noAsk':no if 0<no<1 else None,'closeTime':m.get('close_time'),'volume':float(m.get('volume_fp') or 0)})
-        rows.sort(key=lambda r:(r['closeTime'] or '',-r['volume']))
+        rows.sort(key=lambda r:(not bool(r['closeTime']),r['closeTime'] or '',-r['volume']))
         return rows[:limit]
     def market_summary(self,market_id):
         # Both sides' asks from one market read, plus whether the app can trade it.
         m,category,multiplier,supported=self._market(market_id)
         yes,no=float(m.get('yes_ask_dollars') or 0),float(m.get('no_ask_dollars') or 0)
-        return {'marketId':market_id,'title':m.get('title',market_id),'outcome':m.get('yes_sub_title'),'category':category,'yesAsk':yes if 0<yes<1 else None,'noAsk':no if 0<no<1 else None,'closeTime':m.get('close_time'),'open':m.get('status')=='active','tradable':supported and (0<yes<1 or 0<no<1),'rules':(m.get('rules_primary') or '')[:600]}
+        return {'marketId':m['ticker'],'title':m.get('title',m['ticker']),'outcome':m.get('yes_sub_title'),'category':category,'yesAsk':yes if 0<yes<1 else None,'noAsk':no if 0<no<1 else None,'closeTime':m.get('close_time'),'open':m.get('status')=='active','tradable':supported and (0<yes<1 or 0<no<1),'rules':(m.get('rules_primary') or '')[:600]}
     def _market(self,market_id):
         # Market, category and fee terms shared by quotes and order books.
         m=self.request('GET','/markets/'+quote(market_id,safe=''),public=True)['market']

@@ -99,9 +99,11 @@ class GovernorService:
         request = next((r for r in s.get("governorRequests", []) if r["governorProposalId"] == governor_proposal_id), None)
         return None if request is None else self._view(s, request)
 
-    def views(self, s, requests):
+    def views(self, s, requests, orders=None):
         """_view for many requests, indexing decisions and orders once instead of scanning them per request."""
-        decisions, orders = {}, {o["id"]: o for o in s["orders"]}
+        decisions = {}
+        if orders is None:
+            orders = {o["id"]: o for o in s["orders"]}
         for d in s.get("governorDecisions", []):
             decisions.setdefault(d["proposalId"], d)  # first match wins, as in _view
         return [self._view(s, r, decisions, orders) for r in requests]

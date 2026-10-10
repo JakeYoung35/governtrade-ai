@@ -270,8 +270,8 @@ class GuardTests(ChatTest):
         result = service.run(job)
         self.s["agentConfigs"][0]["status"] = "paused"  # paused while the model was working
         summary = service.finish(self.s, job, result)
-        self.assertEqual(summary["proposals"][0]["code"], 400)
-        self.assertIn("did not accept the " + MARKET, self.s["chats"]["agent"][1]["text"])
+        self.assertEqual(summary["proposals"], [])
+        self.assertIn("No proposal was sent because the agent is paused", self.s["chats"]["agent"][1]["text"])
         self.assertEqual(self.s.get("governorRequests", []), [])
 
 
@@ -369,11 +369,11 @@ class LimitTests(ChatTest):
         service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(calls(propose()), ModelTurn("x" * 9000)))
         job = service.begin(self.s, {"agent": "agent", "text": "Put $20 on Cleveland"})
         result = service.run(job)
-        self.s["agentConfigs"][0]["status"] = "paused"  # so the governor refuses it and adds a note
+        self.governor.submit = lambda s, p: (400, {"error": "test refusal"})
         service.finish(self.s, job, result)
         reply = self.s["chats"]["agent"][1]["text"]
         self.assertLessEqual(len(reply), agent_chat.MAX_REPLY_CHARS)
-        self.assertTrue(reply.endswith("must be an active agent with a saved mandate."))
+        self.assertTrue(reply.endswith("test refusal."))
         self.assertIn("x…", reply)
 
     def test_a_turn_stops_at_its_deadline_and_keeps_what_it_proposed(self):
@@ -413,6 +413,78 @@ class LimitTests(ChatTest):
         self.governor.run_batch(self.s)
         request = self.s["governorRequests"][0]
         self.assertEqual(self.governor.views(self.s, [request]), [self.governor.lookup(self.s, request["governorProposalId"])])
+
+
+    def test_natural_budget_phrases(self):
+        for text, amount in [("Spend up to $50 on the Eagles", 50), ("Put $20 or less on the Chiefs", 20),
+                             ("Put around $15 on the Lakers", 15), ("Put about $15 on the Lakers", 15),
+                             ("My budget is $20", 20), ("My limit is $25", 25)]:
+            with self.subTest(text=text):
+                self.assertEqual(agent_chat.stated_amounts(text), [amount])
+
+    def test_spent_allowance_is_not_reused_after_reload(self):
+        self.chat(ScriptedModel(calls(propose()), ModelTurn("Done.")))
+        self.s = json.loads(json.dumps(self.s))
+        self.s["governorRequests"] = []  # even after the bounded request history is compacted
+        model = ScriptedModel(calls(propose()), ModelTurn("How much?"))
+        self.chat(model, text="great, also do the Chiefs")
+        self.assertIn("has not given a dollar amount", model.results[0][0]["error"])
+        self.assertEqual(self.s["governorRequests"], [])
+
+    def test_followup_allowance_survives_reload_but_not_interrupted_turn(self):
+        self.chat(ScriptedModel(ModelTurn("Which team?")))
+        self.s = json.loads(json.dumps(self.s))
+        service = AgentChat(self.workspace, self.governor)
+        job = service.begin(self.s, {"agent": "agent", "text": "Philadelphia"})
+        self.assertEqual(job["amounts"], [20])
+        service.release(job["agentId"], job["turn"])  # simulate an interrupted turn
+        self.s = json.loads(json.dumps(self.s))
+        job = service.begin(self.s, {"agent": "agent", "text": "also Cleveland"})
+        self.assertEqual(job["amounts"], [])
+
+    def test_submit_failure_keeps_other_proposals_and_reply(self):
+        self.venue.books["KX-2"] = ("0.40", "0.62", "100")
+        original = self.governor.submit
+        def submit(state, payload):
+            if payload["marketId"] == "KX-2":
+                raise RuntimeError("secret database details")
+            return original(state, payload)
+        self.governor.submit = submit
+        model = ScriptedModel(calls(propose(maxBudgetUsd=10), propose(marketId="KX-2", maxBudgetUsd=10)), ModelTurn("Done."))
+        self.chat(model)
+        self.assertEqual(len(self.s["governorRequests"]), 1)
+        reply = self.s["chats"]["agent"][-1]["text"]
+        self.assertIn("could not be confirmed", reply)
+        self.assertNotIn("secret", reply)
+        self.assertNotIn("agent", self.s["chatAllowances"])
+
+    def test_pausing_all_trading_midturn_does_not_submit(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(calls(propose()), ModelTurn("Sent!")))
+        job = service.begin(self.s, {"agent": "agent", "text": "Put $20 on Cleveland"})
+        result = service.run(job)
+        self.s["permissions"]["automation"] = False
+        with patch.object(self.governor, "submit") as submit:
+            service.finish(self.s, job, result)
+            submit.assert_not_called()
+        self.assertNotIn("Sent!", self.s["chats"]["agent"][-1]["text"])
+
+    def test_oversized_notes_still_fit_reply_limit(self):
+        self.governor.submit = lambda s, p: (400, {"error": "x" * 9000})
+        self.chat(ScriptedModel(calls(propose()), ModelTurn("Done.")))
+        self.assertLessEqual(len(self.s["chats"]["agent"][-1]["text"]), agent_chat.MAX_REPLY_CHARS)
+
+    def test_deadline_stops_further_tools_in_one_model_step(self):
+        clock, seen = [0.0], []
+        def summary(ticker):
+            seen.append(ticker)
+            clock[0] += 121
+            return {}
+        self.venue.market_summary = summary
+        model = ScriptedModel(calls(("get_market", {"marketId": "A"}), ("get_market", {"marketId": "B"})))
+        with patch("agent_chat.time.monotonic", lambda: clock[0]):
+            self.chat(model)
+        self.assertEqual(seen, ["A"])
+        self.assertIn("took too long", self.s["chats"]["agent"][-1]["text"])
 
 
 class ProviderTests(unittest.TestCase):
@@ -537,6 +609,30 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(venue.find_series("Sports", "nfl"), [{"seriesTicker": "KXNFLGAME", "title": "", "frequency": None}])
         self.assertEqual(venue.list_markets("KXNFLGAME"), [{"marketId": "KX-A", "event": "", "outcome": "", "yesAsk": None,
                                                             "noAsk": 0.4, "closeTime": None, "volume": 0.0}])
+
+    def test_market_summary_uses_canonical_ticker(self):
+        venue = KalshiAdapter({}, "sandbox")
+        venue._market = lambda ticker: ({"ticker": "KX-A", "status": "active", "yes_ask_dollars": "0.4"}, "sports", 1, True)
+        self.assertEqual(venue.market_summary("kx-a")["marketId"], "KX-A")
+
+    def test_unknown_close_times_sort_last(self):
+        venue = KalshiAdapter({}, "sandbox")
+        venue.request = lambda *a, **kw: {"events": [{"markets": [
+            {"ticker": ticker, "status": "active", "yes_ask_dollars": "0.4", "close_time": close}
+            for ticker, close in [("UNKNOWN", None), ("LATE", "2026-11-01"), ("EARLY", "2026-10-01")]]}]}
+        self.assertEqual([m["marketId"] for m in venue.list_markets("KX")], ["EARLY", "LATE", "UNKNOWN"])
+
+    def test_each_venue_request_gets_remaining_time(self):
+        import io
+        venue = KalshiAdapter({}, "sandbox")
+        venue.deadline = 120
+        with patch("adapters.time.monotonic", return_value=118), patch("adapters.urlopen", return_value=io.BytesIO(b'{}')) as request:
+            venue.request("GET", "/markets", public=True)
+            self.assertEqual(request.call_args.kwargs["timeout"], 2)
+        with patch("adapters.time.monotonic", return_value=120), patch("adapters.urlopen") as request:
+            with self.assertRaisesRegex(VenueError, "deadline"):
+                venue.request("GET", "/markets", public=True)
+            request.assert_not_called()
 
 
 class HttpTests(unittest.TestCase):
