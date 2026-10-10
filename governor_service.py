@@ -127,11 +127,7 @@ class GovernorService:
             if items and account.get("status") != "disconnected":
                 plans[account["id"]] = {"account": copy.deepcopy(account),
                                         "requestIds": sorted(r["governorProposalId"] for r in items),
-                                        "markets": sorted({r["proposal"]["marketId"] for r in items}),
-                                        # Order statuses when the venue read starts: an order that commits or fills
-                                        # while the lock is released may be missing from the fetched positions.
-                                        "orderStatuses": {o["id"]: o.get("status") for o in s["orders"]
-                                                          if o.get("accountId") == account["id"]}}
+                                        "markets": sorted({r["proposal"]["marketId"] for r in items})}
         return plans
 
     def fetch(self, plans):
@@ -204,8 +200,8 @@ class GovernorService:
             return {"accountId": account_id, "decided": 0, "note": fetched["error"]}
         venue = self.workspace.venue(account)
         started = fetched["startedAt"]
-        balance = self._newest_balance(s, account, fetched["balance"])
-        in_flight = self._in_flight(s, account, fetched.get("orderStatuses"))
+        balance, read_started = self._newest_balance(s, account, fetched["balance"], started)
+        in_flight = self._in_flight(s, account, read_started)
         books = fetched["books"]
         snapshot_id = self.new_id()
         snapshot = build_snapshot(books, snapshot_id=snapshot_id, taken_at=started)
@@ -229,30 +225,41 @@ class GovernorService:
                 self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id])
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
-    def _newest_balance(self, s, account, fetched):
-        """The fetched balance, unless the account was refreshed after it was read (e.g. after a fill while the
-        lock was released). Applying the older read would roll the account's balance and positions back."""
-        current = account.get("balance")
-        if fetched is not None and current and not account.get("stale"):
-            try:
-                if dt.datetime.fromisoformat(current["asOf"]) > dt.datetime.fromisoformat(fetched["asOf"]):
-                    return current
-            except (KeyError, TypeError, ValueError):
-                pass  # an unreadable timestamp: fall back to the fetched read
-        return self.workspace.apply_balance(s, account, fetched)
+    def _newest_balance(self, s, account, fetched, started):
+        """The balance to decide on, and when its venue read started (see _in_flight).
 
-    def _in_flight(self, s, account, planned_statuses):
-        """Orders that committed or filled after the plan was taken, so the fetched positions may not include them.
-
-        Counted as exposure in addition to the positions. If the venue read already included one, it is counted
-        twice: conservative, and limited to the few seconds the lock was released. Without a plan (run_batch
-        fetching under the lock) nothing is in flight.
+        Normally the fetched read, which started at `started` with the lock released. If the account was refreshed
+        under the lock after that read started (e.g. Workspace.evaluate's refresh after a fill), that newer balance
+        is used instead, including when the unlocked read failed: applying the older read, or marking the account
+        errored, would roll back a fresh balance. A refresh under the lock never overlaps an order placement, so
+        its asOf is a safe read start.
         """
-        if planned_statuses is None:
-            return []
+        current = account.get("balance")
+        if current and not account.get("stale"):
+            try:
+                current_as_of = dt.datetime.fromisoformat(current["asOf"])
+                newer = current_as_of > (dt.datetime.fromisoformat(fetched["asOf"]) if fetched is not None else started)
+            except (KeyError, TypeError, ValueError):
+                newer = False  # an unreadable timestamp: fall back to the fetched read
+            if newer:
+                return current, current_as_of
+        return self.workspace.apply_balance(s, account, fetched), started
+
+    def _in_flight(self, s, account, read_started):
+        """Orders the venue answered at or after the balance read started, so its positions may not include them.
+
+        Counted as exposure on top of the positions. An order placed before the read started is already in the
+        positions; one placed while the unlocked read ran may or may not be, and is counted (conservative, only
+        for orders placed in those few seconds). Orders without executedAt predate it and are never counted.
+        """
+        def executed_since(o):
+            try:
+                return dt.datetime.fromisoformat(o["executedAt"]) >= read_started
+            except (KeyError, TypeError, ValueError):
+                return False
         return [o for o in s["orders"] if o.get("accountId") == account["id"]
-                and planned_statuses.get(o["id"]) != o.get("status")
-                and (o.get("filled") or (o.get("committed") and o.get("status") in ("submitted", "open")))]
+                and (o.get("filled") or (o.get("committed") and o.get("status") in ("submitted", "open")))
+                and executed_since(o)]
 
     def _portfolio(self, s, account, balance, snapshot, now, in_flight=()):
         state = records.breaker_state(s, account["id"])

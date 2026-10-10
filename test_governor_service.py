@@ -490,28 +490,46 @@ class ContainmentTests(ServiceTest):
         statuses = {r["proposalId"]: r["status"] for r in self.s["governorRequests"]}
         self.assertEqual(statuses, {"p-1": "submitted", "late": "queued"})
 
-    def test_a_fill_during_the_unlocked_fetch_counts_as_exposure(self):
+    def market_exposures(self, market_id=MARKET):
+        """Exposures the latest batch decided with, for one market (the batch records its exact inputs)."""
+        return [e for e in self.s["governorBatches"][0]["inputs"]["portfolio"]["exposures"] if e["marketId"] == market_id]
+
+    def filled_order(self, order_id, executed_at):
+        return {"id": order_id, "agent": "agent-2", "accountId": "account", "market": {"id": MARKET, "venue": "kalshi"},
+                "direction": "Yes", "amount": 10, "actualCost": 9.5, "status": "filled", "filled": True,
+                "committed": True, "time": executed_at, "executedAt": executed_at, "evaluations": []}
+
+    def test_a_fill_the_unlocked_read_may_have_missed_counts_as_exposure(self):
         self.submit()
         fetched = self.service.fetch(self.service.plan(self.s))  # positions read before the fill below
-        # While the lock is released, the user approves another agent's order on the same market and it fills.
-        self.s["orders"].insert(0, {"id": "filled-mid-pass", "agent": "agent-2", "accountId": "account",
-                                    "market": {"id": MARKET, "venue": "kalshi"}, "direction": "Yes", "amount": 10,
-                                    "actualCost": 9.5, "status": "filled", "filled": True, "committed": True,
-                                    "time": utc_now().isoformat(), "evaluations": []})
+        # While the lock is released, another order fills and the app's refresh after it fails, so the account
+        # still holds only the governor's older read.
+        self.s["orders"].insert(0, self.filled_order("filled-mid-pass", utc_now().isoformat()))
         self.venue.positions = [{"ticker": MARKET, "position_fp": "19.00", "market_exposure_dollars": "9.50"}]
         self.service.run_batch(self.s, fetched)
         request = self.s["governorRequests"][0]
         self.assertEqual(request["status"], "rejected")
         self.assertEqual(self.service.lookup(self.s, request["governorProposalId"])["decision"]["reasonCodes"], [rules.POSITION_OPEN])
+        self.assertEqual(len(self.market_exposures()), 1)
 
-    def test_orders_unchanged_since_the_plan_are_not_counted_twice(self):
-        self.s["orders"].insert(0, {"id": "old-cancel", "agent": "agent-2", "accountId": "account",
-                                    "market": {"id": MARKET, "venue": "kalshi"}, "direction": "Yes", "amount": 10,
-                                    "status": "cancelled", "filled": False, "committed": False,
-                                    "time": utc_now().isoformat(), "evaluations": []})
-        self.submit()
+    def test_a_fill_through_the_workspace_during_the_window_is_counted_once(self):
+        # Workspace.evaluate refreshes after the fill, so the refreshed positions already include it.
+        self.submit(marketId=OTHER)
+        fetched = self.service.fetch(self.service.plan(self.s))
+        self.venue.positions = [{"ticker": MARKET, "position_fp": "19.00", "market_exposure_dollars": "9.50"}]
+        order = self.workspace.proposal(self.s, {"agentId": "agent-2", "marketId": MARKET, "direction": "Yes", "amount": 10,
+                                                 "reasoning": "Placed while the governor's read ran.", "idempotencyKey": "mid-pass"})
+        self.assertEqual(order["status"], "filled")
+        self.service.run_batch(self.s, fetched)
+        self.assertEqual([e["amount"] for e in self.market_exposures()], ["9.50"])  # the refreshed position only
+
+    def test_orders_placed_before_the_read_are_not_counted_twice(self):
+        earlier = (utc_now() - timedelta(minutes=5)).isoformat()
+        self.s["orders"].insert(0, self.filled_order("filled-earlier", earlier))
+        self.venue.positions = [{"ticker": MARKET, "position_fp": "19.00", "market_exposure_dollars": "9.50"}]
+        self.submit(marketId=OTHER)
         self.service.run_batch(self.s, self.service.fetch(self.service.plan(self.s)))
-        self.assertEqual(self.s["governorRequests"][0]["status"], "submitted")
+        self.assertEqual([e["amount"] for e in self.market_exposures()], ["9.50"])
 
     def test_a_refresh_during_the_unlocked_fetch_is_not_rolled_back(self):
         self.submit(marketId="KX-NOT-LISTED")  # rejected, so no order execution refreshes the balance afterwards
@@ -520,6 +538,17 @@ class ContainmentTests(ServiceTest):
         self.workspace.refresh(self.s, self.s["accounts"][0])  # a newer read under the lock, e.g. after a fill
         self.service.run_batch(self.s, fetched)
         self.assertEqual(self.s["accounts"][0]["balance"]["cash"], 900)
+
+    def test_a_failed_read_keeps_a_fresher_balance(self):
+        self.submit(marketId="KX-NOT-LISTED")
+        self.venue.fail = True
+        fetched = self.service.fetch(self.service.plan(self.s))  # the unlocked balance read fails
+        self.venue.fail = False
+        self.workspace.refresh(self.s, self.s["accounts"][0])  # but the app refreshed successfully meanwhile
+        self.service.run_batch(self.s, fetched)
+        account = self.s["accounts"][0]
+        self.assertEqual((account["status"], account["stale"]), ("connected", False))
+        self.assertFalse(self.s["governorBatches"][0]["inputs"]["portfolio"]["valuationStale"])
 
     def test_scoring_reads_outcomes_outside_the_lock(self):
         self.submit()

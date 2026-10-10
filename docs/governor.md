@@ -80,11 +80,13 @@ not depend on the governor's own decisions. Run it on demand with `{"action": "g
   released, then decides and saves under the lock. Order placement goes through `Workspace.proposal`, which,
   like the app's existing order route, refreshes the balance and quotes while holding the lock. In Postgres
   mode an idle pass costs one small query instead of a full workspace load.
-- While the lock is released, other requests can change the account. If the account's balance was refreshed
-  after the governor's read, the decision uses that newer balance rather than rolling it back. Orders that
-  committed or filled after the plan was taken count as exposure on top of the fetched positions, since the
-  venue read may not include them yet. This can count a fill twice for that one pass, which only makes
-  stakes smaller.
+- While the lock is released, other requests can change the account. If the account was refreshed under the
+  lock after the governor's read started (as `Workspace.evaluate` does after every order), the decision uses
+  that newer balance, also when the governor's own read failed, rather than rolling it back. Each order records
+  when the venue answered (`executedAt`). Filled or committed orders answered at or after the start of the
+  balance read actually used count as exposure on top of its positions; orders answered earlier are already in
+  them. A fill that lands while the unlocked read is running may be counted twice for that one pass, which
+  only makes stakes smaller.
 
 ## Configuration
 
