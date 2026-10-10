@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 from governor_service import GovernorService
+from agent_chat import AgentChat
 from vault import Vault
 from workspace import Workspace
 
@@ -26,6 +27,7 @@ class Tenant:
         self.lock = threading.RLock()
         self.workspace = Workspace(Vault(directory), save)
         self.governor = GovernorService(self.workspace)
+        self.chat = AgentChat(self.workspace, self.governor)
 
     @contextlib.contextmanager
     def locked(self):

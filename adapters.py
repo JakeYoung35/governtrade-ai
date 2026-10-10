@@ -27,11 +27,15 @@ class VenueAdapter(ABC):
         if environment not in ('sandbox','live'):raise VenueError('Invalid environment.')
         self.credentials=credentials;self.environment=environment
     def request(self,method,path,body=None,public=False):
+        timeout=15
+        if getattr(self,'deadline',None) is not None:
+            timeout=min(timeout,self.deadline-time.monotonic())
+            if timeout<=0:raise VenueError('Market lookup deadline exceeded.')
         raw=json.dumps(body).encode() if body is not None else None
         url=self.base+path;headers={'Content-Type':'application/json'}
         if not public:headers.update(self.headers(method,url))
         try:
-            with urlopen(Request(url,data=raw,method=method,headers=headers),timeout=15) as r:return json.load(r)
+            with urlopen(Request(url,data=raw,method=method,headers=headers),timeout=timeout) as r:return json.load(r)
         except HTTPError as e:raise VenueError(f'{self.venue} returned HTTP {e.code}. Check credentials, environment and permissions.') from None
         except (URLError,TimeoutError,ValueError):raise VenueError(f'{self.venue} request failed. No confirmed execution result.') from None
     def test_connection(self):return self.get_balance_positions()
@@ -78,6 +82,38 @@ class KalshiAdapter(VenueAdapter):
         except (ValueError,KeyError,TypeError):raise VenueError('Kalshi requires an API key ID and an unencrypted RSA or Ed25519 PEM private key.') from None
     def get_markets(self,category):
         return self.request('GET','/markets?status=open&limit=100',public=True).get('markets',[])
+    # Market discovery for the in-app agent (agent_chat.py). Public reads only; Kalshi has no text search, so
+    # series are filtered by category and keywords here.
+    SERIES_CATEGORIES=('Crypto','Sports','Economics','Financials','Politics','Elections','Entertainment','Climate and Weather','Science and Technology','Companies','World','Commodities','Health')
+    def find_series(self,category,keywords='',limit=20):
+        if category not in self.SERIES_CATEGORIES:raise VenueError('Unknown Kalshi category.')
+        words=[w for w in str(keywords).lower().split() if w]
+        rows=[r for r in self.request('GET','/series?'+urlencode({'category':category}),public=True).get('series') or [] if isinstance(r,dict) and isinstance(r.get('ticker'),str)]
+        # Rank by keyword matches in the ticker, title or tags (a whole word counts double), then shorter titles,
+        # which are the broader series (e.g. "NFL Game" before "NFL Game to Tie"). No keywords: Kalshi's order.
+        def score(r):
+            text=' '.join([r['ticker'],str(r.get('title') or ''),*(t for t in r.get('tags') or [] if isinstance(t,str))]).lower()
+            tokens=set(text.replace('/',' ').replace('-',' ').split())
+            return sum(2 if w in tokens else 1 if w in text else 0 for w in words)
+        scored=[(score(r),len(str(r.get('title') or '')),i,r) for i,r in enumerate(rows)]
+        found=[r for points,length,i,r in sorted(scored,key=lambda x:(-x[0],x[1] if words else 0,x[2])) if points or not words]
+        return [{'seriesTicker':r['ticker'],'title':str(r.get('title') or ''),'frequency':r.get('frequency')} for r in found[:limit]]
+    def list_markets(self,series_ticker,limit=25):
+        # Open markets in a series that have an ask on at least one side, soonest close first.
+        events=self.request('GET','/events?'+urlencode({'status':'open','with_nested_markets':'true','series_ticker':series_ticker,'limit':100}),public=True).get('events') or []
+        rows=[]
+        for e in events:
+            for m in e.get('markets') or []:
+                yes,no=float(m.get('yes_ask_dollars') or 0),float(m.get('no_ask_dollars') or 0)
+                if m.get('status')=='active' and (0<yes<1 or 0<no<1):
+                    rows.append({'marketId':m['ticker'],'event':str(e.get('title') or ''),'outcome':str(m.get('yes_sub_title') or m.get('title') or ''),'yesAsk':yes if 0<yes<1 else None,'noAsk':no if 0<no<1 else None,'closeTime':m.get('close_time'),'volume':float(m.get('volume_fp') or 0)})
+        rows.sort(key=lambda r:(not bool(r['closeTime']),r['closeTime'] or '',-r['volume']))
+        return rows[:limit]
+    def market_summary(self,market_id):
+        # Both sides' asks from one market read, plus whether the app can trade it.
+        m,category,multiplier,supported=self._market(market_id)
+        yes,no=float(m.get('yes_ask_dollars') or 0),float(m.get('no_ask_dollars') or 0)
+        return {'marketId':m['ticker'],'title':m.get('title',m['ticker']),'outcome':m.get('yes_sub_title'),'category':category,'yesAsk':yes if 0<yes<1 else None,'noAsk':no if 0<no<1 else None,'closeTime':m.get('close_time'),'open':m.get('status')=='active','tradable':supported and (0<yes<1 or 0<no<1),'rules':(m.get('rules_primary') or '')[:600]}
     def _market(self,market_id):
         # Market, category and fee terms shared by quotes and order books.
         m=self.request('GET','/markets/'+quote(market_id,safe=''),public=True)['market']

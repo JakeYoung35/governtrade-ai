@@ -38,9 +38,10 @@ class StoreTests(unittest.TestCase):
   self.assertEqual({k:v for k,v in s.items() if k!='clock'},{k:v for k,v in seed.items() if k!='clock'})
  def test_round_trip_is_lossless(self):
   s=self.workspace()
+  s['chatAllowances']={s['agentConfigs'][0]['id']:{'replyIndex':1,'amounts':['20']}}
   with self.store.session():
    self.w.refresh(s,s['accounts'][0]);self.proposal(s,10,'filled');self.proposal(s,40,'pending')
-   self.w.action(s,{'action':'chat','agent':s['agentConfigs'][0]['id'],'text':'Buy BTC'});self.store.save(s)
+   s['chats'][s['agentConfigs'][0]['id']]+=[{'role':'customer','text':'Buy BTC'},{'role':'agent','text':'Proposed.'}];self.store.save(s)
   self.assertEqual(self.reload(),s)
  def test_repeated_saves_do_not_duplicate_rows(self):
   s=self.workspace()

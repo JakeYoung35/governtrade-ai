@@ -85,18 +85,18 @@ Implemented:
 - Individual agent mandates.
 - Account-wide safety controls.
 - Governed trade-proposal and execution endpoints.
+- Agent chat: the agent's own model (OpenAI, Anthropic or Gemini) reads your message, finds the Kalshi market and proposes a trade. The portfolio governor sizes it, and your mandate decides what runs automatically.
 - Trade activity and decision history.
 - An isolated simulated demo.
 
 Still in development:
 
-- The AI worker that turns chat instructions into trade proposals.
 - Polymarket connectivity.
 - Scheduled and multi-day trading.
 - Reliable reconciliation of uncertain order submissions.
 - Authenticated venue acceptance testing.
 
-**Chat currently saves your instructions; it does not independently call an AI model or start trading.** A trusted worker can submit proposals through the governed API.
+**Chat calls the agent's model with its saved API key and can propose real trades on the agent's connected account.** It never places orders directly: every proposal goes through the portfolio governor, the agent mandate and the account ceiling, and trades above the automatic limit wait for your approval. A trusted external worker can also submit proposals through the governed API.
 
 This is a prototype, not a production-certified financial service. The Google sign-in implementation adds personal workspaces; its hosting configuration and end-to-end sign-in must be completed before opening public account connections.
 
