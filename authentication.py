@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 
 SESSION_SECONDS = 8 * 60 * 60
 CHALLENGE_SECONDS = 10 * 60
+SECRET_BYTES = 32
 PROVIDER_TIMEOUT = 10
 
 
@@ -179,17 +180,35 @@ class AuthStore:
 
     @staticmethod
     def _secret(path):
-        """The key that signs login challenges, shared by every process using this data disk."""
+        """The key that signs login challenges, shared by every process using this data disk.
+
+        Written to a private temporary file and published with os.link, which fails if the key already exists, so a
+        crash or a concurrent process can never observe a partly written (empty or short) key. A configured
+        GOVERNTRADE_SESSION_SECRET must be at least 32 characters.
+        """
         configured = os.environ.get('GOVERNTRADE_SESSION_SECRET', '')
         if configured:
+            if len(configured) < SECRET_BYTES:
+                raise ValueError(f'GOVERNTRADE_SESSION_SECRET must be at least {SECRET_BYTES} characters.')
             return configured.encode()
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return path.read_bytes()
-        with os.fdopen(fd, 'wb') as f:
-            value = secrets.token_bytes(32)
-            f.write(value)
+        if not path.exists():
+            temporary = path.with_name(f'.{path.name}.{secrets.token_hex(8)}')
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, 'wb') as f:
+                    f.write(secrets.token_bytes(SECRET_BYTES))
+                    f.flush()
+                    os.fsync(f.fileno())
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    pass  # another process published its key first; use that one
+            finally:
+                temporary.unlink(missing_ok=True)
+        value = path.read_bytes()
+        if len(value) < SECRET_BYTES:
+            raise ValueError(f'{path} is damaged (shorter than {SECRET_BYTES} bytes). Delete it to create a new key; '
+                             'pending sign-ins will need a reload.')
         return value
 
     @contextlib.contextmanager

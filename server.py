@@ -75,8 +75,20 @@ def save(env,s,directory=None):
     if env=='main' and directory is None and active_store():return active_store().save(s)
     folder=directory or data_dir()
     if env=='main':s=compact_for_json(s)  # no database in JSON mode, so bound the governor history kept on disk
+    marker=env=='main' and folder!=DATA
+    if marker:
+        # Order the writes so a crash between them errs toward "has work": a stale marker then costs one extra pass,
+        # never a skipped proposal. Before the workspace, record the union of the old and new status; after, the exact.
+        status=governor_status(s);previous=read_governor_status(folder)
+        write_json(folder/GOVERNOR_STATUS,{k:status[k] or bool(previous.get(k,True)) for k in status})
     write_json(folder/(env+'.json'),s)
-    if env=='main' and folder!=DATA:write_json(folder/GOVERNOR_STATUS,governor_status(s))
+    if marker:write_json(folder/GOVERNOR_STATUS,status)
+def read_governor_status(folder):
+    """The marker's flags, or {} when it is missing or unreadable (callers treat {} as "has work")."""
+    try:
+        status=json.loads((folder/GOVERNOR_STATUS).read_text())
+        return status if isinstance(status,dict) else {}
+    except (OSError,ValueError):return {}
 def tenant_save(s,directory):save('main',s,directory)
 WORKSPACE=Workspace(Vault(DATA),lambda s:save('main',s))
 GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if STORE else None)
@@ -327,9 +339,10 @@ def governor_pass(score):
 def tenant_has_governor_work(user_id,score):
     """Read the small marker save() keeps beside each workspace instead of loading the workspace itself. A missing or
     unreadable marker (a workspace saved before markers existed) counts as work, so the pass runs and writes one."""
-    try:status=json.loads((DATA/'users'/user_id/GOVERNOR_STATUS).read_text())
-    except (OSError,ValueError):return (DATA/'users'/user_id/'main.json').exists()
-    return bool(status.get('pending') or (score and status.get('unresolved')))
+    folder=DATA/'users'/user_id
+    status=read_governor_status(folder)
+    if not status:return (folder/'main.json').exists()
+    return bool(status.get('pending',True) or (score and status.get('unresolved',True)))
 def governor_loop(seconds):
     # A failed pass leaves everything queued or unscored for the next one.
     last_scored=0.

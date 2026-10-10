@@ -71,6 +71,28 @@ class ChallengeTests(unittest.TestCase):
             self.store.login(token, nonce, 'credential', 'client')  # the same challenge still works
             with self.assertRaises(ValueError):self.store.login(token, nonce, 'credential', 'client')  # but once
 
+    def test_a_damaged_or_short_signing_key_is_refused_never_used(self):
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, 'auth-secret').write_bytes(b'')  # e.g. a crash right after the file was created
+            with self.assertRaisesRegex(ValueError, 'damaged'):auth.AuthStore(root)
+        with patch.dict(os.environ, {'GOVERNTRADE_SESSION_SECRET': 'too-short'}):
+            with self.assertRaisesRegex(ValueError, 'at least 32'):auth.AuthStore(tempfile.mkdtemp())
+        with patch.dict(os.environ, {'GOVERNTRADE_SESSION_SECRET': 'x' * 40}):
+            self.assertEqual(auth.AuthStore(tempfile.mkdtemp()).secret, b'x' * 40)
+
+    def test_concurrent_first_starts_agree_on_one_key_and_leave_no_temporary_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            winner = os.urandom(32)
+            real_link = os.link
+
+            def another_process_wins(source, target):
+                Path(target).write_bytes(winner)  # published between our exists() check and our link
+                return real_link(source, target)
+            with patch.object(auth.os, 'link', side_effect=another_process_wins):
+                self.assertEqual(auth.AuthStore(root).secret, winner)
+            self.assertEqual(auth.AuthStore(root).secret, winner)
+            self.assertEqual([p.name for p in Path(root).iterdir() if p.name.startswith('.auth-secret')], [])
+
     def test_the_signing_key_is_shared_by_every_store_on_the_same_disk(self):
         token, nonce = self.store.challenge()
         self.assertEqual(auth.AuthStore(self.tmp.name).unseal(token)['nonce'], nonce)
@@ -336,8 +358,30 @@ class GovernorLoopTests(unittest.TestCase):
             server.tenant_save(state, folder)
             self.assertFalse(server.tenant_has_governor_work(uid, False))
             self.assertTrue(server.tenant_has_governor_work(uid, True))  # scoring is due
+            (folder / server.GOVERNOR_STATUS).write_text('not json')
+            self.assertTrue(server.tenant_has_governor_work(uid, False))  # unreadable marker counts as work
             (Path(root) / 'users' / uid / server.GOVERNOR_STATUS).unlink()
             self.assertTrue(server.tenant_has_governor_work(uid, False))  # older workspace without a marker
+
+
+    def test_a_crash_between_the_marker_and_the_workspace_never_hides_work(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(server, 'DATA', Path(root)), patch.object(server, 'STORE', None):
+            uid = 'f' * 64;folder = Path(root) / 'users' / uid;folder.mkdir(parents=True)
+            idle = server.main_seed();server.tenant_save(idle, folder)
+            self.assertFalse(server.tenant_has_governor_work(uid, False))
+            real_write = server.write_json
+
+            def crash_on_workspace(path, value):
+                if path.name == 'main.json':raise OSError('disk full')
+                return real_write(path, value)
+            busy = server.main_seed();busy['governorRequests'] = [{'status': 'queued'}]
+            with patch.object(server, 'write_json', side_effect=crash_on_workspace), self.assertRaises(OSError):
+                server.tenant_save(busy, folder)
+            self.assertTrue(server.tenant_has_governor_work(uid, False))  # a harmless extra pass, not a skip
+            server.tenant_save(busy, folder)
+            with patch.object(server, 'write_json', side_effect=crash_on_workspace), self.assertRaises(OSError):
+                server.tenant_save(idle, folder)  # the work is still on disk, so the marker must still say so
+            self.assertTrue(server.tenant_has_governor_work(uid, False))
 
 
 class HostingTests(unittest.TestCase):
