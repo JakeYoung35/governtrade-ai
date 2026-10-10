@@ -8,7 +8,8 @@ from vault import Vault
 from store import PostgresStore
 from governor.records import compact_for_json
 from governor_service import GovernorService
-ROOT=Path(__file__).parent;DATA=ROOT/'.data';DATA.mkdir(exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
+import hosting
+ROOT=Path(__file__).parent;DATA=Path(os.environ.get('GOVERNTRADE_DATA_DIR',str(ROOT/'.data')));DATA.mkdir(parents=True,exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
 # DATABASE_URL moves the main workspace to Postgres; the presenter demo always stays in local JSON.
 STORE=PostgresStore(os.environ['DATABASE_URL']) if os.environ.get('DATABASE_URL') else None
 @contextlib.contextmanager
@@ -32,18 +33,39 @@ GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if S
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw):super().__init__(*a,directory=str(ROOT/'static'),**kw)
     def valid_host(self):
-        host=self.headers.get('Host','').split(':')[0];return host in ('localhost','127.0.0.1')
+        return hosting.allowed_host(self.headers.get('Host',''))
+    def same_origin(self):
+        origin=self.headers.get('Origin');return not origin or origin==hosting.expected_origin(self.headers.get('Host',''))
+    def entry_access(self):
+        if not self.valid_host():
+            self.json(403,{'error':'Host access denied.'});return False
+        if urlsplit(self.path).path=='/healthz' and self.command in ('GET','HEAD'):
+            raw=b'{"status":"ok"}';self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(raw)));self.end_headers()
+            if self.command!='HEAD':self.wfile.write(raw)
+            return False
+        if not hosting.hosted():return True
+        if not os.environ.get('GOVERNTRADE_ACCESS_PASSWORD'):
+            self.json(503,{'error':'Hosted workspace is locked. Configure an access password before connecting accounts.'});return False
+        path=urlsplit(self.path).path
+        worker_path=path in ('/api/worker','/api/agent/proposals','/api/governor/proposals','/api/governor/schema') or path.startswith('/api/governor/proposals/')
+        if (worker_path and self.worker_ok()) or hosting.password_ok(self.headers.get('Authorization','')):return True
+        self.send_response(401);self.send_header('WWW-Authenticate','Basic realm="GovernTrade private workspace", charset="UTF-8"');self.send_header('Cache-Control','no-store');self.send_header('Content-Length','0');self.end_headers();return False
+    def do_HEAD(self):
+        if self.entry_access():super().do_HEAD()
     def json(self,code,p):
-        raw=json.dumps(p,allow_nan=False).encode();self.send_response(code);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Set-Cookie',f'governtrade={SESSION}; HttpOnly; SameSite=Strict; Path=/');self.send_header('Content-Length',len(raw));self.end_headers();self.wfile.write(raw)
+        raw=json.dumps(p,allow_nan=False).encode();self.send_response(code);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff')
+        if code<400:self.send_header('Set-Cookie',f'governtrade={SESSION}; HttpOnly; SameSite=Strict; Path=/'+('; Secure' if hosting.hosted() else ''))
+        self.send_header('Content-Length',len(raw));self.end_headers()
+        if self.command!='HEAD':self.wfile.write(raw)
     def user_access(self):
-        origin=self.headers.get('Origin');return (not origin or origin==f"http://{self.headers.get('Host')}") and f'governtrade={SESSION}' in self.headers.get('Cookie','') and hmac.compare_digest(self.headers.get('X-CSRF-Token',''),CSRF)
+        return self.same_origin() and f'governtrade={SESSION}' in self.headers.get('Cookie','') and hmac.compare_digest(self.headers.get('X-CSRF-Token',''),CSRF)
     def worker_ok(self):
         token=os.environ.get('GOVERNTRADE_AGENT_TOKEN','');return bool(token) and hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token)
     def governor_get(self):
         # Governed proposal API (governor/api.py describes the contract). The summary is a same-origin read like /api/state.
         path=urlsplit(self.path).path
         if path=='/api/governor/summary':
-            if self.headers.get('Origin') and self.headers['Origin']!=f"http://{self.headers.get('Host')}":return self.json(403,{'error':'Cross-origin access denied.'})
+            if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             with locked('main'):return self.json(200,GOVERNOR.summary(read('main')))
         if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
         if path=='/api/governor/schema':return self.json(200,GOVERNOR.schema())
@@ -66,13 +88,13 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
     def response(self,env,s,result=None):return {'state':WORKSPACE.public(s) if env=='main' else s,'agents':AGENTS,'result':result,'csrf':CSRF}
     def do_GET(self):
-        if not self.valid_host():return self.json(403,{'error':'Localhost access only.'})
+        if not self.entry_access():return
         if self.path.startswith('/api/governor/'):return self.governor_get()
         if self.path.startswith('/api/worker'):
             if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
             s=read('main');return self.json(200,{'agents':WORKSPACE.public(s)['agentConfigs'],'instructions':s['chats']})
         if self.path.startswith('/api/state'):
-            if self.headers.get('Origin') and self.headers['Origin']!=f"http://{self.headers.get('Host')}":return self.json(403,{'error':'Cross-origin access denied.'})
+            if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             env='demo' if 'demo' in self.path else 'main'
             with locked(env):
                 s=read(env)
@@ -80,7 +102,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self.json(200,self.response(env,s))
         else:super().do_GET()
     def do_POST(self):
-        if not self.valid_host():return self.json(403,{'error':'Localhost access only.'})
+        if not self.entry_access():return
         if self.path=='/api/governor/proposals':return self.governor_submit()
         proposal=self.path=='/api/agent/proposals'
         if proposal:
@@ -133,4 +155,4 @@ if __name__=='__main__':
     if STORE:applied=STORE.migrate();print('Postgres storage: '+(', '.join(applied)+' applied.' if applied else 'schema up to date.'),flush=True)
     seconds=float(os.environ.get('GOVERNOR_BATCH_SECONDS','5'))
     if seconds>0:threading.Thread(target=governor_loop,args=(seconds,),daemon=True).start()
-    port=int(os.environ.get('PORT','3110'));print(f'GovernTrade AI: http://localhost:{port}',flush=True);ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()
+    port=int(os.environ.get('PORT','3110'));host=hosting.bind_host();print(f'GovernTrade AI listening on {host}:{port}',flush=True);ThreadingHTTPServer((host,port),Handler).serve_forever()
