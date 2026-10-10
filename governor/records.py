@@ -7,10 +7,9 @@ State keys (JSON-safe: decimals as strings, times as ISO-8601 UTC):
   governorBreakerEvents  newest first: loss-breaker latches and resets, {id, accountId, action, at, ...}
   governor           {"breakers": {accountId: BreakerState.to_dict()}}
 
-JSON mode saves these with the rest of the state. Postgres mode writes the four lists to the
-governor_* tables (migrations/003_governor.sql) and the small `governor` object with the
-workspace settings. State keeps a recent window of batches, decisions and breaker events;
-Postgres keeps all of them, so the breaker audit trail is permanent.
+Recording never drops anything. Postgres mode writes the four lists to the governor_* tables
+(migrations/003_governor.sql), keeps every row, and loads back only recent windows. JSON mode
+has no database, so compact_for_json() bounds what the local file keeps.
 
 Lists stay sorted by (time, id) with Python's code-point string order, which is the order
 Postgres returns under COLLATE "C", so a reloaded state equals the saved one.
@@ -92,28 +91,34 @@ def reliability_from_dict(d):
 # Batches and decisions.
 
 def batch_record(*, batch_id, account_id, started_at, evaluated_at, snapshot_id, books, proposals,
-                 portfolio, reliability, policy=DEFAULT_POLICY):
-    """Self-contained record of one batch's inputs. `books` are raw get_orderbook payloads."""
+                 portfolio, reliability, policy=DEFAULT_POLICY, event_groups=None):
+    """Self-contained record of one batch's inputs. `books` are raw get_orderbook payloads;
+    event_groups is the manual correlation override passed to build_snapshot, if any."""
     return {"id": batch_id, "accountId": account_id, "startedAt": _iso(started_at, "started_at"),
             "policyVersion": policy.version,
             "inputs": {"snapshotId": snapshot_id, "evaluatedAt": _iso(evaluated_at, "evaluated_at"),
                        "policy": policy.to_dict(), "portfolio": portfolio_to_dict(portfolio),
                        "reliability": reliability_to_dict(reliability),
                        "proposals": [proposal_to_dict(p) for p in sorted(proposals, key=lambda p: p.proposal_id)],
-                       "books": copy.deepcopy(list(books))}}
+                       "books": copy.deepcopy(list(books)), "eventGroups": dict(sorted((event_groups or {}).items()))}}
 
 
 def replay(batch):
     """Recompute a stored batch's decisions from its recorded inputs."""
     inputs = batch["inputs"]
-    snapshot = build_snapshot(inputs["books"], snapshot_id=inputs["snapshotId"], taken_at=_time(batch["startedAt"]))
+    snapshot = build_snapshot(inputs["books"], snapshot_id=inputs["snapshotId"], taken_at=_time(batch["startedAt"]),
+                              event_groups=inputs["eventGroups"])
     return decide([proposal_from_dict(p) for p in inputs["proposals"]], snapshot,
                   portfolio_from_dict(inputs["portfolio"]), reliability_from_dict(inputs["reliability"]),
                   _time(inputs["evaluatedAt"]), Policy.from_dict(inputs["policy"]))
 
 
 def record_batch(s, batch, decisions, decided_at):
-    """Store a batch and its decisions. Ids are write-once: repeats are refused, never overwritten."""
+    """Store a batch and its decisions. Ids are write-once: repeats are refused, never overwritten.
+
+    State only sees recent records, so a repeat of an older id is refused by Postgres when saved
+    (the governor inserts have no ON CONFLICT clause) rather than here.
+    """
     batches = s.setdefault("governorBatches", [])
     stored = s.setdefault("governorDecisions", [])
     if any(b["id"] == batch["id"] for b in batches):
@@ -127,8 +132,6 @@ def record_batch(s, batch, decisions, decided_at):
     stored.extend({**d, "batchId": batch["id"], "accountId": batch["accountId"], "decidedAt": decided} for d in new)
     _sort(batches, "startedAt", "id", newest_first=True)
     _sort(stored, "decidedAt", "proposalId", newest_first=True)
-    del batches[BATCH_WINDOW:]
-    del stored[DECISION_WINDOW:]
 
 
 # Forecasts and reliability.
@@ -136,11 +139,18 @@ def record_batch(s, batch, decisions, decided_at):
 def record_forecast(s, proposal):
     """Keep the agent's first forecast for this market; later ones are not independent evidence.
 
-    Returns True when this proposal's forecast was stored.
+    "First" is the earliest (submittedAt, proposalId), the same rule score_agent uses, whatever
+    order proposals are processed in. An earlier forecast replaces a stored later one until the
+    market resolves; a resolved forecast is never replaced. Returns True when this proposal's
+    forecast is the one kept.
     """
     rows = s.setdefault("governorForecasts", [])
-    if any(f["agentId"] == proposal.agent_id and f["marketId"] == proposal.market_id for f in rows):
-        return False
+    key = (proposal.received_at, proposal.proposal_id)
+    existing = next((f for f in rows if f["agentId"] == proposal.agent_id and f["marketId"] == proposal.market_id), None)
+    if existing:
+        if existing["outcome"] is not None or (_time(existing["submittedAt"]), existing["proposalId"]) <= key:
+            return False
+        rows.remove(existing)
     rows.append({"proposalId": proposal.proposal_id, "agentId": proposal.agent_id, "marketId": proposal.market_id,
                  "submittedAt": proposal.received_at.isoformat(),
                  "estimatedYesProbability": str(proposal.estimated_yes_probability),
@@ -194,7 +204,7 @@ def save_breaker(s, account_id, state):
 def record_breaker_event(s, account_id, event, event_id):
     """Audit a latch or reset (needs "action" and an ISO "at"). Write-once by event_id.
 
-    State keeps the newest BREAKER_EVENT_WINDOW; Postgres keeps every event permanently.
+    Never trimmed here: every event reaches Postgres, which keeps it permanently.
     """
     if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 200:
         raise ValueError("A breaker event needs an id of 1 to 200 characters.")
@@ -206,4 +216,19 @@ def record_breaker_event(s, account_id, event, event_id):
         raise ValueError(f"Breaker event {event_id} is already recorded.")
     events.append({**copy.deepcopy(event), "at": at, "id": event_id, "accountId": account_id})
     _sort(events, "at", "id", newest_first=True)
-    del events[BREAKER_EVENT_WINDOW:]
+
+
+def compact_for_json(s):
+    """Copy of state bounded for the local JSON file (JSON mode has no database to hold history).
+
+    Keeps the newest BATCH_WINDOW batches with their decisions (so every kept decision can still
+    be replayed), at most DECISION_WINDOW decisions, the newest BREAKER_EVENT_WINDOW breaker
+    events, and every forecast. Postgres mode never calls this.
+    """
+    out = dict(s)
+    batches = s.get("governorBatches", [])[:BATCH_WINDOW]
+    kept = {b["id"] for b in batches}
+    out["governorBatches"] = batches
+    out["governorDecisions"] = [d for d in s.get("governorDecisions", []) if d["batchId"] in kept][:DECISION_WINDOW]
+    out["governorBreakerEvents"] = s.get("governorBreakerEvents", [])[:BREAKER_EVENT_WINDOW]
+    return out

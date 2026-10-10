@@ -92,7 +92,9 @@ class KalshiAdapter(VenueAdapter):
         # Full bid depth for governor sizing, as Kalshi fixed-point dollar strings; asks are
         # derived by the governor (YES ask = 1 - best NO bid). asOf is stamped after the book read.
         m,category,multiplier,supported=self._market(market_id)
-        book=self.request('GET','/markets/'+quote(market_id,safe='')+'/orderbook',public=True).get('orderbook_fp') or {}
+        book=self.request('GET','/markets/'+quote(market_id,safe='')+'/orderbook',public=True).get('orderbook_fp')
+        # A missing or malformed book is an error, not an empty book that silently blocks every proposal.
+        if not isinstance(book,dict):raise VenueError('Kalshi returned an unrecognized order book.')
         levels=lambda rows:[[str(p),str(q)] for p,q in rows or []]
         return {'id':market_id,'name':m.get('title',market_id),'eventTicker':m['event_ticker'],'agent':category,'venue':self.venue,'open':m.get('status')=='active','executionReady':supported,'feeMultiplier':multiplier,'closeAt':m.get('close_time'),'yesBids':levels(book.get('yes_dollars')),'noBids':levels(book.get('no_dollars')),'asOf':now()}
     def get_balance_positions(self):

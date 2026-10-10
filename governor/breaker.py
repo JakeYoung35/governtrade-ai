@@ -2,9 +2,9 @@
 
 The base is the UTC day-opening equity (the account's first balance sync of the day),
 including unrealized losses. Once latched it stays latched: a new day does not resume
-trading, only an operator reset with a stated reason does. A reset re-bases the threshold
-on the equity at reset time for the rest of that UTC day, so trading can resume after an
-accepted loss while a further decline of the same size latches again.
+trading, only an operator reset with a stated reason does. For the rest of that UTC day a
+reset measures from the lower of the day open and the equity at reset, so trading can resume
+after an accepted loss while a further decline of the same size latches again.
 
 Pure: callers pass equity, the day-open value and the time; nothing here reads a clock.
 """
@@ -61,28 +61,39 @@ class BreakerCheck:
 def check(state, *, equity, day_open_equity, now, policy=DEFAULT_POLICY):
     """Latch if equity has fallen to the threshold. Unmeasurable inputs never clear a latch.
 
-    day_open_equity may be None (no sync yet today); then only a same-day reset base applies.
+    The base is the lowest positive value among today's day-open equity and a same-day reset
+    value, so a reset taken at high equity never makes the limit stricter than the day open.
+    day_open_equity may be None (no sync yet today); with no base at all nothing is measured.
+    A base that exists but is not positive latches (fail closed): the limit cannot be measured,
+    and an operator reset sets a usable base from current equity.
     """
     now = to_utc(now, "now")
-    if state.latched:
+    if state.latched or equity is None:
         return BreakerCheck(state, False, None, None)
-    day = now.date().isoformat()
-    base = state.rebase_equity if state.rebase_day == day else day_open_equity
-    if base is None or equity is None:
+    candidates = [to_decimal(day_open_equity, "day_open_equity")] if day_open_equity is not None else []
+    if state.rebase_day == now.date().isoformat():
+        candidates.append(state.rebase_equity)
+    if not candidates:
         return BreakerCheck(state, False, None, None)
-    base = to_decimal(base, "day_open_equity")
     equity = to_decimal(equity, "equity")
-    if base <= ZERO:
-        return BreakerCheck(state, False, None, None)
+    positive = [value for value in candidates if value > ZERO]
+    if not positive:
+        reason = (f"Today's base equity is ${min(candidates)}, so the daily loss limit cannot be measured. "
+                  "Reset the breaker to measure from current equity.")
+        return BreakerCheck(_latch(state, now, reason), True, None, None)
+    base = min(positive)
     threshold = base * (ONE - policy.daily_loss_limit)
     if equity > threshold:
         return BreakerCheck(state, False, base, threshold)
     decline = (base - equity) / base
     reason = (f"Equity ${equity} is {decline * 100:.2f}% below today's base of ${base}; "
               f"the daily loss limit is {policy.daily_loss_limit * 100:.2f}%.")
-    latched = BreakerState(latched=True, latched_at=now, reason=reason,
-                           rebase_day=state.rebase_day, rebase_equity=state.rebase_equity)
-    return BreakerCheck(latched, True, base, threshold)
+    return BreakerCheck(_latch(state, now, reason), True, base, threshold)
+
+
+def _latch(state, now, reason):
+    return BreakerState(latched=True, latched_at=now, reason=reason,
+                        rebase_day=state.rebase_day, rebase_equity=state.rebase_equity)
 
 
 def reset(state, *, operator, reason, equity, now):

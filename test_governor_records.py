@@ -68,10 +68,29 @@ class BreakerTests(unittest.TestCase):
             self.assertTrue(result.state.latched)
             self.assertFalse(result.tripped)
 
-    def test_unmeasurable_inputs_never_latch_or_clear(self):
-        for equity, base in ((None, D(1000)), (D(500), None), (D(500), D(0))):
+    def test_missing_inputs_measure_nothing(self):
+        for equity, base in ((None, D(1000)), (D(500), None)):
             result = check(BreakerState(), equity=equity, day_open_equity=base, now=NOW)
             self.assertFalse(result.state.latched)
+
+    def test_non_positive_base_latches_until_a_reset_sets_one(self):
+        # Review: a $0 base used to skip the check, so the breaker could never latch that day.
+        result = check(BreakerState(), equity=D(500), day_open_equity=D(0), now=NOW)
+        self.assertTrue(result.tripped)
+        self.assertIn("cannot be measured", result.state.reason)
+        state, _ = reset(result.state, operator="ops", reason="funded the account", equity=D(500), now=NOW)
+        later = NOW + timedelta(minutes=5)
+        self.assertFalse(check(state, equity=D(490), day_open_equity=D(0), now=later).tripped)
+        self.assertTrue(check(state, equity=D(485), day_open_equity=D(0), now=later).tripped)
+
+    def test_reset_at_high_equity_never_tightens_the_day_open_limit(self):
+        # Review: a reset taken at $1,100 used to become the base, latching at $1,060 (above the $1,000 open).
+        latched = check(BreakerState(), equity=D(960), day_open_equity=D(1000), now=NOW).state
+        state, _ = reset(latched, operator="ops", reason="recovered", equity=D(1100), now=NOW)
+        later = NOW + timedelta(hours=1)
+        self.assertFalse(check(state, equity=D(1060), day_open_equity=D(1000), now=later).tripped)
+        result = check(state, equity=D(970), day_open_equity=D(1000), now=later)
+        self.assertEqual((result.tripped, result.base), (True, D(1000)))
 
     def test_reset_requires_operator_reason_and_valuation(self):
         latched = check(BreakerState(), equity=D(960), day_open_equity=D(1000), now=NOW).state
@@ -142,21 +161,73 @@ class BatchRecordTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already has a recorded decision"):
             run_batch(s, "b2")
 
-    def test_newest_first_with_descending_ids_within_a_batch_and_bounded_windows(self):
+    def test_newest_first_with_descending_ids_within_a_batch(self):
         s = main_seed()
         run_batch(s)
         self.assertEqual([d["proposalId"] for d in s["governorDecisions"]], ["p3", "p2", "p1"])
+
+    def test_recording_never_drops_records_before_they_are_saved(self):
+        # Review: trimming at record time lost rows when more than a window accrued between saves.
+        s = main_seed()
         earlier = lambda i: (NOW - timedelta(minutes=i + 1)).isoformat()
-        s["governorBatches"] = [{"id": f"old{i}", "startedAt": earlier(i)} for i in range(records.BATCH_WINDOW)]
-        s["governorDecisions"] = [{"proposalId": f"old{i}", "decidedAt": earlier(i)} for i in range(records.DECISION_WINDOW)]
+        s["governorBatches"] = [{"id": f"old{i}", "accountId": ACCOUNT, "startedAt": earlier(i)} for i in range(records.BATCH_WINDOW)]
+        s["governorDecisions"] = [{"proposalId": f"old{i}", "batchId": f"old{i % records.BATCH_WINDOW}", "decidedAt": earlier(i)}
+                                  for i in range(records.DECISION_WINDOW)]
         run_batch(s, "b9")
-        self.assertEqual(len(s["governorBatches"]), records.BATCH_WINDOW)
-        self.assertEqual(s["governorBatches"][0]["id"], "b9")
-        self.assertEqual(len(s["governorDecisions"]), records.DECISION_WINDOW)
-        self.assertEqual(s["governorDecisions"][0]["proposalId"], "p3")
+        self.assertEqual(len(s["governorBatches"]), records.BATCH_WINDOW + 1)
+        self.assertEqual(len(s["governorDecisions"]), records.DECISION_WINDOW + 3)
+        self.assertEqual((s["governorBatches"][0]["id"], s["governorDecisions"][0]["proposalId"]), ("b9", "p3"))
+
+    def test_json_compaction_bounds_history_and_keeps_replayable_decisions(self):
+        s = main_seed()
+        earlier = lambda i: (NOW - timedelta(minutes=i + 1)).isoformat()
+        s["governorBatches"] = [{"id": f"b{i:03d}", "startedAt": earlier(i)} for i in range(records.BATCH_WINDOW + 10)]
+        s["governorDecisions"] = [{"proposalId": f"p{i:04d}", "batchId": f"b{i // 5:03d}", "decidedAt": earlier(i // 5)}
+                                  for i in range(5 * (records.BATCH_WINDOW + 10))]
+        s["governorBreakerEvents"] = [{"id": f"e{i}"} for i in range(records.BREAKER_EVENT_WINDOW + 7)]
+        s["governorForecasts"] = [{"proposalId": f"f{i}"} for i in range(900)]
+        before = copy.deepcopy(s)
+        out = records.compact_for_json(s)
+        self.assertEqual(s, before)  # the in-memory state is untouched
+        kept = {b["id"] for b in out["governorBatches"]}
+        self.assertEqual(len(kept), records.BATCH_WINDOW)
+        self.assertTrue(all(d["batchId"] in kept for d in out["governorDecisions"]))
+        self.assertLessEqual(len(out["governorDecisions"]), records.DECISION_WINDOW)
+        self.assertEqual(len(out["governorBreakerEvents"]), records.BREAKER_EVENT_WINDOW)
+        self.assertEqual(len(out["governorForecasts"]), 900)
+
+    def test_replay_uses_the_batch_event_groups(self):
+        # Review: manual correlation groups were not stored, so such batches replayed differently.
+        books = [book("M1", event="E1", yes_ask="0.50"), book("M2", event="E2", yes_ask="0.50")]
+        proposals = [proposal("p1", agent="g1", market="M1", p="0.9", budget="500"),
+                     proposal("p2", agent="g2", market="M2", p="0.9", budget="500")]
+        groups = {"M1": "GAME", "M2": "GAME"}
+        portfolio = Portfolio(D(1000), D(1000))
+        live = decide(proposals, build_snapshot(books, snapshot_id="s", taken_at=NOW, event_groups=groups), portfolio, {}, NOW)
+        ungrouped = decide(proposals, build_snapshot(books, snapshot_id="s", taken_at=NOW), portfolio, {}, NOW)
+        self.assertNotEqual([d.to_dict() for d in live], [d.to_dict() for d in ungrouped])  # the groups matter here
+        batch = records.batch_record(batch_id="b", account_id=ACCOUNT, started_at=NOW, evaluated_at=NOW, snapshot_id="s",
+                                     books=books, proposals=proposals, portfolio=portfolio, reliability={}, event_groups=groups)
+        replayed = records.replay(json.loads(json.dumps(batch)))
+        self.assertEqual([d.to_dict() for d in replayed], [d.to_dict() for d in live])
 
 
 class ForecastTests(unittest.TestCase):
+    def test_earliest_submission_wins_whatever_the_processing_order(self):
+        # Review: the first-processed forecast used to win even if another was submitted earlier.
+        early = Proposal("early", "a1", "M1", "yes", D("0.9"), D(5), NOW, NOW + timedelta(seconds=60))
+        late = Proposal("late", "a1", "M1", "yes", D("0.4"), D(5), NOW + timedelta(seconds=5), NOW + timedelta(seconds=60))
+        s = main_seed()
+        self.assertTrue(records.record_forecast(s, late))
+        self.assertTrue(records.record_forecast(s, early))
+        self.assertFalse(records.record_forecast(s, late))
+        self.assertEqual([f["proposalId"] for f in s["governorForecasts"]], ["early"])
+        resolved = main_seed()
+        records.record_forecast(resolved, late)
+        records.resolve_forecasts(resolved, {"M1": 1}, NOW)
+        self.assertFalse(records.record_forecast(resolved, early))  # a scored forecast is never replaced
+        self.assertEqual(resolved["governorForecasts"][0]["proposalId"], "late")
+
     def test_first_forecast_per_agent_and_market_only(self):
         s = main_seed()
         self.assertTrue(records.record_forecast(s, proposal("p1", p="0.40")))
@@ -187,14 +258,16 @@ class StateTests(unittest.TestCase):
         records.save_breaker(s, ACCOUNT, latched)
         self.assertEqual(records.breaker_state(json.loads(json.dumps(s)), ACCOUNT), latched)
 
-    def test_breaker_events_are_write_once_newest_first_and_windowed(self):
+    def test_breaker_events_are_write_once_newest_first_and_all_kept_until_saved(self):
         s = main_seed()
         for i in range(records.BREAKER_EVENT_WINDOW + 5):
             at = (NOW + timedelta(seconds=i)).isoformat()
             records.record_breaker_event(s, ACCOUNT, {"action": "breakerReset", "at": at, "n": i}, f"ev-{i:03d}")
         events = s["governorBreakerEvents"]
         self.assertEqual((len(events), events[0]["n"], events[0]["id"], events[0]["accountId"]),
-                         (records.BREAKER_EVENT_WINDOW, records.BREAKER_EVENT_WINDOW + 4, "ev-204", ACCOUNT))
+                         (records.BREAKER_EVENT_WINDOW + 5, records.BREAKER_EVENT_WINDOW + 4, "ev-204", ACCOUNT))
+        records.record_breaker_event(s, ACCOUNT, {"action": "breakerReset", "at": (NOW - timedelta(days=1)).isoformat()}, "old")
+        self.assertEqual(s["governorBreakerEvents"][-1]["id"], "old")  # an older event is kept, not dropped
         with self.assertRaisesRegex(ValueError, "already recorded"):
             records.record_breaker_event(s, ACCOUNT, {"action": "breakerReset", "at": NOW.isoformat()}, "ev-204")
         for event, event_id in (({"action": "", "at": NOW.isoformat()}, "x"), ({"action": "a", "at": NOW.isoformat()}, ""),
@@ -219,6 +292,20 @@ class StateTests(unittest.TestCase):
         kept = main_seed()
         kept["governorForecasts"] = [{"proposalId": "keep"}]
         self.assertEqual(migrate(kept)["governorForecasts"], [{"proposalId": "keep"}])
+
+
+class JsonModeTests(unittest.TestCase):
+    def test_server_writes_the_bounded_state_in_json_mode(self):
+        import server, tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        s = main_seed()
+        s["governorBreakerEvents"] = [{"id": f"e{i}"} for i in range(records.BREAKER_EVENT_WINDOW + 3)]
+        with tempfile.TemporaryDirectory() as tmp, patch.object(server, "DATA", Path(tmp)), patch.object(server, "STORE", None):
+            server.save("main", s)
+            written = json.loads((Path(tmp) / "main.json").read_text())
+        self.assertEqual(len(written["governorBreakerEvents"]), records.BREAKER_EVENT_WINDOW)
+        self.assertEqual(len(s["governorBreakerEvents"]), records.BREAKER_EVENT_WINDOW + 3)
 
 
 class OrderingTests(unittest.TestCase):

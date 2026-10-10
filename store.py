@@ -164,18 +164,23 @@ class PostgresStore:
             # State lists events newest first; insert oldest first so seq follows insertion order.
             run('INSERT INTO events (id,time,kind,text,order_id) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
                 [(e['id'],e['time'],e['kind'],e['text'],e.get('trade')) for e in reversed(s['events']) if e['id'] not in seen.get('events',())])
-            # Governor batches and decisions are written once; forecasts are upserted when their outcome changes.
-            run('INSERT INTO governor_batches (id,started_at,account_id,policy_version,inputs) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+            # Governor batches, decisions and breaker events are written once. No ON CONFLICT clause: state only holds
+            # a recent window, so reusing an id that left it must fail the save loudly instead of being skipped.
+            run('INSERT INTO governor_batches (id,started_at,account_id,policy_version,inputs) VALUES (%s,%s,%s,%s,%s)',
                 [(b['id'],b['startedAt'],b['accountId'],b['policyVersion'],Jsonb(b['inputs'])) for b in reversed(s.get('governorBatches',[])) if b['id'] not in seen.get('governorBatches',())])
             run('''INSERT INTO governor_decisions (proposal_id,batch_id,account_id,agent_id,market_id,side,decision,approved_budget,contracts,reason_codes,policy_version,decided_at,payload)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING''',
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                 [(d['proposalId'],d['batchId'],d['accountId'],d['agentId'],d['marketId'],d['side'],d['decision'],Decimal(d['approvedBudgetUsd']),Decimal(d['contracts']),
                   list(d['reasonCodes']),d['policyVersion'],d['decidedAt'],Jsonb({k:v for k,v in d.items() if k not in DECISION_ROW_FIELDS}))
                  for d in reversed(s.get('governorDecisions',[])) if d['proposalId'] not in seen.get('governorDecisions',())])
+            # Forecasts are loaded in full, so one that left state was replaced by an earlier submission.
+            replaced=[k[1] for k in seen if isinstance(k,tuple) and k[0]=='forecast']
+            replaced=sorted(set(replaced)-{f['proposalId'] for f in s.get('governorForecasts',[])})
+            if replaced:cur.execute('DELETE FROM governor_forecasts WHERE proposal_id = ANY(%s)',(replaced,))
             run(FORECAST_UPSERT,[(f['proposalId'],f['agentId'],f['marketId'],f['submittedAt'],Decimal(f['estimatedYesProbability']),
                 None if f['outcome'] is None else Decimal(f['outcome']),f['resolvedAt'])
                 for f in s.get('governorForecasts',[]) if seen.get(('forecast',f['proposalId']))!=signature(f)])
-            run('INSERT INTO governor_breaker_events (id,at,account_id,action,payload) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+            run('INSERT INTO governor_breaker_events (id,at,account_id,action,payload) VALUES (%s,%s,%s,%s,%s)',
                 [(e['id'],e['at'],e['accountId'],e['action'],Jsonb({k:v for k,v in e.items() if k not in BREAKER_EVENT_ROW_FIELDS}))
                  for e in reversed(s.get('governorBreakerEvents',[])) if e['id'] not in seen.get('governorBreakerEvents',())])
         seen=self.signatures(s)

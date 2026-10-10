@@ -2,17 +2,16 @@
 -- gain an outcome when their market settles. Exact decimals and timestamps round-trip through
 -- jsonb payloads and unconstrained numeric columns (loaded as text), never through floats.
 
--- Every input of one allocation batch, so its decisions can be replayed exactly.
+-- Every input of one allocation batch, so its decisions can be replayed exactly. A plain table, not
+-- a hypertable: hypertable unique keys must include the time column, which would let a batch id be
+-- reused at a different time. Rows are only written for batches that had proposals.
 CREATE TABLE IF NOT EXISTS governor_batches (
-  id             text NOT NULL,
+  id             text PRIMARY KEY,
   started_at     timestamptz NOT NULL,
   account_id     uuid NOT NULL REFERENCES accounts(id),
   policy_version text NOT NULL,
-  inputs         jsonb NOT NULL   -- policy, portfolio, reliability, proposals, raw order books
+  inputs         jsonb NOT NULL   -- policy, portfolio, reliability, proposals, raw order books, event groups
 );
-SELECT create_hypertable('governor_batches', 'started_at', if_not_exists => TRUE);
--- Unique indexes on hypertables must include the time column.
-CREATE UNIQUE INDEX IF NOT EXISTS governor_batches_id_idx ON governor_batches (id, started_at);
 CREATE INDEX IF NOT EXISTS governor_batches_account_idx ON governor_batches (account_id, started_at DESC);
 
 -- One decision per proposal. Queryable columns plus the full decision (with trace) as payload.

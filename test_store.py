@@ -115,3 +115,31 @@ class StoreTests(unittest.TestCase):
    self.store.save(s);self.store.save(s)
   loaded=self.reload();self.assertEqual(loaded,s)
   self.assertEqual((len(loaded['governorBreakerEvents']),self.count('governor_breaker_events')),(records.BREAKER_EVENT_WINDOW,records.BREAKER_EVENT_WINDOW+5))
+ def test_earlier_forecast_replaces_the_stored_row(self):
+  from datetime import datetime,timedelta,timezone
+  from decimal import Decimal as D
+  from governor import records
+  from governor.models import Proposal
+  s=self.workspace();g=s['agentConfigs'][0]['id'];t=datetime.now(timezone.utc).replace(microsecond=0)
+  late=Proposal('late',g,'MKT','yes',D('0.4'),D(5),t+timedelta(seconds=5),t+timedelta(seconds=60))
+  early=Proposal('early',g,'MKT','yes',D('0.9'),D(5),t,t+timedelta(seconds=60))
+  with self.store.session():records.record_forecast(s,late);self.store.save(s)
+  with self.store.session():s=self.store.load();self.assertTrue(records.record_forecast(s,early));self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual([f['proposalId'] for f in loaded['governorForecasts']],['early'])
+  self.assertEqual(self.count('governor_forecasts'),1)
+ def test_reusing_an_id_outside_the_state_window_fails_loudly(self):
+  from datetime import datetime,timedelta,timezone
+  from governor import records
+  s=self.workspace();a=s['accounts'][0]['id'];t=datetime.now(timezone.utc).replace(microsecond=0)
+  batch=lambda i:{'id':f'batch-{i:03d}','accountId':a,'startedAt':(t+timedelta(seconds=i)).isoformat(),'policyVersion':'v','inputs':{}}
+  event=lambda i:{'action':'breakerReset','at':(t+timedelta(seconds=i)).isoformat()}
+  with self.store.session():
+   for i in range(records.BATCH_WINDOW+1):records.record_batch(s,batch(i),[],t)
+   for i in range(records.BREAKER_EVENT_WINDOW+1):records.record_breaker_event(s,a,event(i),f'ev-{i:03d}')
+   self.store.save(s)
+  for reuse in (lambda s:records.record_batch(s,batch(0),[],t),lambda s:records.record_breaker_event(s,a,event(0),'ev-000')):
+   with self.store.session():
+    s=self.store.load();reuse(s)  # the original left the loaded window, so state accepts the id
+    with self.assertRaises(Exception):self.store.save(s)
+  self.assertEqual((self.count('governor_batches'),self.count('governor_breaker_events')),(records.BATCH_WINDOW+1,records.BREAKER_EVENT_WINDOW+1))
+

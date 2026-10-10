@@ -64,8 +64,14 @@ class GetOrderbookTests(unittest.TestCase):
         adapter, _ = kalshi(orderbook={"orderbook_fp": {"yes_dollars": None}})
         raw = adapter.get_orderbook(TICKER)
         self.assertEqual((raw["yesBids"], raw["noBids"]), ([], []))
-        adapter, _ = kalshi(orderbook={})
-        self.assertEqual(adapter.get_orderbook(TICKER)["yesBids"], [])
+
+    def test_unrecognized_book_response_is_an_error_not_an_empty_book(self):
+        # Review of PR head ddf104a: {} used to read as an empty book and block every proposal silently.
+        from adapters import VenueError
+        for response in ({}, {"orderbook_fp": None}, {"orderbook_fp": []}):
+            adapter, _ = kalshi(orderbook=response)
+            with self.subTest(response=response), self.assertRaisesRegex(VenueError, "unrecognized order book"):
+                adapter.get_orderbook(TICKER)
 
     def test_unsupported_fee_type_or_closed_market_is_flagged(self):
         adapter, _ = kalshi(series={"fee_type": "flat", "fee_multiplier": 1})
