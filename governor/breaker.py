@@ -78,7 +78,7 @@ def check(state, *, equity, day_open_equity, now, policy=DEFAULT_POLICY):
     equity = to_decimal(equity, "equity")
     positive = [value for value in candidates if value > ZERO]
     if not positive:
-        reason = (f"Today's base equity is ${min(candidates)}, so the daily loss limit cannot be measured. "
+        reason = (f"Today's base equity is ${min(candidates):,.2f}, so the daily loss limit cannot be measured. "
                   "Reset the breaker to measure from current equity.")
         return BreakerCheck(_latch(state, now, reason), True, None, None)
     base = min(positive)
@@ -86,7 +86,7 @@ def check(state, *, equity, day_open_equity, now, policy=DEFAULT_POLICY):
     if equity > threshold:
         return BreakerCheck(state, False, base, threshold)
     decline = (base - equity) / base
-    reason = (f"Equity ${equity} is {decline * 100:.2f}% below today's base of ${base}; "
+    reason = (f"Equity ${equity:,.2f} is {decline * 100:.2f}% below today's base of ${base:,.2f}; "
               f"the daily loss limit is {policy.daily_loss_limit * 100:.2f}%.")
     return BreakerCheck(_latch(state, now, reason), True, base, threshold)
 
