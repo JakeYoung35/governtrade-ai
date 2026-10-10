@@ -1,77 +1,127 @@
 # GovernTrade AI
 
-A local venue-connected agent hub using the existing GovernPay visual style. Create trading agents, connect your own Kalshi accounts, and govern every proposal before execution. Funds remain at venues. The four-agent presenter demo is fully simulated and isolated.
+## Let AI agents trade for you. Stay in control.
 
-## Run
+GovernTrade AI is a platform for allowing AI agents to trade prediction markets on your behalf, with financial boundaries you set and independent checks before every trade.
 
-Python 3.12+ and Node.js for syntax checks:
+You choose your agent, give it instructions, and decide how much freedom it has. Before a proposed trade can execute, GovernTrade checks that it follows your agent’s mandate and your account’s safety controls.
 
-```sh
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python server.py
-```
+**Our vision includes Polymarket. The current integration supports Kalshi Demo and Kalshi Live; Polymarket connectivity is planned.**
 
-Open http://localhost:3110 and enter the local workspace. Set `PORT=3111` if another preview occupies 3110. The entry screen is a local welcome screen, not hosted authentication. Keep the server on localhost; do not expose it through a public tunnel.
+## Why GovernTrade?
 
-Credentials are encrypted with Fernet. On macOS, the vault encryption key is stored automatically in macOS Keychain on first credential save. Other systems must supply `GOVERNTRADE_MASTER_KEY` containing a Fernet key through a secure environment/secret manager. Generate one with `python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'` and store it securely, outside this repository. Do not commit it, paste it in chat, or save it in plaintext `.env` files. Keep the same key to decrypt existing credentials; back up the key and encrypted store securely. Plaintext keyring/file backends are refused.
+Giving an AI agent trading instructions should not mean giving it unrestricted access to your money.
 
-Environment variables:
+GovernTrade separates an agent’s ability to propose trades from its permission to execute them. You can authorize smaller trades automatically, require approval for specific situations, and block trades that exceed your financial boundaries.
 
-- `PORT`: optional, default 3110.
-- `GOVERNTRADE_MASTER_KEY`: required if macOS Keychain is unavailable; no default plaintext key file.
-- `GOVERNTRADE_AGENT_TOKEN`: required only for trusted worker HTTP integration; use a random secret. Without it, worker endpoints are disabled.
-- `DATABASE_URL`: optional Postgres connection string. When set, the main workspace (accounts, agents, mandates, orders, evaluations, events, chats) is stored in Postgres instead of `.data/main.json`; see Database storage below.
+**The agent proposes. Governance checks. You stay in charge.**
 
-## Connect accounts
+## How it works
 
-Connected Accounts → Connect account offers **Kalshi Demo** (authenticated virtual money at `external-api.demo.kalshi.co`) and **Kalshi Live** (real money at `external-api.kalshi.com`). Live requires an explicit real-money confirmation. Save an API key ID and RSA PEM private key, then **Test connection**. Demo and Live need their corresponding keys. Choose subaccount 0 (primary) or a numbered subaccount 1–63. All portfolio reads and orders are scoped to that subaccount. Existing connection environment and subaccount cannot be changed; create a separate connection instead. Rotate keys by editing; blank credentials retain encrypted keys. Disconnect pauses bound agents and removes credentials after outstanding submissions are reconciled.
+1. **Connect your account.** Use Kalshi Demo with virtual funds or connect Kalshi Live after explicitly confirming that real money will be used. Your funds remain at Kalshi.
+2. **Create your agent.** Name it, select an AI provider and model, and securely enter your provider API key.
+3. **Set its mandate.** Choose a Conservative, Moderate, or Aggressive preset, then customize its limits. An agent cannot trade until its mandate is saved.
+4. **Give it instructions.** Describe the markets and trades you want it to consider.
+5. **Govern every proposal.** Each trade must satisfy both the agent’s mandate and the account’s safety controls. The activity history shows the outcome and explains the decision.
 
-## Balances and governance
+## Your agent’s mandate
 
-Overview shows each connected Kalshi account with a Demo/Live label. `/portfolio/balance` supplies available cash and marked position value in cents, converted to dollars. Reserved cash uses `/portfolio/summary/total_resting_order_value` when available. That endpoint is FCM-only and unscoped; normal members and numbered subaccounts use paginated scoped resting orders, visibly labeled. Available cash already excludes venue reservations, so it is not reduced by those reservations again. The total card shows available cash plus positions; reserved cash is displayed separately.
+Every agent has its own rules:
 
-P/L combines paginated positions, settlements and fills: venue realized position P/L less fees, settlement outcomes for tickers absent from positions, and unrealized P/L as marked open portfolio value less open position exposure. Fees are expensed in realized P/L. This is current API accounting, not a reconstructed historical tax ledger. Failed or incomplete reads retain visibly stale last-known balances and block execution. Refresh syncs on page load and after submissions. Funds remain at Kalshi; no main-workspace deposit, transfer or withdrawal endpoint exists.
+- **Automatic trade limit:** how much it can spend on a trade without asking for approval.
+- **Daily spending cap:** how much it can spend each day.
+- **Minimum cash reserve:** how much cash it must leave available.
+- **New-market approval:** whether it needs permission before trading a market it has never traded before.
 
-Create an agent in this order: name, LLM provider, dependent model, provider API key, connected Kalshi account. There is no market category restriction. `static/providers.json` is the single provider/model catalog shared by backend and UI. Saving makes a read-only authenticated model lookup at the selected provider to verify key and model access; failure does not save the agent. Keys are encrypted and masked. Saving goes straight to mandate setup. An unfinished agent remains a draft and cannot trade.
+Only you can change these rules. An agent cannot expand its own permissions.
 
-Choose Conservative, Moderate or Aggressive to populate defaults, then adjust automatic trade limit, daily spending cap, minimum cash reserve and first-trade-in-new-market approval. Only the user can save or change a mandate. The chat shows its read-only summary and current usage, with an Edit mandate link.
+## Account-wide protection
 
-Trading Permissions sets a shared daily spending ceiling and a kill switch that pauses every agent. Connections may have stricter spending ceilings. Mandate saving rejects limits above the effective ceiling. Every trade passes both the agent mandate and account ceiling; details label which layer required approval or blocked it. Approval rechecks current funds, quotes and policies; hard blocks cannot be overridden. Existing cumulative market, exposure, observed daily loss and slippage guardrails remain enforced. Budgets count authorized amounts conservatively; uncertain submissions retain reservations across restart. Daily loss is observed equity drawdown since the first sync that UTC day, not complete historical daily loss. External fills also count conservatively toward account spending. Underlying-account identity deduplication remains a TODO; do not connect the same underlying account using different keys as separate funding sources.
+Account controls protect your funds across all agents:
 
-## Isolated presenter demo
+- Total daily spending ceiling.
+- Maximum position exposure.
+- Maximum observed daily loss.
+- Protected cash balance.
+- Live trading on/off.
+- A kill switch that pauses every agent.
 
-Select one of four prebuilt agents first. Each displays its personality and mandate before proposing:
+These controls do **not** add approval requests to trades already permitted by an agent’s mandate. Instead, they act as hard boundaries: a trade that violates an account limit is blocked, with the reason displayed.
 
-1. Conservative Economics Scout: $5 economics trade executes automatically.
-2. Moderate Sports Analyst: $40 sports trade exceeds its automatic limit; review reasoning and approve.
-3. Aggressive Momentum Trader: $80 already spent against a $100 daily cap; $30 proposal is blocked without override.
-4. Moderate Discovery Agent: new-market approval enabled; review the first proposed trade and deny it.
+Agent mandates can be stricter than account limits, but cannot override them.
 
-Demo funds, agents, orders and state are entirely simulated and isolated from connected accounts. Back/restart replays only demo state. Scheduled/recurring execution remains absent.
+## Security and execution safeguards
 
-## Agentic teammate
+- Account and AI-provider credentials are encrypted locally and displayed only as masks.
+- Agents trade through their saved account; they cannot select a different account or supply their own approvals, balances, or policy overrides.
+- Execution requires fresh account data and market quotes.
+- Approving a trade triggers another governance check.
+- Hard blocks cannot be approved away.
+- Uncertain submissions retain spending reservations to help prevent duplicate or excessive spending.
+- The app provides no deposit, withdrawal, or transfer tools.
 
-See [docs/agent-config.md](docs/agent-config.md) for the JSON schema, examples, worker authentication, instructions and governed proposal API. The AI worker is not implemented on this branch; saved chat instructions do not call a model or trade automatically. Provider/model access is validated on save; this does not start an AI worker.
+These safeguards limit an agent’s authority. They do not guarantee profits or eliminate trading risk.
 
-`.data/` contains the private local store, encrypted vault and separate demo state; it is ignored by Git. Old main simulation data is preserved locally as `legacy-simulation.json` and replaced by an empty connected-account workspace. The store is serialized and atomic within a single server process, not a distributed database. Local API protections include host/origin validation, HttpOnly SameSite cookies and CSRF tokens. They are not isolation from other trusted processes running as the same OS user.
+## Try the demo
 
-## Database storage
+Select **DEMO** to explore a simulated workspace that is separate from your connected accounts.
 
-Without `DATABASE_URL` the app uses local JSON files exactly as before. With it, the main workspace is stored in Postgres (developed against Tiger Cloud/TimescaleDB); the presenter demo always stays in local JSON. Venue and provider credentials never leave the local encrypted vault: the database holds only opaque vault references and masks, so the same vault key (macOS Keychain or `GOVERNTRADE_MASTER_KEY`) is still required on any machine using the database.
+Choose one of four agents and see:
 
-`migrations/` holds the schema. The server applies pending migrations at startup; `DATABASE_URL=... python store.py migrate` applies them without starting the server. `events` and `balance_snapshots` are TimescaleDB hypertables (`balance_snapshots` is created for balance history but not yet written). Each request holds a Postgres advisory lock, so writers are serialized even across server processes; budget reservations are committed before venue submission, as with JSON. Only the most recent 500 events are loaded into the app; older events remain in the database.
+1. A small trade execute automatically.
+2. A trade wait for your approval.
+3. A trade blocked for exceeding its daily spending cap.
+4. A new-market proposal that you review and deny.
 
-With Tiger Cloud, run the server without printing the password: `DATABASE_URL="$(tiger db uri <service-id> --with-password)" python server.py`. Never commit the connection string or put it in a plaintext `.env` file. Trade records then live in your cloud database rather than only on this machine. Existing `.data/main.json` contents are not imported automatically.
+**Demo trades never use real funds.**
 
-## Verification and remaining work
+## Current development status
 
-```sh
-python3 -m unittest discover -s . -p 'test_*.py' -v
-node --check static/app.js
-```
+Implemented:
 
-Governance, failures, current-rule approval rechecks, idempotency, encrypted vault, persistence, demo isolation and order payloads are covered by tests. Real authenticated connections/orders have **not** been exercised because no user venue credentials were supplied. Run authenticated venue demo acceptance tests before enabling real money. Remaining integration work: the teammate's AI worker; robust reconciliation of unknown submissions by client ID; venue-account identity deduplication; complete historical cost-basis reporting. Only supported opening buys are implemented.
+- Kalshi Demo and Live account connections.
+- Encrypted credential storage.
+- Agent configuration and provider-key validation.
+- Individual agent mandates.
+- Account-wide safety controls.
+- Governed trade-proposal and execution endpoints.
+- Trade activity and decision history.
+- An isolated simulated demo.
 
-Existing schema-2 agents migrate to inactive drafts requiring provider validation and a new user mandate. Unsupported old venue configurations remain private for audit continuity and are hidden from the UI. Older demo state resets to the four-agent demo.
+Still in development:
+
+- The AI worker that turns chat instructions into trade proposals.
+- Polymarket connectivity.
+- Scheduled and multi-day trading.
+- Reliable reconciliation of uncertain order submissions.
+- Authenticated venue acceptance testing.
+
+**Chat currently saves your instructions; it does not independently call an AI model or start trading.** A trusted worker can submit proposals through the governed API.
+
+This is a local prototype, not a production-certified financial service.
+
+## Run locally
+
+Use Python 3.12 or later:
+
+    python3 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -r requirements.txt
+    python server.py
+
+Open http://localhost:3110/ and keep the terminal running.
+
+If the port is already in use:
+
+    PORT=3113 python server.py
+
+Then open http://localhost:3113/.
+
+Keep the server on localhost. The welcome screen is local workspace entry, not hosted user authentication. Never commit credentials or share private keys in chat.
+
+## Documentation
+
+- [Setup and operations](docs/setup-and-operations.md)
+- [Agent integration contract](docs/agent-config.md)
+
+Observed daily loss starts at the first successful sync each UTC day. Known losses persist across reconnections within the same Demo or Live environment to prevent resetting the safety limit. This conservative protection can also constrain separate accounts.
