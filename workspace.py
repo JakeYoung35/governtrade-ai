@@ -150,7 +150,7 @@ class Workspace:
         # Governor records (batch inputs with order books, traces, forecasts) are large and not used by the UI.
         public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor')})
         for a in public['accounts']:
-            a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
+            a['hasCredentials']=bool(a.get('credentialRef'));a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'
         for a in public['agentConfigs']:
             a.pop('modelCredentialRef',None);a['usage']=__import__('engine').usage(s,a['accountId'],a['id'])

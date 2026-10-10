@@ -123,6 +123,11 @@ class FollowupTests(MainTests):
   self.assertEqual(len(self.s['agentConfigs']),1)
  def test_live_confirmation_required(self):
   with self.assertRaises(ValueError):self.w.action(self.s,{'action':'account-save','connectionType':'kalshi-live','name':'Live','credentials':{}})
+ def test_disconnect_reports_no_credentials(self):
+  self.s['accounts'].append({**self.a,'id':'other','credentialRef':'OTHER_REF','credentialMasks':{'key_id':'••••83df','private_key':'••••----'}})
+  self.w.action(self.s,{'action':'account-disconnect','id':'other'})
+  public={a['id']:a for a in self.w.public(self.s)['accounts']}
+  self.assertTrue(public['account']['hasCredentials']);self.assertFalse(public['other']['hasCredentials']);self.assertNotIn('credentialRef',public['account'])
 
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
