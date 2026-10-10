@@ -71,7 +71,7 @@ PERSONALITIES={
  'Conservative':{'autoLimit':10,'dailyCap':50,'minimum':200,'newMarketApproval':False},
  'Moderate':{'autoLimit':25,'dailyCap':100,'minimum':100,'newMarketApproval':False},
  'Aggressive':{'autoLimit':50,'dailyCap':100,'minimum':50,'newMarketApproval':False}}
-MAIN_DEFAULT={'dailyCap':100,'automation':True}
+MAIN_DEFAULT={'dailyCap':100,'automation':True,'exposureCap':500,'dailyLossCap':50,'cashFloor':0,'liveTrading':True}
 SAFETY={'dailyLossCap':50,'marketCap':50,'exposureCap':500,'slippage':1}
 CATEGORIES=['crypto','sports','economics','politics','culture','other']
 DEMO_AGENTS=[
@@ -94,7 +94,8 @@ def migrate(s):
  return s
 
 def ceiling(s,account):
- return {'dailyCap':min(s['permissions']['dailyCap'],account.get('ceiling',{}).get('dailyCap',s['permissions']['dailyCap'])),'automation':s['permissions']['automation']}
+ base={**MAIN_DEFAULT,**s['permissions']};local=account.get('ceiling',{})
+ return {**{k:min(base[k],local.get(k,base[k])) for k in ('dailyCap','exposureCap','dailyLossCap')},'cashFloor':max(base['cashFloor'],local.get('cashFloor',0)),'automation':base['automation'],'liveTrading':base['liveTrading'] and local.get('liveTrading',True)}
 def rules(s,agent):return copy.deepcopy(agent.get('mandate') or {})
 def usage(s,account_id,agent_id=None,market_id=None):
  orders=[o for o in s['orders'] if o.get('accountId')==account_id and (not agent_id or o['agent']==agent_id) and (o.get('committed') or o.get('filled'))]
@@ -103,10 +104,10 @@ def usage(s,account_id,agent_id=None,market_id=None):
  return {'lastAmount':proposals[-1]['amount'] if proposals else None,'daily':prior+sum(o['amount'] for o in orders if o['time'][:10]==s['clock'][:10]),'market':sum(o['amount'] for o in orders if not market_id or o['market']['id']==market_id),'held':sum(o['amount'] for o in orders if o['status'] in ('submission unknown','submitted','open'))}
 def validate_permissions(values):
  import math
- if not isinstance(values,dict) or set(values)-set(MAIN_DEFAULT):raise ValueError('Only total daily spending and the account kill switch are configurable here.')
+ if not isinstance(values,dict) or set(values)-set(MAIN_DEFAULT):raise ValueError('Choose a supported account-wide safety control.')
  for k,v in values.items():
-  if k=='dailyCap' and (type(v) not in (int,float) or not math.isfinite(v) or v<0):raise ValueError('Daily ceiling must be a finite nonnegative amount.')
-  if k=='automation' and type(v)!=bool:raise ValueError('Invalid kill switch setting.')
+  if k in ('dailyCap','exposureCap','dailyLossCap','cashFloor') and (type(v) not in (int,float) or not math.isfinite(v) or v<0):raise ValueError('Daily ceiling must be a finite nonnegative amount.')
+  if k in ('automation','liveTrading') and type(v)!=bool:raise ValueError('Invalid kill switch setting.')
  return copy.deepcopy(values)
 def validate_mandate(values,limit):
  import math
@@ -142,6 +143,10 @@ def layered_checks(s,o,approved=False):
  c('Agent daily spending',au['daily']+amount<=p['dailyCap'],f"${au['daily']:.2f} used; this agent cap ${p['dailyCap']:.2f}.",'agent_mandate')
  cash=b['cash'] if b else 0;held=u['held']
  c('Fresh account balance',b is not None and account['status']=='connected','A fresh venue balance is required.')
+ c('Account cash floor',cash-held-amount>=cap['cashFloor'],f"Keep ${cap['cashFloor']:.2f} available across this account.",'account_ceiling')
+ c('Account exposure ceiling',b is not None and b['exposure']+held+amount<=cap['exposureCap'],'Combined positions and unresolved submissions across all agents on this account.','account_ceiling')
+ c('Account loss ceiling',b is not None and b['dailyLoss']<=cap['dailyLossCap'],'Observed account drawdown since the first successful sync today.','account_ceiling')
+ c('Live trading enabled',account['environment']!='live' or cap['liveTrading'],'Account-wide live trading switch; Demo is unaffected.','account_ceiling')
  c('Available cash',cash-held>=amount,'Available cash excludes venue reservations; unresolved submissions are additionally held.')
  c('Minimum cash reserve',cash-held-amount>=p['minimum'],f"Keep ${p['minimum']:.2f} available for this agent.",'agent_mandate')
  c('Approved venue',account['venue']==m['venue'],'The proposal uses its saved Kalshi account.')

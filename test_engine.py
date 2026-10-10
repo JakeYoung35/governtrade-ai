@@ -163,4 +163,22 @@ class KeychainErrorTests(unittest.TestCase):
    with self.assertRaisesRegex(ValueError,'macOS Keychain refused access') as error:Vault(d).put({'private_key':'secret'})
    self.assertNotIn('private detail',str(error.exception));self.assertFalse((Path(d)/'credentials.enc').exists())
 
+class AccountSafetyTests(MainTests):
+ def test_account_controls_never_require_approval(self):
+  self.s['permissions'].update(cashFloor=20,exposureCap=100,dailyLossCap=30,liveTrading=False)
+  self.assertEqual(self.proposal()['decision'],'ALLOW')
+ def test_each_safety_violation_is_nonoverrideable(self):
+  for field,value in [('cashFloor',995),('exposureCap',5)]:
+   with self.subTest(field=field):
+    self.setUp();self.s['permissions'][field]=value;o=self.proposal();self.assertEqual(o['decision'],'BLOCK');self.assertEqual(o['evaluations'][-1]['layers']['account_ceiling'],'BLOCK');self.assertEqual(self.v.calls,0)
+ def test_live_switch_does_not_affect_demo(self):
+  self.s['permissions']['liveTrading']=False;self.a.update(environment='live',liveEnabled=True)
+  self.assertEqual(self.proposal()['decision'],'BLOCK')
+ def test_account_limits_only_tighten_defaults(self):
+  self.a['ceiling']={'exposureCap':9999,'cashFloor':0};self.s['permissions'].update(exposureCap=30,cashFloor=50)
+  self.assertEqual(ceiling(self.s,self.a)['exposureCap'],30);self.assertEqual(ceiling(self.s,self.a)['cashFloor'],50)
+ def test_invalid_account_settings_rejected(self):
+  for values in [{'cashFloor':-1},{'exposureCap':float('nan')},{'liveTrading':1},{'autoLimit':10}]:
+   with self.assertRaises(ValueError):validate_permissions(values)
+
 if __name__=='__main__':unittest.main()
