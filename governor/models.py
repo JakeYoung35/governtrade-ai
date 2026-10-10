@@ -118,6 +118,7 @@ class OrderBook:
     yes_bids: tuple = ()
     no_bids: tuple = ()
     is_open: bool = True
+    is_tradable: bool = True  # venue supports governed execution here (e.g. binary, quadratic fee)
     fee_multiplier: Decimal = ONE
     contract_step: Decimal = ONE
 
@@ -129,8 +130,9 @@ class OrderBook:
         _set(self, "no_bids", tuple(self.no_bids))
         if not all(isinstance(level, PriceLevel) for level in self.yes_bids + self.no_bids):
             raise ValueError("Book levels must be PriceLevel values.")
-        if self.is_open is not True and self.is_open is not False:
-            raise ValueError("is_open must be a boolean.")
+        for name in ("is_open", "is_tradable"):
+            if getattr(self, name) is not True and getattr(self, name) is not False:
+                raise ValueError(f"{name} must be a boolean.")
         multiplier = to_decimal(self.fee_multiplier, "fee_multiplier")
         step = to_decimal(self.contract_step, "contract_step")
         if multiplier < ZERO or step <= ZERO:
