@@ -14,9 +14,12 @@ class Vault:
             if not keyring.get_keyring().__class__.__module__.startswith('keyring.backends.macOS'):
                 raise ValueError('Set GOVERNTRADE_MASTER_KEY or use macOS Keychain to enable encrypted credentials.')
             service='GovernTrade:'+str(self.directory.resolve())
-            key=keyring.get_password(service,'master')
-            if not key:
-                key=Fernet.generate_key().decode();keyring.set_password(service,'master',key)
+            try:
+                key=keyring.get_password(service,'master')
+                if not key:
+                    key=Fernet.generate_key().decode();keyring.set_password(service,'master',key)
+            except keyring.errors.KeyringError:
+                raise ValueError('Encrypted credential storage is unavailable: macOS Keychain refused access. Run the server from a local Terminal with Keychain access, or supply GOVERNTRADE_MASTER_KEY through a secure environment. No credentials were saved. Keep the same encryption key for existing credentials.') from None
         return Fernet(key.encode())
     def read(self):
         return json.loads(self.cipher().decrypt(self.path.read_bytes())) if self.path.exists() else {}

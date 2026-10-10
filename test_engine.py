@@ -155,4 +155,12 @@ class BalanceTests(unittest.TestCase):
    s=seed();g=next(g for g in s['demoAgents'] if g['id']==a);m=next(m for m in s['markets'] if m['agent']==g['demoMarket']);o=propose(s,a,m,n,'Yes','reason',uid());self.assertEqual(o['decision'],wanted)
    if wanted=='BLOCK':self.assertEqual(checks(s,o,True)['outcome'],'BLOCK')
 
+class KeychainErrorTests(unittest.TestCase):
+ def test_keychain_failure_is_actionable_and_does_not_write(self):
+  import keyring
+  backend=type('MacBackend',(),{'__module__':'keyring.backends.macOS'})()
+  with tempfile.TemporaryDirectory() as d,patch.dict(os.environ,{},clear=True),patch('keyring.get_keyring',return_value=backend),patch('keyring.get_password',side_effect=keyring.errors.KeyringError('private detail')):
+   with self.assertRaisesRegex(ValueError,'macOS Keychain refused access') as error:Vault(d).put({'private_key':'secret'})
+   self.assertNotIn('private detail',str(error.exception));self.assertFalse((Path(d)/'credentials.enc').exists())
+
 if __name__=='__main__':unittest.main()
