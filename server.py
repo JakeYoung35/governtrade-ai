@@ -57,7 +57,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if proposal:result=WORKSPACE.proposal(s,b)
                 elif env=='main':result=WORKSPACE.action(s,b)
                 elif b['action']=='reset':s=seed();result=None
-                elif b['action']=='demo-loss':s['realized']=-80;result=None
+                elif b['action']=='demo-loss':s['realized']=-80;s['cash']=920.;result=None
                 else:result=action(s,b)
                 save(env,s)
                 if proposal:self.json(200,{'order':result})
