@@ -1,6 +1,6 @@
 # GovernTrade AI
 
-A local venue-connected agent hub using the existing GovernPay visual style. Create trading agents, connect your own Kalshi/Coinbase accounts, and govern every proposal before execution. Funds remain at venues. The four-scenario presenter demo is fully simulated and isolated.
+A local venue-connected agent hub using the existing GovernPay visual style. Create trading agents, connect your own Kalshi accounts, and govern every proposal before execution. Funds remain at venues. The four-agent presenter demo is fully simulated and isolated.
 
 ## Run
 
@@ -25,33 +25,34 @@ Environment variables:
 
 ## Connect accounts
 
-Connected Accounts → Connect account. Multiple named connections are supported. Default is sandbox. Switching to live requires explicitly checking "Enable live trading" for that individual connection. Save then **Test connection**. Rotate keys through account settings; leaving credential fields blank retains existing encrypted credentials. Disconnect deletes credentials and pauses bound agents. Outstanding/unknown submissions must be reconciled first.
-
-- **Kalshi:** API key ID and an RSA PEM private key from [Kalshi account settings](https://kalshi.com/account/profile). Demo and live require their own corresponding keys. Signed requests use RSA-PSS and the current [Trade API specification](https://docs.kalshi.com/openapi.yaml). Balance sync includes cash, portfolio value, paginated positions, API-reported realized P/L and marked unrealized P/L derived from portfolio value minus position exposure. IOC binary opening orders use the current `/portfolio/events/orders` API and a conservative quadratic fee/rounding reserve. Unsupported fee types are hard blocked.
-- **Coinbase:** full CDP key name (`organizations/.../apiKeys/...`) and an **ECDSA P-256** PEM private key from [CDP](https://portal.cdp.coinbase.com/access/api). Live uses short-lived ES256 JWTs. USD spot opening buys use price-limited FOK orders with fee reserves and venue preview. Unsupported fee/tax structures are rejected. Coinbase P/L is unavailable from the implemented account endpoint and displayed as such.
-- **Other venue:** extension placeholder. A trusted adapter and credential form must be registered before connecting; arbitrary API hosts are not accepted.
-
-Use trade-only keys and disable withdrawals. The app provides no deposit, withdrawal or transfer endpoints. These API keys are for the local owner's own account; a hosted multi-user Coinbase product needs its supported user authorization flow, not this localhost design.
+Connected Accounts → Connect account offers **Kalshi Demo** (authenticated virtual money at `external-api.demo.kalshi.co`) and **Kalshi Live** (real money at `external-api.kalshi.com`). Live requires an explicit real-money confirmation. Save an API key ID and RSA PEM private key, then **Test connection**. Demo and Live need their corresponding keys. Choose subaccount 0 (primary) or a numbered subaccount 1–63. All portfolio reads and orders are scoped to that subaccount. Existing connection environment and subaccount cannot be changed; create a separate connection instead. Rotate keys by editing; blank credentials retain encrypted keys. Disconnect pauses bound agents and removes credentials after outstanding submissions are reconciled.
 
 ## Balances and governance
 
-Overview combines known venue balances with per-account sandbox/live/source labels. Sync runs on page load, after submission, and with Refresh. Failed fetches retain last-known values visibly marked **STALE** with an error; stale data never authorizes execution. No connected accounts means no invented balance. Main has no Add Funds.
+Overview shows each connected Kalshi account with a Demo/Live label. `/portfolio/balance` supplies available cash and marked position value in cents, converted to dollars. Reserved cash uses `/portfolio/summary/total_resting_order_value` when available. That endpoint is FCM-only and unscoped; normal members and numbered subaccounts use paginated scoped resting orders, visibly labeled. Available cash already excludes venue reservations, so it is not reduced by those reservations again. The total card shows available cash plus positions; reserved cash is displayed separately.
 
-Trading Permissions sets global defaults plus account/agent overrides. Overrides only tighten rules. Every execution passes `engine.checks()` using a fresh bound-account balance and venue quote. Approval rechecks rules and funds; hard blocks are never overridable. Shared spending caps, cumulative market caps, available cash, reserve, observed daily loss, external exposure, paused agents and quote validity are enforced. Uncertain submissions reserve budgets persistently. Budgets conservatively count authorized all-in amounts rather than recycling unused fills/proceeds.
+P/L combines paginated positions, settlements and fills: venue realized position P/L less fees, settlement outcomes for tickers absent from positions, and unrealized P/L as marked open portfolio value less open position exposure. Fees are expensed in realized P/L. This is current API accounting, not a reconstructed historical tax ledger. Failed or incomplete reads retain visibly stale last-known balances and block execution. Refresh syncs on page load and after submissions. Funds remain at Kalshi; no main-workspace deposit, transfer or withdrawal endpoint exists.
 
-Daily loss is observed equity drawdown from the first sync that UTC day, not complete venue historical daily P/L. Kalshi and Coinbase external fill turnover counts toward shared daily spending conservatively. Deposits/withdrawals can affect observed drawdown. Never connect the same underlying venue account twice and sum it as separate funds; automatic underlying-account identity detection is not yet implemented.
+Create an agent in this order: name, LLM provider, dependent model, provider API key, connected Kalshi account. There is no market category restriction. `static/providers.json` is the single provider/model catalog shared by backend and UI. Saving makes a read-only authenticated model lookup at the selected provider to verify key and model access; failure does not save the agent. Keys are encrypted and masked. Saving goes straight to mandate setup. An unfinished agent remains a draft and cannot trade.
 
-Create an agent with a name, category, connected compatible venue, provider/model and model API key. Open its chat to save instructions and read its Trading Mandate. Pause/edit/delete are available. Model and venue secrets are encrypted, never returned to the browser, and shown only as last-four masks.
+Choose Conservative, Moderate or Aggressive to populate defaults, then adjust automatic trade limit, daily spending cap, minimum cash reserve and first-trade-in-new-market approval. Only the user can save or change a mandate. The chat shows its read-only summary and current usage, with an Edit mandate link.
 
-## Sandbox and demo
+Trading Permissions sets a shared daily spending ceiling and a kill switch that pauses every agent. Connections may have stricter spending ceilings. Mandate saving rejects limits above the effective ceiling. Every trade passes both the agent mandate and account ceiling; details label which layer required approval or blocked it. Approval rechecks current funds, quotes and policies; hard blocks cannot be overridden. Existing cumulative market, exposure, observed daily loss and slippage guardrails remain enforced. Budgets count authorized amounts conservatively; uncertain submissions retain reservations across restart. Daily loss is observed equity drawdown since the first sync that UTC day, not complete historical daily loss. External fills also count conservatively toward account spending. Underlying-account identity deduplication remains a TODO; do not connect the same underlying account using different keys as separate funding sources.
 
-[Coinbase's official sandbox](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/sandbox) is static and unauthenticated: it cannot verify the keys or show your actual money. Its balances/orders are explicitly marked **STATIC MOCK**. Public live spot prices are used only as labeled quote references; sandbox order responses remain mocks. Kalshi's demo exchange is a separate authenticated virtual-money environment. Neither is combined silently with live-only funds.
+## Isolated presenter demo
 
-DEMO has exactly four presenter-controlled scenarios: small BTC automatic fill; sports trade requiring approval and reasoning review; losing-day hard block; agent paused before its next proposal. Back/restart replays only isolated demo state. Demo-only Add Funds is available through the simulated customer account. Scheduled trades, frequencies, recurring execution and Policy Builder have been removed.
+Select one of four prebuilt agents first. Each displays its personality and mandate before proposing:
+
+1. Conservative Economics Scout: $5 economics trade executes automatically.
+2. Moderate Sports Analyst: $40 sports trade exceeds its automatic limit; review reasoning and approve.
+3. Aggressive Momentum Trader: $80 already spent against a $100 daily cap; $30 proposal is blocked without override.
+4. Moderate Discovery Agent: new-market approval enabled; review the first proposed trade and deny it.
+
+Demo funds, agents, orders and state are entirely simulated and isolated from connected accounts. Back/restart replays only demo state. Scheduled/recurring execution remains absent.
 
 ## Agentic teammate
 
-See [docs/agent-config.md](docs/agent-config.md) for the JSON schema, examples, worker authentication, instructions and governed proposal API. The AI worker is not implemented on this branch; saved chat instructions do not call a model or trade automatically. Provider/model identifiers are user-supplied and are not claimed to be validated.
+See [docs/agent-config.md](docs/agent-config.md) for the JSON schema, examples, worker authentication, instructions and governed proposal API. The AI worker is not implemented on this branch; saved chat instructions do not call a model or trade automatically. Provider/model access is validated on save; this does not start an AI worker.
 
 `.data/` contains the private local store, encrypted vault and separate demo state; it is ignored by Git. Old main simulation data is preserved locally as `legacy-simulation.json` and replaced by an empty connected-account workspace. The store is serialized and atomic within a single server process, not a distributed database. Local API protections include host/origin validation, HttpOnly SameSite cookies and CSRF tokens. They are not isolation from other trusted processes running as the same OS user.
 
@@ -62,4 +63,6 @@ python3 -m unittest discover -s . -p test_engine.py -v
 node --check static/app.js
 ```
 
-Governance, failures, current-rule approval rechecks, idempotency, encrypted vault, persistence, demo isolation and order payloads are covered by tests. Real authenticated connections/orders have **not** been exercised because no user venue credentials were supplied. Run authenticated venue demo acceptance tests before enabling real money. Remaining integration work: the teammate's AI worker; robust reconciliation of unknown submissions by client ID; venue-account identity deduplication; complete venue daily P/L and cost-basis reporting; additional venue adapters. Only supported opening buys are implemented.
+Governance, failures, current-rule approval rechecks, idempotency, encrypted vault, persistence, demo isolation and order payloads are covered by tests. Real authenticated connections/orders have **not** been exercised because no user venue credentials were supplied. Run authenticated venue demo acceptance tests before enabling real money. Remaining integration work: the teammate's AI worker; robust reconciliation of unknown submissions by client ID; venue-account identity deduplication; complete historical cost-basis reporting. Only supported opening buys are implemented.
+
+Existing schema-2 agents migrate to inactive drafts requiring provider validation and a new user mandate. Unsupported old venue configurations remain private for audit continuity and are hidden from the UI. Older demo state resets to the four-agent demo.

@@ -2,16 +2,16 @@ import json,os,secrets,threading,hmac
 from pathlib import Path
 from urllib.parse import urlsplit
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
-from engine import seed,main_seed,action,AGENTS
+from engine import seed,main_seed,action,AGENTS,migrate
 from workspace import Workspace
 from vault import Vault
 ROOT=Path(__file__).parent;DATA=ROOT/'.data';DATA.mkdir(exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
 def read(env):
     p=DATA/(env+'.json');s=json.loads(p.read_text()) if p.exists() else (seed() if env=='demo' else main_seed())
-    if env=='main' and s.get('schemaVersion')!=2:
+    if env=='main' and s.get('schemaVersion') not in (2,3):
         if p.exists() and not (DATA/'legacy-simulation.json').exists():p.rename(DATA/'legacy-simulation.json')
         s=main_seed()
-    return s
+    return migrate(s) if env=='main' else (s if s.get('demoAgents') else seed())
 def save(env,s):
     p=DATA/(env+'.json');tmp=p.with_suffix('.tmp');fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
     with os.fdopen(fd,'w') as f:json.dump(s,f,allow_nan=False)
@@ -57,7 +57,6 @@ class Handler(SimpleHTTPRequestHandler):
                 if proposal:result=WORKSPACE.proposal(s,b)
                 elif env=='main':result=WORKSPACE.action(s,b)
                 elif b['action']=='reset':s=seed();result=None
-                elif b['action']=='demo-loss':s['realized']=-80;s['cash']=920.;result=None
                 else:result=action(s,b)
                 save(env,s)
                 if proposal:self.json(200,{'order':result})
