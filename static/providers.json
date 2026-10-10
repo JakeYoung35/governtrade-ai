@@ -1,5 +1,5 @@
 {
   "openai": {"label": "OpenAI", "models": ["gpt-4.1", "gpt-4.1-mini", "gpt-5"]},
-  "anthropic": {"label": "Anthropic", "models": ["claude-opus-5", "claude-sonnet-4-6"]},
-  "google": {"label": "Google Gemini", "models": ["gemini-3.8-flash", "gemini-2.5-flash"]}
+  "anthropic": {"label": "Anthropic", "models": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-sonnet-4-6"]},
+  "google": {"label": "Google Gemini", "models": ["gemini-3.5-flash", "gemini-3.1-flash-lite"]}
 }
