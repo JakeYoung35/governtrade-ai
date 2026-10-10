@@ -169,17 +169,19 @@ class BatchTests(ServiceTest):
         self.submit(agentId="agent-2", proposalId="p-2", side="no", estimatedYesProbability=0.3)
         self.service.run_batch(self.s)
         outcomes = sorted((r["status"], r.get("decision")) for r in self.s["governorRequests"])
-        self.assertEqual(outcomes, [("decided", "rejected"), ("submitted", "approved")])
+        self.assertEqual(outcomes, [("rejected", "rejected"), ("submitted", "approved")])
         self.assertEqual(self.venue.calls, 1)
         rejected = next(d for d in self.s["governorDecisions"] if d["decision"] == "rejected")
         self.assertEqual(rejected["reasonCodes"], [rules.CONFLICT])
 
-    def test_price_moving_past_the_limit_skips_execution(self):
+    def test_order_is_limited_to_the_governor_price(self):
+        # A market that moves above the limit leaves the IOC unfilled at the venue; the order never pays more.
         self.venue.quote_override = 0.55
         view = self.run_one()
-        self.assertEqual(view["status"], "skipped")
-        self.assertIn("price moved", view["note"])
-        self.assertEqual(self.venue.calls, 0)
+        order = next(o for o in self.s["orders"] if o["id"] == view["order"]["id"])
+        self.assertEqual(view["status"], "submitted")
+        self.assertEqual(order["governedTerms"]["limitPrice"], view["decision"]["limitPrice"])
+        self.assertIn("approveBy", order["governedTerms"])
 
     def test_stake_below_the_app_minimum_is_skipped(self):
         view = self.run_one(maxBudgetUsd=1)
@@ -189,7 +191,7 @@ class BatchTests(ServiceTest):
     def test_unknown_market_is_rejected_without_an_order(self):
         view = self.run_one(marketId="KXNOPE-1")
         self.assertEqual(view["decision"]["reasonCodes"], [rules.MARKET_NOT_IN_SNAPSHOT])
-        self.assertEqual((view["status"], view["order"]), ("decided", None))
+        self.assertEqual((view["status"], view["order"]), ("rejected", None))
 
     def test_existing_position_counts_and_blocks_the_market(self):
         self.venue.positions = [{"ticker": MARKET, "position_fp": "10.00", "market_exposure_dollars": "5.00"}]
@@ -336,6 +338,194 @@ class GovernedOrderTests(ServiceTest):
                                              "reasoning": "x", "idempotencyKey": "k", "governedTerms": {"contracts": "99"}})
 
 
+class ProcessKilled(BaseException):
+    """Stands in for a killed process: not an Exception, so nothing in the service can catch it."""
+
+
+class ReviewFixTests(ServiceTest):
+    """Follow-up review of the contract docs and the governor commits on main."""
+
+    def test_retry_after_the_agent_is_paused_returns_the_original(self):
+        code, body = self.submit()
+        self.s["agentConfigs"][0]["status"] = "paused"
+        again, view = self.submit()
+        self.assertEqual((again, view["governorProposalId"]), (200, body["governorProposalId"]))
+        self.assertEqual(self.submit(proposalId="p-new")[0], 400)  # new proposals still need an active agent
+
+    def test_retry_beyond_the_window_is_recognised_in_json_mode(self):
+        code, body = self.submit()
+        self.service.run_batch(self.s)
+        for i in range(3):
+            self.submit(proposalId=f"later-{i}", marketId=OTHER, maxBudgetUsd=2)
+            self.service.run_batch(self.s)
+        with patch.object(records, "REQUEST_WINDOW", 1):
+            compact = records.compact_for_json(self.s)
+        slim = next(r for r in compact["governorRequests"] if r["proposalId"] == "p-1")
+        self.assertNotIn("reasoning", slim)
+        self.s = json.loads(json.dumps(compact))
+        again, view = self.submit()
+        self.assertEqual((again, view["governorProposalId"]), (200, body["governorProposalId"]))
+        self.assertEqual(self.submit(maxBudgetUsd=21)[0], 409)
+
+    def test_retry_beyond_the_window_uses_the_store_lookup(self):
+        code, body = self.submit()
+        stored = copy.deepcopy(self.s["governorRequests"][0])
+        self.s["governorRequests"].clear()  # outside the loaded window
+        self.service.find_request = lambda agent, pid: stored if (agent, pid) == ("agent", "p-1") else None
+        again, view = self.submit()
+        self.assertEqual((again, view["governorProposalId"]), (200, body["governorProposalId"]))
+
+    def test_crash_mid_batch_leaves_no_queued_decision_and_resumes(self):
+        self.submit()
+        self.submit(agentId="agent-2", proposalId="p-2", marketId=OTHER)
+        real_execute = self.service._execute
+        self.service._execute = lambda *a: (_ for _ in ()).throw(ProcessKilled())
+        with self.assertRaises(ProcessKilled):
+            self.service.run_batch(self.s)
+        decided = {d["proposalId"] for d in self.s["governorDecisions"]}
+        self.assertFalse([r for r in self.s["governorRequests"] if r["status"] == "queued" and r["governorProposalId"] in decided])
+        self.assertEqual(sorted(r["status"] for r in self.s["governorRequests"]), ["approved", "approved"])
+        self.service._execute = real_execute
+        self.service.run_batch(self.s)  # resumes instead of failing on the recorded decisions
+        self.assertEqual(sorted(r["status"] for r in self.s["governorRequests"]), ["submitted", "submitted"])
+        self.assertEqual(self.venue.calls, 2)
+        self.service.run_batch(self.s)
+        self.assertEqual(self.venue.calls, 2)  # resuming twice never orders twice
+
+    def test_expired_approved_request_is_skipped_on_resume(self):
+        code, body = self.submit()
+        request = self.request(body["governorProposalId"])
+        self.service._execute = lambda *a: (_ for _ in ()).throw(ProcessKilled())
+        with self.assertRaises(ProcessKilled):
+            self.service.run_batch(self.s)
+        request["proposal"]["expiresAt"] = (utc_now() - timedelta(seconds=1)).isoformat()
+        self.service.run_batch(self.s)
+        self.assertEqual(request["status"], "skipped")
+        self.assertIn("expired", request["note"])
+
+    def test_paused_agents_queued_proposals_do_not_execute(self):
+        self.submit()
+        self.s["agentConfigs"][0]["status"] = "paused"
+        self.service.run_batch(self.s)
+        self.assertEqual((self.s["governorRequests"][0]["status"], self.venue.calls), ("rejected", 0))
+        self.assertIn("paused", self.s["governorRequests"][0]["note"])
+
+    def test_stakes_awaiting_user_approval_count_as_exposure(self):
+        first = self.submit(maxBudgetUsd=100, estimatedYesProbability=0.8)[1]  # above the $25 automatic limit
+        self.service.run_batch(self.s)
+        self.assertEqual(self.service.lookup(self.s, first["governorProposalId"])["order"]["status"], "awaiting approval")
+        second = self.submit(agentId="agent-2", proposalId="p-2")[1]
+        self.service.run_batch(self.s)
+        self.assertEqual(self.service.lookup(self.s, second["governorProposalId"])["decision"]["reasonCodes"], [rules.POSITION_OPEN])
+
+
+class ContainmentTests(ServiceTest):
+    """Third review: failures stay contained, the lock is released for venue reads, approvals expire."""
+
+    def test_an_execution_error_fails_only_that_request_and_links_its_order(self):
+        self.submit()
+        self.submit(agentId="agent-2", proposalId="p-2", marketId=OTHER)
+        real_proposal = self.workspace.proposal
+
+        def flaky(s, b, governed=None):
+            order = real_proposal(s, b, governed=governed)
+            if b["agentId"] == "agent":
+                raise RuntimeError("socket closed after submission")
+            return order
+        self.workspace.proposal = flaky
+        self.service.run_batch(self.s)
+        statuses = {r["agentId"]: r for r in self.s["governorRequests"]}
+        self.assertEqual(statuses["agent"]["status"], "executionFailed")
+        self.assertIn("Check the linked order", statuses["agent"]["note"])
+        self.assertTrue(statuses["agent"]["orderId"])
+        self.assertEqual(statuses["agent-2"]["status"], "submitted")
+        self.service.run_batch(self.s)  # nothing wedged
+        self.assertEqual(self.venue.calls, 2)
+
+    def test_a_failing_resume_is_contained(self):
+        self.submit()
+        self.service._execute = lambda *a: (_ for _ in ()).throw(ProcessKilled())
+        with self.assertRaises(ProcessKilled):
+            self.service.run_batch(self.s)
+        del self.service._execute
+        self.service._execute_safely = GovernorService._execute_safely.__get__(self.service)
+        self.workspace.proposal = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("venue down"))
+        self.service.run_batch(self.s)
+        self.assertEqual(self.s["governorRequests"][0]["status"], "executionFailed")
+        self.service.run_batch(self.s)  # later passes run normally
+
+    def test_one_accounts_failure_does_not_stop_another_and_retries_are_bounded(self):
+        broken = GovernedVenue()
+        broken.get_orderbook = lambda market_id: (_ for _ in ()).throw(ValueError("bad book"))  # validated away
+        self.s["accounts"].append({**self.s["accounts"][0], "id": "account-2"})
+        self.s["agentConfigs"][1]["accountId"] = "account-2"
+        self.workspace.venue = lambda account: self.venue if account["id"] == "account" else broken
+        real_run = self.service._run_account
+
+        def explode(s, account_id, items, fetched):
+            if account_id == "account-2":
+                raise RuntimeError("unexpected")
+            return real_run(s, account_id, items, fetched)
+        self.service._run_account = explode
+        self.submit()
+        self.submit(agentId="agent-2", proposalId="p-2")
+        for attempt in range(3):
+            results = self.service.run_batch(self.s)
+            self.assertIn({"accountId": "account-2", "decided": 0, "error": "RuntimeError"}, results)
+        requests = {r["agentId"]: r for r in self.s["governorRequests"]}
+        self.assertEqual(requests["agent"]["status"], "submitted")
+        self.assertEqual((requests["agent-2"]["status"], requests["agent-2"]["attempts"]), ("rejected", 3))
+        self.assertIn("after 3 attempts", requests["agent-2"]["note"])
+
+    def test_venue_reads_happen_in_fetch_and_late_arrivals_wait(self):
+        self.submit()
+        plans = self.service.plan(self.s)
+        fetched = self.service.fetch(plans)  # what the server runs with the lock released
+        self.assertEqual(fetched["account"]["markets"], [MARKET])
+        self.submit(agentId="agent-2", proposalId="late", marketId=OTHER)  # arrives mid-pass
+        # The governor's own reads (books, the decision's balance) all happened in fetch. Order placement still goes
+        # through Workspace.proposal, which refreshes and quotes as the app's existing order path always has.
+        self.venue.get_orderbook = lambda market_id: (_ for _ in ()).throw(AssertionError("no book reads under the lock"))
+        self.service.run_batch(self.s, fetched)
+        statuses = {r["proposalId"]: r["status"] for r in self.s["governorRequests"]}
+        self.assertEqual(statuses, {"p-1": "submitted", "late": "queued"})
+
+    def test_scoring_reads_outcomes_outside_the_lock(self):
+        self.submit()
+        self.venue.outcomes[MARKET] = "1.0000"
+        outcomes = self.service.fetch_outcomes(self.service.plan_scoring(self.s))
+        self.venue.get_market_outcome = lambda market_id: (_ for _ in ()).throw(AssertionError("no venue reads"))
+        self.assertEqual(self.service.score_forecasts(self.s, outcomes), 1)
+
+    def test_approval_window_bounds_exposure_and_cancels_late_approvals(self):
+        from unittest.mock import patch as mock_patch
+        first = self.submit(maxBudgetUsd=100, estimatedYesProbability=0.8)[1]  # needs the user's approval
+        self.service.run_batch(self.s)
+        order = next(o for o in self.s["orders"] if o.get("governorProposalId") == first["governorProposalId"])
+        self.assertEqual(order["status"], "awaiting approval")
+        order["governedTerms"]["approveBy"] = (utc_now() - timedelta(seconds=1)).isoformat()  # window passed
+        second = self.submit(agentId="agent-2", proposalId="p-2")[1]
+        self.service.run_batch(self.s)
+        self.assertNotIn(rules.POSITION_OPEN, self.service.lookup(self.s, second["governorProposalId"])["decision"]["reasonCodes"])
+        self.workspace.action(self.s, {"action": "decision", "id": order["id"], "approve": True})
+        self.assertEqual(order["status"], "cancelled")
+        self.assertTrue(any(e["kind"] == "EXPIRED" for e in self.s["events"]))
+
+
+class SlimCapTests(unittest.TestCase):
+    def test_json_file_keeps_a_bounded_number_of_slim_requests(self):
+        s = main_seed()
+        base = utc_now()
+        s["governorRequests"] = [{"governorProposalId": f"g{i:05d}", "proposalId": f"p{i}", "agentId": "a", "accountId": "x",
+                                  "payloadHash": "h", "receivedAt": (base - timedelta(seconds=i)).isoformat(), "status": "rejected",
+                                  "proposal": {"marketId": "M", "side": "yes", "expiresAt": base.isoformat()}, "reasoning": "r"}
+                                 for i in range(30)]
+        with patch.object(records, "REQUEST_WINDOW", 5), patch.object(records, "SLIM_REQUEST_LIMIT", 10):
+            out = records.compact_for_json(s)
+        self.assertEqual(len(out["governorRequests"]), 15)
+        self.assertEqual(sum("reasoning" in r for r in out["governorRequests"]), 5)
+
+
 class SigningTests(unittest.TestCase):
     """KalshiAdapter signs with RSA and Ed25519 keys (the live demo key is Ed25519)."""
 
@@ -420,6 +610,16 @@ class HttpTests(unittest.TestCase):
         self.assertEqual((code, summary["queued"]), (200, 1))
         stored = json.loads(Path(self.tmp.name, "main.json").read_text())
         self.assertEqual(stored["governorRequests"][0]["status"], "queued")
+        self.assertEqual(self.call("GET", "/api/worker", token="wrong")[0], 403)  # shared worker_ok check
+        self.assertEqual(self.call("GET", "/api/worker")[0], 200)
+
+    def test_governor_pass_plans_fetches_and_decides(self):
+        self.assertFalse(self.server_module.governor_pass(score=False))  # idle: nothing to do
+        code, body = self.call("POST", "/api/governor/proposals", submission())
+        self.assertTrue(self.server_module.governor_pass(score=True))
+        stored = json.loads(Path(self.tmp.name, "main.json").read_text())
+        request = next(r for r in stored["governorRequests"] if r["governorProposalId"] == body["governorProposalId"])
+        self.assertEqual(request["status"], "submitted")
 
 
 if __name__ == "__main__":

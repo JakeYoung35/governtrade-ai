@@ -21,8 +21,10 @@ at `GET /api/governor/schema`. This page covers how decisions are made and how t
 3. **Execute.** Approved stakes go through `Workspace.proposal`, so the user's mandate (automatic limit,
    daily cap, cash reserve), the account ceiling and the app's safety checks still apply, including
    requests for user approval. The order buys exactly the approved contracts as an immediate-or-cancel order
-   at the governor's limit price. A quote above that limit, or a stake under the app's $1 minimum, is skipped
-   with a reason.
+   at the governor's limit price, so if the market has moved above that limit the order simply goes unfilled
+   (status `cancelled`). A stake under the app's $1 minimum is skipped with a reason. A governed order that
+   needs the user's approval can be approved for `approval_ttl_seconds` (15 minutes by default); after that it
+   stops counting toward exposure, and a late approval cancels it instead of trading on stale sizing.
 4. **Look up.** `GET /api/governor/proposals/{governorProposalId}` returns the status, the decision (stake,
    contracts, limit, reason codes, reliability, policy version) and the downstream order.
 
@@ -66,6 +68,19 @@ forecast is scored (Brier) and the agent's reliability updates, which changes it
 agent's first forecast per market is scored, including proposals the governor rejected, so reliability does
 not depend on the governor's own decisions. Run it on demand with `{"action": "governor-score"}`.
 
+## Failure handling and locking
+
+- Every request's outcome is recorded before any order is sent, and each batch first finishes requests left
+  `approved` (for example after a crash). The order's idempotency key is the governor proposal id, so this
+  never places an order twice; proposals that expired meanwhile are skipped.
+- One account's failure never stops another's. A request that fails to be evaluated is retried on the next
+  pass and rejected after three failed attempts. An execution failure marks only that request
+  (`executionFailed`) and links any order already created.
+- Each pass plans under the workspace lock, reads balances, order books and market outcomes with the lock
+  released, then decides and saves under the lock. Order placement goes through `Workspace.proposal`, which,
+  like the app's existing order route, refreshes the balance and quotes while holding the lock. In Postgres
+  mode an idle pass costs one small query instead of a full workspace load.
+
 ## Configuration
 
 | Variable | Purpose |
@@ -108,5 +123,5 @@ reliability and the next stake. All balances and fills in the demo are simulated
 - Each order book costs four Kalshi requests (market, event, series, book); large batches may approach the
   30-second freshness window.
 - Every stored forecast is loaded on each request; fine for now, bounded loading is a follow-up.
-- Retries are recognised among the most recent 500 requests. A `proposalId` reused after that is refused by
-  Postgres (unique per agent) and treated as a new proposal in JSON mode, so always use unique ids.
+- A retry of any earlier `proposalId` returns the original record: Postgres looks older requests up in
+  `governor_requests`, and the JSON file keeps them in slim form. Use a new `proposalId` for each new proposal.

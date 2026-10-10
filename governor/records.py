@@ -32,6 +32,10 @@ from .snapshot import build_snapshot
 BATCH_WINDOW = 50  # batches carry full order books, so state keeps only the recent ones
 DECISION_WINDOW = 500
 BREAKER_EVENT_WINDOW = 200
+REQUEST_WINDOW = 500  # governed proposal requests kept in full (Postgres load and the JSON file)
+SLIM_REQUEST_LIMIT = 5000  # older requests the JSON file still recognises as retries (Postgres keeps every row)
+_SLIM_REQUEST_FIELDS = ("governorProposalId", "proposalId", "agentId", "accountId", "payloadHash", "receivedAt",
+                        "status", "decision", "batchId", "orderId", "note")
 
 
 def _iso(value, name):
@@ -257,4 +261,15 @@ def compact_for_json(s):
     out["governorDecisions"] = [d for d in s.get("governorDecisions", []) if d["batchId"] in kept][:DECISION_WINDOW]
     out["governorBreakerEvents"] = s.get("governorBreakerEvents", [])[:BREAKER_EVENT_WINDOW]
     out["governorReplacedForecasts"] = []  # the file holds the full forecast list; nothing to delete
+    # Requests beyond the window keep a slim record, so a retry of an old proposalId is still recognised
+    # (and never placed twice) without keeping its full payload and reasoning on disk.
+    requests = s.get("governorRequests", [])
+    active = [r for r in requests if r["status"] in ("queued", "approved")]
+    done = [r for r in requests if r["status"] not in ("queued", "approved")]
+    full = {id(r) for r in active + done[:REQUEST_WINDOW]}
+    slim = {id(r) for r in done[REQUEST_WINDOW:REQUEST_WINDOW + SLIM_REQUEST_LIMIT]}
+    out["governorRequests"] = [r if id(r) in full else {
+        **{k: r[k] for k in _SLIM_REQUEST_FIELDS if k in r},
+        "proposal": {k: r["proposal"][k] for k in ("marketId", "side", "expiresAt")}}
+        for r in requests if id(r) in full or id(r) in slim]
     return out

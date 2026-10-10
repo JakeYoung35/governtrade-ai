@@ -1,6 +1,6 @@
-# Agent integration contract (version 1)
+# Agent integration contract
 
-This branch owns account connections, agent configuration, user instructions and governance. The agentic teammate owns model calls and market selection. No AI worker or scheduler is started by the UI.
+The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. The agentic teammate's worker owns model calls and market selection. The UI starts no AI worker; the server runs only the governor's batch loop.
 
 ## Public agent contract (version 2)
 
@@ -36,24 +36,55 @@ Internal stored configs additionally contain `modelCredentialRef`, an opaque vau
 
 Set `GOVERNTRADE_AGENT_TOKEN` to a random secret in both server and trusted worker environments. Use `Authorization: Bearer ...`. `GET /api/worker` returns public configurations and saved chat instructions. Consume only newly observed customer messages and persist your own cursor; do not repeatedly trade on historical messages. This token does not implement per-agent isolation; the trusted worker can submit for configured agents. Host is localhost only.
 
-`POST /api/agent/proposals`:
+### Governed proposal contract (schema version 1)
+
+Adopted 2026-10-10. [`governor/api.py`](../governor/api.py) is the source of truth for the proposal schema, validation, example, and response contract. This supersedes the older proposed “contract v3”; the public agent configuration version above is separate from proposal `schemaVersion`.
+
+Use the worker bearer token for schema discovery, submission, and lookup:
+
+- `GET /api/governor/schema`
+- `POST /api/governor/proposals`
+- `GET /api/governor/proposals/{governorProposalId}`
 
 ```json
 {
+  "schemaVersion": 1,
+  "proposalId": "instruction-id:proposal-1",
   "agentId": "273798cf-92d3-4bc5-ae4e-224a95cd8024",
   "marketId": "VENUE-MARKET-TICKER",
-  "direction": "Yes",
-  "amount": 10,
-  "reasoning": "Explain the proposed trade for user review.",
-  "idempotencyKey": "instruction-id:proposal-1"
+  "side": "yes",
+  "estimatedYesProbability": 0.45,
+  "maxBudgetUsd": 10,
+  "maxEntryPrice": 0.40,
+  "reasoning": "Explain the proposed trade for user review."
 }
 ```
 
-Kalshi uses `Yes` or `No`. Amount is an all-in maximum USD budget. No leverage, closing/selling, transfers, withdrawals, scheduling or custom broker payloads are exposed. The account comes from the saved agent config, never from a model-selected account ID. The server retrieves the venue market/category, quote and account balance itself. The model cannot supply balances, prices, approvals, environment or rule overrides. Reuse an idempotency key on retries; changing the key makes a distinct proposal.
+All example fields except `maxEntryPrice` are required. `expiresAt` is also optional. Unknown fields are rejected. Send numeric fields as finite JSON numbers, not strings or booleans.
 
-Response: `{"order": {...}}` with `decision` (`ALLOW`, `REQUIRE_APPROVAL`, `BLOCK`), status and evaluation history. A successful HTTP response is not a confirmed fill. The worker cannot approve blocked or pending orders using this endpoint. User decisions happen in the UI and re-evaluate current rules and account data. A price increase requires renewed approval.
+- `side`: lowercase `yes` or `no`.
+- `estimatedYesProbability`: 0.01-0.99 inclusive; always the probability of YES, including for a NO purchase. It is scored against the settled result (Brier score), and the agent's reliability from those scores scales its future stakes. Only the agent's first forecast per market counts, including proposals the governor rejected, so report honest probabilities.
+- `maxBudgetUsd`: $1-$1,000,000 inclusive, the maximum all-in budget including fees. The governor can shrink or reject it.
+- `maxEntryPrice`: optional 0.01-0.99 inclusive, in dollars per contract for the chosen side. Without it, the governor still buys only at prices with positive expected edge, and the order is sent as immediate-or-cancel at the governor's own limit price.
+- `expiresAt`: optional future ISO-8601 timestamp with timezone, at most one hour after receipt. Default lifetime is the policy value, currently 60 seconds.
+- `proposalId`: client-generated retry identifier, scoped to the agent, 1-200 letters, digits, dots, underscores, colons, or hyphens. Reuse the same ID and payload on retries.
+- `reasoning`: nonblank text, at most 8,000 characters. Agent and market IDs must be nonblank strings of at most 200 characters.
 
-`submission unknown` reserves the budget across restart. Do not resend with a fresh key. Confirm the venue result using the client order ID before implementing reconciliation. Kalshi IOC responses report immediate fill counts. Never assume a timeout is a rejection.
+New submission response: HTTP `202`, with `governorProposalId`, the client `proposalId`, and `status: "queued"`. Persist the server-generated `governorProposalId` and use it for lookup; it is distinct from the client retry ID and any venue order ID.
+
+An identical retry returns HTTP `200` and the existing record without creating another proposal, also after the agent was paused and for older proposals (looked up in the database, or kept in slim form in the local JSON file). Reusing the same agent/proposal ID with a changed payload returns `409`. Invalid submissions return `400` with field-level `errors` and a `schema` link. Unknown lookup IDs return `404`. Keep the retry payload unchanged, including any explicit expiry; a timeout is not a rejection.
+
+Poll lookup for the governor decision and downstream order status. Request `status` is `queued` (waiting for the next batch, every few seconds), `rejected` (the governor rejected it, see `decision.reasonCodes`, or it could not be evaluated, see `note`), `approved` (approved or resized; the order is being placed), `submitted` (an order was created; see `order.status`, which can still be `awaiting approval`, `blocked`, `filled`, `cancelled` or `submission unknown`), `skipped` (approved, but the stake was under the app's $1 minimum, or the proposal expired before an interrupted execution could resume; see `note`) or `executionFailed` (see `note`; an order created before the failure is linked). An order is an immediate-or-cancel at the governor's limit price, so a market that moved above the limit leaves it unfilled (`order.status` `cancelled`). An order awaiting the user's approval can be approved for 15 minutes; a later approval cancels it. Queue acceptance and governor approval do not confirm execution or a fill. Approved or resized stakes still pass the user's mandate and effective account ceiling; human approval may be required. The worker cannot approve trades, reset the breaker, or change policy.
+
+The account comes from the saved agent configuration. The server obtains market metadata, order books, balances, and execution quotes. The worker supplies a price limit, not a trusted quote, and cannot supply account IDs, balances, approvals, environment, credentials, or rule overrides. No selling, leverage, transfers, withdrawals, or arbitrary broker payloads are exposed.
+
+`submission unknown` must retain its reservation across restart. Do not retry with a fresh proposal ID; reconcile the venue result using the execution client order ID. Human approval rechecks current rules and account data; a price increase requires renewed approval.
+
+### Migration and implementation status
+
+The governed route is implemented (see [governor.md](governor.md) for how batches, caps, the loss breaker and scoring work) and was verified end to end on 2026-10-10 against the Kalshi demo exchange (`external-api.demo.kalshi.co`): a proposal submitted through `GovernorService` was approved for 4 contracts at $0.53 and all 4 filled through `Workspace` and `KalshiAdapter`. The offline equivalents are `scripts/replay_demo.py` and `test_governor_service.py`. Check `GET /api/governor/schema` on the running revision before switching a worker.
+
+The legacy `/api/agent/proposals` route uses `direction`, `amount`, and `idempotencyKey`, and returns an immediate `order`. New workers must use the governor route. There is no automatic compatibility mapping: use `side`, `maxBudgetUsd`, and `proposalId`, and additionally provide `schemaVersion` and `estimatedYesProbability`. Do not fall back to the legacy route on governor errors. The legacy route still exists and bypasses the governor's sizing, conflict and breaker checks (it keeps the mandate and ceiling checks); retire or restrict it once workers have migrated.
 
 ## Rules and balances
 

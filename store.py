@@ -9,7 +9,7 @@ import contextlib, datetime as dt, json, threading
 from decimal import Decimal
 from pathlib import Path
 from engine import main_seed
-from governor.records import BATCH_WINDOW,DECISION_WINDOW,BREAKER_EVENT_WINDOW
+from governor.records import BATCH_WINDOW,DECISION_WINDOW,BREAKER_EVENT_WINDOW,REQUEST_WINDOW
 
 MIGRATIONS=Path(__file__).parent/'migrations'
 LOCK_KEY=0x476f7654726164  # "GovTrad"
@@ -37,7 +37,6 @@ VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 ON CONFLICT (id) DO UPDATE SET market_id=EXCLUDED.market_id,market=EXCLUDED.market,amount=EXCLUDED.amount,reasoning=EXCLUDED.reasoning,status=EXCLUDED.status,decision=EXCLUDED.decision,
 committed=EXCLUDED.committed,filled=EXCLUDED.filled,automatic=EXCLUDED.automatic,venue_order_id=EXCLUDED.venue_order_id,quantity=EXCLUDED.quantity,actual_cost=EXCLUDED.actual_cost,extra=EXCLUDED.extra'''
 
-REQUEST_WINDOW=500  # matches governor_service.REQUEST_WINDOW: every queued request plus the newest decided ones
 REQUEST_UPSERT='''INSERT INTO governor_requests (governor_proposal_id,agent_id,account_id,proposal_id,status,received_at,payload)
 VALUES (%s,%s,%s,%s,%s,%s,%s)
 ON CONFLICT (governor_proposal_id) DO UPDATE SET status=EXCLUDED.status,payload=EXCLUDED.payload'''
@@ -122,14 +121,23 @@ class PostgresStore:
                 for r in conn.execute('SELECT payload,batch_id,account_id,decided_at FROM governor_decisions ORDER BY decided_at DESC,proposal_id COLLATE "C" DESC LIMIT %s',(DECISION_WINDOW,))]
             s['governorForecasts']=[{'proposalId':r['proposal_id'],'agentId':r['agent_id'],'marketId':r['market_id'],'submittedAt':iso(r['submitted_at']),'estimatedYesProbability':r['p'],'outcome':r['o'],'resolvedAt':iso(r['resolved_at'])}
                 for r in q('SELECT proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability::text AS p,outcome::text AS o,resolved_at FROM governor_forecasts ORDER BY submitted_at,proposal_id COLLATE "C"')]
-            s['governorRequests']=[r['payload'] for r in conn.execute('''SELECT payload FROM governor_requests WHERE status='queued' OR governor_proposal_id IN
-                (SELECT governor_proposal_id FROM governor_requests WHERE status<>'queued' ORDER BY received_at DESC,governor_proposal_id COLLATE "C" DESC LIMIT %s)
+            s['governorRequests']=[r['payload'] for r in conn.execute('''SELECT payload FROM governor_requests WHERE status IN ('queued','approved') OR governor_proposal_id IN
+                (SELECT governor_proposal_id FROM governor_requests WHERE status NOT IN ('queued','approved') ORDER BY received_at DESC,governor_proposal_id COLLATE "C" DESC LIMIT %s)
                 ORDER BY received_at DESC,governor_proposal_id COLLATE "C" DESC''',(REQUEST_WINDOW,))]
             s['governorBreakerEvents']=[{**r['payload'],'id':r['id'],'accountId':r['account_id']}
                 for r in conn.execute('SELECT id,account_id,payload FROM governor_breaker_events ORDER BY at DESC,id COLLATE "C" DESC LIMIT %s',(BREAKER_EVENT_WINDOW,))]
         seen.update(self.signatures(s));seen['loaded']=True;self.local.seen=seen
         return s
 
+    def governor_work_pending(self):
+        """Cheap idle check for the governor loop: is any governed request queued or awaiting execution?"""
+        with self.connection() as conn:
+            return conn.execute("SELECT EXISTS(SELECT 1 FROM governor_requests WHERE status IN ('queued','approved')) AS pending").fetchone()['pending']
+    def find_governor_request(self,agent_id,proposal_id):
+        """An older governed request by the worker's (agent, proposalId), for retries beyond the loaded window."""
+        with self.connection() as conn:
+            row=conn.execute('SELECT payload FROM governor_requests WHERE agent_id=%s AND proposal_id=%s',(agent_id,proposal_id)).fetchone()
+        return row and row['payload']
     def signatures(self,s):
         seen={'settings':signature(self.settings(s)),'events':{e['id'] for e in s['events']},'keys':set(s['keys']),
               'governorBatches':{b['id'] for b in s.get('governorBatches',[])},'governorDecisions':{d['proposalId'] for d in s.get('governorDecisions',[])},
