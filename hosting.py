@@ -11,7 +11,14 @@ def bind_host():
 
 
 def hosted():
+    """Reachable beyond this machine, so access must be controlled (an access password or personal sign-in)."""
     return os.environ.get('RENDER') == 'true' or bind_host() not in ('127.0.0.1', 'localhost', '::1')
+
+
+def https():
+    """Served over HTTPS: secure cookies and https:// origins. True on Render, or with GOVERNTRADE_HTTPS=true behind
+    another TLS proxy. Binding to 0.0.0.0 alone (a LAN or Docker over plain http) keeps http:// so writes still work."""
+    return os.environ.get('RENDER') == 'true' or os.environ.get('GOVERNTRADE_HTTPS') == 'true'
 
 
 def allowed_host(authority):
@@ -23,7 +30,7 @@ def allowed_host(authority):
         hostname = parsed.hostname
     except ValueError:
         return False
-    allowed = set() if hosted() else {'localhost', '127.0.0.1'}
+    allowed = set() if hosted() else {'localhost', '127.0.0.1', '::1'}
     allowed.update(x.strip().lower() for x in os.environ.get('GOVERNTRADE_ALLOWED_HOSTS', '').split(',') if x.strip())
     render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip().lower()
     if render_host:
@@ -32,7 +39,7 @@ def allowed_host(authority):
 
 
 def expected_origin(authority):
-    return ('https://' if hosted() else 'http://')+authority
+    return ('https://' if https() else 'http://')+authority
 
 
 def password_ok(authorization):

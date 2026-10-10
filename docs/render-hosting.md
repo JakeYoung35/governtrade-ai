@@ -6,13 +6,34 @@ Start command: `python server.py`
 
 Health check path: `/healthz`
 
-Render supplies `PORT`, `RENDER=true`, and `RENDER_EXTERNAL_HOSTNAME`. The server binds to `0.0.0.0` on Render and continues to bind to `127.0.0.1` locally. Hostnames are checked explicitly; HTTPS origins and secure session cookies are used in hosted mode. It also stops accepting localhost and 127.0.0.1 as host names unless they are added to GOVERNTRADE_ALLOWED_HOSTS.
+Render supplies `PORT`, `RENDER=true`, and `RENDER_EXTERNAL_HOSTNAME`. The server binds to `0.0.0.0` on Render and continues to bind to `127.0.0.1` locally. Hostnames are checked explicitly. On Render, HTTPS origins and secure session cookies are used. Elsewhere (`BIND_HOST=0.0.0.0` on a LAN or in Docker) the server still requires access control but keeps plain `http://` origins, unless `GOVERNTRADE_HTTPS=true` is set behind your own TLS proxy. It also stops accepting localhost and 127.0.0.1 as host names unless they are added to GOVERNTRADE_ALLOWED_HOSTS.
 
-## Personal workspaces with Google sign-in
+## Personal workspaces
 
-Set these in Render's environment settings:
+Each person signs in with **Auth0** (recommended) or directly with **Google**. If `AUTH0_DOMAIN` is set, Auth0 is used; otherwise `GOVERNTRADE_GOOGLE_CLIENT_ID` enables Google sign-in.
+
+### Auth0
+
+In the Auth0 dashboard, create a **Regular Web Application**. Under its settings add:
+
+- **Allowed Callback URLs:** `https://governtradeai.us/api/auth/callback` (and the Render URL's `/api/auth/callback` if used; `http://localhost:3110/api/auth/callback` for local testing)
+- **Allowed Logout URLs:** `https://governtradeai.us/` (and the Render or localhost root if used)
+- **Connections:** enable the sign-in methods you want (Google, email and password, and so on). Turn on email verification for password sign-ups: unverified addresses are refused.
+
+Then set in Render:
+
+- `AUTH0_DOMAIN`: the tenant domain, for example `governtrade.us.auth0.com` (or your Auth0 custom domain).
+- `AUTH0_CLIENT_ID` and `AUTH0_CLIENT_SECRET` (secret) from the application's settings.
+
+The server uses the authorization code flow with PKCE: `/api/auth/start` sends the browser to Auth0 with a signed, per-attempt cookie (state, nonce, PKCE verifier); `/api/auth/callback` exchanges the code server-side and verifies the RS256 ID token against Auth0's published keys (issuer, audience, expiry, nonce, verified email). Sign-out also ends the Auth0 session.
+
+### Google (direct)
 
 - `GOVERNTRADE_GOOGLE_CLIENT_ID`: the public client ID of a Google **Web application** OAuth client.
+
+### Settings for either provider
+
+- `GOVERNTRADE_ALLOWED_EMAILS` (**required when hosted**): who may sign in, as comma-separated addresses and `@domains` (for example `owner@example.com,@yourteam.com`), or `*` for any verified account. Removing an address ends its sessions and stops its background governor passes.
 - `GOVERNTRADE_ALLOWED_HOSTS`: `governtradeai.us,www.governtradeai.us` (the Render hostname is added automatically).
 - `GOVERNTRADE_DATA_DIR`: `/var/data/governtrade` on an attached persistent disk mounted at `/var/data`.
 - `GOVERNTRADE_PERSISTENT_STORAGE`: `true`, only after the disk is attached.
@@ -28,9 +49,9 @@ In Google Auth Platform, configure the app branding and External audience, then 
 
 This implementation uses the Google Identity Services popup and a server-verified ID token, not a redirect code flow, so no callback URL or OAuth client secret is required. Publish the consent app audience when ready for public access; a Testing audience only allows designated test users. Follow any consent-screen verification requirements Google displays.
 
-The public page contains sign-in only. Workspace APIs require an unexpired server session. Google token signatures, audience, issuer, expiry, verified email and the browser-bound one-use nonce are checked. Tokens are not saved. Sessions are stored by hash in `sessions.sqlite3`; sign-out revokes them. Secure host-only HttpOnly cookies and per-session CSRF checks protect actions.
+The public page contains sign-in only. Workspace APIs require an unexpired server session. Provider token signatures, audience, issuer, expiry, verified email and the browser-bound one-use nonce are checked. Tokens are not saved. Login challenges are signed, expiring cookies (one per sign-in attempt, so several tabs work, and anonymous visitors write nothing to disk); a challenge's nonce is recorded only after the provider verifies the sign-in, so replays are refused while a transient provider error can be retried. The signing key is `auth-secret` on the data disk (or `GOVERNTRADE_SESSION_SECRET`). Sessions are stored by hash in `sessions.sqlite3`; sign-out revokes them. Secure host-only HttpOnly cookies and per-session CSRF checks protect actions.
 
-User state and encrypted vaults are stored under `users/<verified-subject-hash>/`, with thread-local context and file locks. Both background governor execution and simulated demos use the same isolation. Existing shared `main.json`, `demo.json` and vault files are never imported into user workspaces.
+User state and encrypted vaults are stored under `users/<verified-subject-hash>/`, with thread-local context and file locks; each workspace saves to its own folder even outside a request. Both background governor execution and simulated demos use the same isolation. The governor loop reads a small `governor-status.json` marker beside each workspace and skips idle ones without loading them. At most `GOVERNTRADE_MAX_LOADED_WORKSPACES` (default 256) idle workspaces stay in memory; their state is on disk. Existing shared `main.json`, `demo.json` and vault files are never imported into user workspaces.
 
 Legacy `GOVERNTRADE_AGENT_TOKEN` access is disabled in this mode because it has no user identity. The existing UI still saves chat instructions without generating AI proposals. Implement user-scoped worker authentication before enabling external automated agents.
 
