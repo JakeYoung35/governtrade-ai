@@ -31,9 +31,6 @@ from governor.policy import DEFAULT_POLICY
 from governor.snapshot import build_snapshot, order_book
 
 SCHEMA_PATH = "/api/governor/schema"
-# Orders created this long before a pass's venue read cannot have been answered during it (an order is created and
-# answered within one locked request), so _in_flight stops scanning there.
-IN_FLIGHT_LOOKBACK = dt.timedelta(minutes=10)
 MAX_EVALUATION_ATTEMPTS = 3  # passes a request may fail to be evaluated before it is rejected
 
 
@@ -259,24 +256,18 @@ class GovernorService:
           or no fetched read to compare with) they count. Committed orders without a fill count always count.
         Errs toward smaller stakes. Committed `submitted` orders answered before `started` are not counted here
         (nor in the positions, if the venue never reported their fill): a known gap, see the PR #16 follow-ups.
+
+        Every order is scanned: orders are stored by creation time, but one that waited for the user's approval is
+        answered when approved, which can be long after it was created, so there is no safe early cutoff.
         """
-        def executed_at(o):
+        def answered_in_window(o):
             try:
-                return dt.datetime.fromisoformat(o["executedAt"])
+                return dt.datetime.fromisoformat(o["executedAt"]) >= started
             except (KeyError, TypeError, ValueError):
-                return None
-        lookback = started - IN_FLIGHT_LOOKBACK
-        candidates = []
-        for o in s["orders"]:  # newest first by creation time, and an order is answered after it is created
-            try:
-                if dt.datetime.fromisoformat(o["time"]) < lookback:
-                    break
-            except (KeyError, TypeError, ValueError):
-                pass
-            if (o.get("accountId") == account["id"]
-                    and (o.get("filled") or (o.get("committed") and o.get("status") in ("submitted", "open")))
-                    and (executed_at(o) or lookback) >= started):
-                candidates.append(o)
+                return False  # no executedAt: placed before it was recorded, so long before this read
+        candidates = [o for o in s["orders"] if o.get("accountId") == account["id"]
+                      and (o.get("filled") or (o.get("committed") and o.get("status") in ("submitted", "open")))
+                      and answered_in_window(o)]
         if refreshed is None or not candidates:
             return candidates
 

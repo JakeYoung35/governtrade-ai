@@ -545,6 +545,19 @@ class ContainmentTests(ServiceTest):
         self.service.run_batch(self.s, fetched)
         self.assertEqual(sorted(e["amount"] for e in self.market_exposures()), sorted(["9.50", str(D(str(order["actualCost"])))]))
 
+    def test_an_old_order_approved_during_the_window_is_counted(self):
+        # Created long ago as awaiting approval, sent to the venue only when the user approves it mid-pass.
+        order = self.workspace.proposal(self.s, {"agentId": "agent-2", "marketId": MARKET, "direction": "Yes", "amount": 40,
+                                                 "reasoning": "Above the automatic limit.", "idempotencyKey": "needs-approval"})
+        self.assertEqual(order["status"], "awaiting approval")
+        order["time"] = (utc_now() - timedelta(minutes=12)).isoformat()
+        self.submit(marketId=OTHER)
+        fetched = self.service.fetch(self.service.plan(self.s))
+        self.workspace.action(self.s, {"action": "decision", "id": order["id"], "approve": True})  # positions lag: still empty
+        self.assertEqual(order["status"], "filled")
+        self.service.run_batch(self.s, fetched)
+        self.assertEqual([e["amount"] for e in self.market_exposures()], [str(D(str(order["actualCost"])))])
+
     def test_orders_placed_before_the_read_are_not_counted_twice(self):
         earlier = (utc_now() - timedelta(minutes=5)).isoformat()
         self.s["orders"].insert(0, self.filled_order("filled-earlier", earlier))
