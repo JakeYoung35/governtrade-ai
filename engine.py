@@ -80,7 +80,7 @@ DEMO_AGENTS=[
  {'id':'demo-aggressive','name':'Momentum Trader','personality':'Aggressive','mandate':copy.deepcopy(PERSONALITIES['Aggressive']),'demoMarket':'crypto','priorDailySpend':80},
  {'id':'demo-new-market','name':'Discovery Agent','personality':'Moderate','mandate':{**PERSONALITIES['Moderate'],'newMarketApproval':True},'demoMarket':'politics','priorDailySpend':0}]
 # Governor records (see governor/records.py): loss-breaker state, batch inputs, decisions, forecasts.
-def governor_seed():return {'governor':{'breakers':{},'breakerEvents':[]},'governorBatches':[],'governorDecisions':[],'governorForecasts':[]}
+def governor_seed():return {'governor':{'breakers':{}},'governorBatches':[],'governorDecisions':[],'governorForecasts':[],'governorBreakerEvents':[]}
 def main_seed():
  return {'schemaVersion':3,'mode':'main','clock':dt.datetime.now(dt.timezone.utc).isoformat(),'accounts':[],'agentConfigs':[],'permissions':copy.deepcopy(MAIN_DEFAULT),'safety':copy.deepcopy(SAFETY),'orders':[],'events':[],'keys':{},'chats':{},'positions':[],**governor_seed()}
 def migrate(s):

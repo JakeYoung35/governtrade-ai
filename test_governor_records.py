@@ -146,8 +146,9 @@ class BatchRecordTests(unittest.TestCase):
         s = main_seed()
         run_batch(s)
         self.assertEqual([d["proposalId"] for d in s["governorDecisions"]], ["p3", "p2", "p1"])
-        s["governorBatches"] = [{"id": f"old{i}"} for i in range(records.BATCH_WINDOW)]
-        s["governorDecisions"] = [{"proposalId": f"old{i}"} for i in range(records.DECISION_WINDOW)]
+        earlier = lambda i: (NOW - timedelta(minutes=i + 1)).isoformat()
+        s["governorBatches"] = [{"id": f"old{i}", "startedAt": earlier(i)} for i in range(records.BATCH_WINDOW)]
+        s["governorDecisions"] = [{"proposalId": f"old{i}", "decidedAt": earlier(i)} for i in range(records.DECISION_WINDOW)]
         run_batch(s, "b9")
         self.assertEqual(len(s["governorBatches"]), records.BATCH_WINDOW)
         self.assertEqual(s["governorBatches"][0]["id"], "b9")
@@ -179,28 +180,82 @@ class ForecastTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
-    def test_breaker_state_and_audit_in_workspace_state(self):
+    def test_breaker_state_in_workspace_state(self):
         s = main_seed()
         self.assertEqual(records.breaker_state(s, ACCOUNT), BreakerState())
         latched = check(BreakerState(), equity=D(960), day_open_equity=D(1000), now=NOW).state
         records.save_breaker(s, ACCOUNT, latched)
         self.assertEqual(records.breaker_state(json.loads(json.dumps(s)), ACCOUNT), latched)
+
+    def test_breaker_events_are_write_once_newest_first_and_windowed(self):
+        s = main_seed()
         for i in range(records.BREAKER_EVENT_WINDOW + 5):
-            records.record_breaker_event(s, ACCOUNT, {"action": "breakerReset", "n": i})
-        events = s["governor"]["breakerEvents"]
-        self.assertEqual((len(events), events[0]["n"], events[0]["accountId"]),
-                         (records.BREAKER_EVENT_WINDOW, records.BREAKER_EVENT_WINDOW + 4, ACCOUNT))
+            at = (NOW + timedelta(seconds=i)).isoformat()
+            records.record_breaker_event(s, ACCOUNT, {"action": "breakerReset", "at": at, "n": i}, f"ev-{i:03d}")
+        events = s["governorBreakerEvents"]
+        self.assertEqual((len(events), events[0]["n"], events[0]["id"], events[0]["accountId"]),
+                         (records.BREAKER_EVENT_WINDOW, records.BREAKER_EVENT_WINDOW + 4, "ev-204", ACCOUNT))
+        with self.assertRaisesRegex(ValueError, "already recorded"):
+            records.record_breaker_event(s, ACCOUNT, {"action": "breakerReset", "at": NOW.isoformat()}, "ev-204")
+        for event, event_id in (({"action": "", "at": NOW.isoformat()}, "x"), ({"action": "a", "at": NOW.isoformat()}, ""),
+                                ({"action": "a", "at": "not-a-time"}, "y")):
+            with self.subTest(event=event, event_id=event_id), self.assertRaises(ValueError):
+                records.record_breaker_event(s, ACCOUNT, event, event_id)
+
+    def test_reset_audit_records_as_a_breaker_event(self):
+        s = main_seed()
+        latched = check(BreakerState(), equity=D(960), day_open_equity=D(1000), now=NOW).state
+        state, audit = reset(latched, operator="ops", reason="reviewed", equity=D(960), now=NOW)
+        records.record_breaker_event(s, ACCOUNT, audit, "reset-1")
+        self.assertEqual(json.loads(json.dumps(s))["governorBreakerEvents"][0]["reason"], "reviewed")
 
     def test_seed_and_migration_include_governor_records(self):
         s = main_seed()
-        for key in ("governor", "governorBatches", "governorDecisions", "governorForecasts"):
+        for key in ("governor", "governorBatches", "governorDecisions", "governorForecasts", "governorBreakerEvents"):
             self.assertIn(key, s)
         old = {k: v for k, v in main_seed().items() if not k.startswith("governor")}
         migrated = migrate(old)
-        self.assertEqual(migrated["governor"], {"breakers": {}, "breakerEvents": []})
+        self.assertEqual((migrated["governor"], migrated["governorBreakerEvents"]), ({"breakers": {}}, []))
         kept = main_seed()
         kept["governorForecasts"] = [{"proposalId": "keep"}]
         self.assertEqual(migrate(kept)["governorForecasts"], [{"proposalId": "keep"}])
+
+
+class OrderingTests(unittest.TestCase):
+    """State lists use (time, id) in code-point order, the order Postgres loads under COLLATE "C"."""
+
+    def test_ids_sort_by_code_point_not_locale(self):
+        # Locale collations ignore hyphens and fold case ("ab" < "a-c", "a" < "B"); code point order does not.
+        s = main_seed()
+        books, _, portfolio, reliability = batch_inputs()
+        markets = ["M1", "M2", "M1"]
+        ids = ["ab", "a-c", "B"]
+        proposals = [proposal(pid, agent=f"g{i}", market=m) for i, (pid, m) in enumerate(zip(ids, markets))]
+        snapshot = build_snapshot(books, snapshot_id="s", taken_at=NOW)
+        batch = records.batch_record(batch_id="b", account_id=ACCOUNT, started_at=NOW, evaluated_at=NOW, snapshot_id="s",
+                                     books=books, proposals=proposals, portfolio=portfolio, reliability=reliability)
+        records.record_batch(s, batch, decide(proposals, snapshot, portfolio, reliability, NOW), NOW)
+        self.assertEqual([d["proposalId"] for d in s["governorDecisions"]], ["ab", "a-c", "B"])
+
+    def test_order_is_independent_of_insertion_order(self):
+        early, late = NOW, NOW + timedelta(microseconds=500)
+        forward, backward = main_seed(), main_seed()
+        items = [proposal("p2", agent="x", market="M1"), proposal("p1", agent="y", market="M1")]
+        items = [Proposal(p.proposal_id, p.agent_id, p.market_id, p.side, p.estimated_yes_probability, p.requested_budget,
+                          t, t + timedelta(seconds=60)) for p, t in zip(items, (late, early))]
+        for p in items:
+            records.record_forecast(forward, p)
+        for p in reversed(items):
+            records.record_forecast(backward, p)
+        self.assertEqual(forward["governorForecasts"], backward["governorForecasts"])
+        self.assertEqual([f["proposalId"] for f in forward["governorForecasts"]], ["p1", "p2"])
+
+    def test_batches_with_equal_times_sort_by_id(self):
+        s = main_seed()
+        run_batch(s, "b-a")
+        s["governorDecisions"].clear()
+        run_batch(s, "b-b")
+        self.assertEqual([b["id"] for b in s["governorBatches"]], ["b-b", "b-a"])
 
 
 if __name__ == "__main__":

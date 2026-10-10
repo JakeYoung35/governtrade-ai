@@ -9,14 +9,15 @@ import contextlib, datetime as dt, json, threading
 from decimal import Decimal
 from pathlib import Path
 from engine import main_seed
-from governor.records import BATCH_WINDOW,DECISION_WINDOW
+from governor.records import BATCH_WINDOW,DECISION_WINDOW,BREAKER_EVENT_WINDOW
 
 MIGRATIONS=Path(__file__).parent/'migrations'
 LOCK_KEY=0x476f7654726164  # "GovTrad"
 EVENT_LIMIT=500  # Older events stay in the database; only recent ones are loaded into state.
 SAFETY_COLUMNS={'dailyLossCap':'daily_loss_cap','marketCap':'market_cap','exposureCap':'exposure_cap','slippage':'slippage_max'}
-TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion','governorBatches','governorDecisions','governorForecasts'}
+TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion','governorBatches','governorDecisions','governorForecasts','governorBreakerEvents'}
 DECISION_ROW_FIELDS={'batchId','accountId','decidedAt'}  # columns of governor_decisions; the rest is payload
+BREAKER_EVENT_ROW_FIELDS={'id','accountId'}  # columns of governor_breaker_events; the rest is payload
 ACCOUNT_FIELDS={'id','name','venue','environment','subaccount','liveEnabled','credentialRef','credentialMasks','status','stale','error','ceiling','baseline','balance'}
 AGENT_FIELDS={'id','accountId','name','provider','model','modelValidated','modelCredentialRef','modelKeyMask','status','personality','mandate'}
 ORDER_FIELDS={'id','agent','accountId','market','direction','amount','request','status','decision','committed','filled','automatic','venueOrderId','quantity','actualCost','time','evaluations'}
@@ -109,19 +110,23 @@ class PostgresStore:
             for r in q('SELECT agent_id,role,text FROM chat_messages ORDER BY agent_id,seq'):
                 s['chats'].setdefault(r['agent_id'],[]).append({'role':r['role'],'text':r['text']})
             s['events']=[{'id':r['id'],'time':iso(r['time']),'text':r['text'],'kind':r['kind'],'trade':r['order_id']} for r in conn.execute('SELECT * FROM events ORDER BY time DESC,seq DESC LIMIT %s',(EVENT_LIMIT,))]
-            # Governor records: recent batches/decisions only (all stay in the database); numerics as exact text.
+            # Governor records: recent windows only (all rows stay in the database); numerics as exact text.
+            # COLLATE "C" orders ids by code point, matching governor.records, so reloads keep list order.
             s['governorBatches']=[{'id':r['id'],'accountId':r['account_id'],'startedAt':iso(r['started_at']),'policyVersion':r['policy_version'],'inputs':r['inputs']}
-                for r in conn.execute('SELECT * FROM governor_batches ORDER BY started_at DESC,id DESC LIMIT %s',(BATCH_WINDOW,))]
+                for r in conn.execute('SELECT * FROM governor_batches ORDER BY started_at DESC,id COLLATE "C" DESC LIMIT %s',(BATCH_WINDOW,))]
             s['governorDecisions']=[{**r['payload'],'batchId':r['batch_id'],'accountId':r['account_id'],'decidedAt':iso(r['decided_at'])}
-                for r in conn.execute('SELECT payload,batch_id,account_id,decided_at FROM governor_decisions ORDER BY decided_at DESC,proposal_id DESC LIMIT %s',(DECISION_WINDOW,))]
+                for r in conn.execute('SELECT payload,batch_id,account_id,decided_at FROM governor_decisions ORDER BY decided_at DESC,proposal_id COLLATE "C" DESC LIMIT %s',(DECISION_WINDOW,))]
             s['governorForecasts']=[{'proposalId':r['proposal_id'],'agentId':r['agent_id'],'marketId':r['market_id'],'submittedAt':iso(r['submitted_at']),'estimatedYesProbability':r['p'],'outcome':r['o'],'resolvedAt':iso(r['resolved_at'])}
-                for r in q('SELECT proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability::text AS p,outcome::text AS o,resolved_at FROM governor_forecasts ORDER BY submitted_at,proposal_id')]
+                for r in q('SELECT proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability::text AS p,outcome::text AS o,resolved_at FROM governor_forecasts ORDER BY submitted_at,proposal_id COLLATE "C"')]
+            s['governorBreakerEvents']=[{**r['payload'],'id':r['id'],'accountId':r['account_id']}
+                for r in conn.execute('SELECT id,account_id,payload FROM governor_breaker_events ORDER BY at DESC,id COLLATE "C" DESC LIMIT %s',(BREAKER_EVENT_WINDOW,))]
         seen.update(self.signatures(s));self.local.seen=seen
         return s
 
     def signatures(self,s):
         seen={'settings':signature(self.settings(s)),'events':{e['id'] for e in s['events']},'keys':set(s['keys']),
-              'governorBatches':{b['id'] for b in s.get('governorBatches',[])},'governorDecisions':{d['proposalId'] for d in s.get('governorDecisions',[])}}
+              'governorBatches':{b['id'] for b in s.get('governorBatches',[])},'governorDecisions':{d['proposalId'] for d in s.get('governorDecisions',[])},
+              'governorBreakerEvents':{e['id'] for e in s.get('governorBreakerEvents',[])}}
         seen.update({('forecast',f['proposalId']):signature(f) for f in s.get('governorForecasts',[])})
         seen.update({('chat',agent):len(messages) for agent,messages in s['chats'].items()})
         for kind,rows in (('account',s['accounts']),('agent',s['agentConfigs']),('order',s['orders'])):
@@ -170,6 +175,9 @@ class PostgresStore:
             run(FORECAST_UPSERT,[(f['proposalId'],f['agentId'],f['marketId'],f['submittedAt'],Decimal(f['estimatedYesProbability']),
                 None if f['outcome'] is None else Decimal(f['outcome']),f['resolvedAt'])
                 for f in s.get('governorForecasts',[]) if seen.get(('forecast',f['proposalId']))!=signature(f)])
+            run('INSERT INTO governor_breaker_events (id,at,account_id,action,payload) VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING',
+                [(e['id'],e['at'],e['accountId'],e['action'],Jsonb({k:v for k,v in e.items() if k not in BREAKER_EVENT_ROW_FIELDS}))
+                 for e in reversed(s.get('governorBreakerEvents',[])) if e['id'] not in seen.get('governorBreakerEvents',())])
         seen=self.signatures(s)
         seen.update({('evaluations',o['id']):len(o['evaluations']) for o in s['orders']})
         self.local.seen=seen

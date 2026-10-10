@@ -21,7 +21,7 @@ class StoreTests(unittest.TestCase):
  def tearDownClass(cls):
   with PostgresStore(URL).connect() as c:c.execute(f'DROP SCHEMA {cls.schema} CASCADE')
  def setUp(self):
-  with self.store.connect() as c:c.execute('TRUNCATE governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
+  with self.store.connect() as c:c.execute('TRUNCATE governor_breaker_events,governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
   self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def workspace(self):
   s=main_seed();a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{'dailyCap':100}}
@@ -71,7 +71,7 @@ class StoreTests(unittest.TestCase):
    with server.locked('main'):server.save('main',s)
    with server.locked('main'):self.assertEqual(server.read('main'),s)
    self.assertIn('demoAgents',server.read('demo'))
- def governor_batch(self,s,batch_id='batch-1'):
+ def governor_batch(self,s,batch_id='batch-1',ids=None):
   # Real account/agent ids so the governor tables' foreign keys hold.
   from datetime import datetime,timedelta,timezone
   from decimal import Decimal as D
@@ -81,7 +81,8 @@ class StoreTests(unittest.TestCase):
   from governor.snapshot import build_snapshot
   now=datetime.now(timezone.utc).replace(microsecond=0);a=s['accounts'][0]['id'];g=s['agentConfigs'][0]['id']
   books=[{'id':'MKT','name':'MKT','eventTicker':'EVT','agent':'sports','venue':'kalshi','open':True,'executionReady':True,'feeMultiplier':1.0,'closeAt':None,'yesBids':[['0.36','500']],'noBids':[['0.63','500']],'asOf':now.isoformat()}]
-  proposals=[Proposal(f'{batch_id}-{i}',g,'MKT',side,D(p),D(25),now,now+timedelta(seconds=60)) for i,(side,p) in enumerate((('yes','0.45'),('no','0.30')))]
+  ids=ids or [f'{batch_id}-{i}' for i in range(2)]
+  proposals=[Proposal(pid,g,'MKT',('yes','no')[i%2],D(('0.45','0.30')[i%2]),D(25),now,now+timedelta(seconds=60)) for i,pid in enumerate(ids)]
   for p in proposals:records.record_forecast(s,p)
   portfolio=Portfolio(D(1000),D(1000));decisions=decide(proposals,build_snapshot(books,snapshot_id='snap',taken_at=now),portfolio,{},now)
   batch=records.batch_record(batch_id=batch_id,account_id=a,started_at=now,evaluated_at=now,snapshot_id='snap',books=books,proposals=proposals,portfolio=portfolio,reliability={})
@@ -100,3 +101,17 @@ class StoreTests(unittest.TestCase):
    s=self.store.load();self.assertEqual(records.resolve_forecasts(s,{'MKT':1},records._time(s['governorBatches'][0]['startedAt'])),1);self.store.save(s)
   loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorForecasts'][0]['outcome'],'1')
   self.assertEqual((self.count('governor_batches'),self.count('governor_decisions'),self.count('governor_forecasts')),(1,2,1))
+ def test_governor_ids_reload_in_code_point_order(self):
+  # Locale collation would order "ab" before "a-c" and "a" before "B"; reloads must match state exactly.
+  s=self.workspace()
+  with self.store.session():self.governor_batch(s,ids=['ab','a-c','B']);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual([d['proposalId'] for d in loaded['governorDecisions']],['ab','a-c','B'])
+ def test_breaker_events_are_permanent_beyond_the_state_window(self):
+  from datetime import datetime,timedelta,timezone
+  from governor import records
+  s=self.workspace();a=s['accounts'][0]['id'];start=datetime.now(timezone.utc).replace(microsecond=0)
+  with self.store.session():
+   for i in range(records.BREAKER_EVENT_WINDOW+5):records.record_breaker_event(s,a,{'action':'breakerReset','at':(start+timedelta(seconds=i)).isoformat(),'n':i},f'ev-{i:03d}')
+   self.store.save(s);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s)
+  self.assertEqual((len(loaded['governorBreakerEvents']),self.count('governor_breaker_events')),(records.BREAKER_EVENT_WINDOW,records.BREAKER_EVENT_WINDOW+5))

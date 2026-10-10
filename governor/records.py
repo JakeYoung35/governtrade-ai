@@ -4,11 +4,16 @@ State keys (JSON-safe: decimals as strings, times as ISO-8601 UTC):
   governorBatches    newest first: {id, accountId, startedAt, policyVersion, inputs}
   governorDecisions  newest first: Decision.to_dict() plus {batchId, accountId, decidedAt}
   governorForecasts  submission order; only the first forecast per (agent, market)
-  governor           {"breakers": {accountId: BreakerState.to_dict()}, "breakerEvents": [...]}
+  governorBreakerEvents  newest first: loss-breaker latches and resets, {id, accountId, action, at, ...}
+  governor           {"breakers": {accountId: BreakerState.to_dict()}}
 
-JSON mode saves these with the rest of the state. Postgres mode writes the three lists to the
+JSON mode saves these with the rest of the state. Postgres mode writes the four lists to the
 governor_* tables (migrations/003_governor.sql) and the small `governor` object with the
-workspace settings. State keeps a recent window of batches and decisions; Postgres keeps all.
+workspace settings. State keeps a recent window of batches, decisions and breaker events;
+Postgres keeps all of them, so the breaker audit trail is permanent.
+
+Lists stay sorted by (time, id) with Python's code-point string order, which is the order
+Postgres returns under COLLATE "C", so a reloaded state equals the saved one.
 
 A batch record stores every decision input (policy, portfolio, reliability, proposals and the
 raw venue order books), so replay(batch) recomputes its decisions exactly.
@@ -39,6 +44,11 @@ def _time(text):
 
 def _optional(value):
     return None if value is None else str(value)
+
+
+def _sort(rows, time_key, id_key, newest_first):
+    # Compare parsed times: ISO strings with and without microseconds do not sort as text.
+    rows.sort(key=lambda row: (_time(row[time_key]), row[id_key]), reverse=newest_first)
 
 
 # Serialization of decision inputs.
@@ -113,10 +123,10 @@ def record_batch(s, batch, decisions, decided_at):
     if any(d["proposalId"] in known for d in new):
         raise ValueError("A proposal already has a recorded decision.")
     decided = _iso(decided_at, "decided_at")
-    batches.insert(0, copy.deepcopy(batch))
-    # Newest first; within one batch, descending proposal id (the order Postgres loads them in).
-    for d in new:
-        stored.insert(0, {**d, "batchId": batch["id"], "accountId": batch["accountId"], "decidedAt": decided})
+    batches.append(copy.deepcopy(batch))
+    stored.extend({**d, "batchId": batch["id"], "accountId": batch["accountId"], "decidedAt": decided} for d in new)
+    _sort(batches, "startedAt", "id", newest_first=True)
+    _sort(stored, "decidedAt", "proposalId", newest_first=True)
     del batches[BATCH_WINDOW:]
     del stored[DECISION_WINDOW:]
 
@@ -135,6 +145,7 @@ def record_forecast(s, proposal):
                  "submittedAt": proposal.received_at.isoformat(),
                  "estimatedYesProbability": str(proposal.estimated_yes_probability),
                  "outcome": None, "resolvedAt": None})
+    _sort(rows, "submittedAt", "proposalId", newest_first=False)
     return True
 
 
@@ -167,21 +178,32 @@ def reliability(s, policy=DEFAULT_POLICY):
 
 # Loss breaker state.
 
-def _governor(s):
-    return s.setdefault("governor", {"breakers": {}, "breakerEvents": []})
+def _breakers(s):
+    return s.setdefault("governor", {}).setdefault("breakers", {})
 
 
 def breaker_state(s, account_id):
-    data = _governor(s)["breakers"].get(account_id)
+    data = _breakers(s).get(account_id)
     return BreakerState.from_dict(data) if data else BreakerState()
 
 
 def save_breaker(s, account_id, state):
-    _governor(s)["breakers"][account_id] = state.to_dict()
+    _breakers(s)[account_id] = state.to_dict()
 
 
-def record_breaker_event(s, account_id, event):
-    """Audit a latch or reset. Newest first; a bounded window lives in state."""
-    events = _governor(s)["breakerEvents"]
-    events.insert(0, {**copy.deepcopy(event), "accountId": account_id})
+def record_breaker_event(s, account_id, event, event_id):
+    """Audit a latch or reset (needs "action" and an ISO "at"). Write-once by event_id.
+
+    State keeps the newest BREAKER_EVENT_WINDOW; Postgres keeps every event permanently.
+    """
+    if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 200:
+        raise ValueError("A breaker event needs an id of 1 to 200 characters.")
+    if not isinstance(event.get("action"), str) or not event["action"]:
+        raise ValueError("A breaker event needs an action.")
+    at = _iso(_time(event["at"]), "at")
+    events = s.setdefault("governorBreakerEvents", [])
+    if any(e["id"] == event_id for e in events):
+        raise ValueError(f"Breaker event {event_id} is already recorded.")
+    events.append({**copy.deepcopy(event), "at": at, "id": event_id, "accountId": account_id})
+    _sort(events, "at", "id", newest_first=True)
     del events[BREAKER_EVENT_WINDOW:]

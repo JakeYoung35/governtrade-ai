@@ -49,4 +49,15 @@ CREATE TABLE IF NOT EXISTS governor_forecasts (
 );
 CREATE INDEX IF NOT EXISTS governor_forecasts_market_idx ON governor_forecasts (market_id) WHERE outcome IS NULL;
 
+-- Permanent, append-only audit of loss-breaker latches and operator resets. State keeps only
+-- the most recent events; every event stays here.
+CREATE TABLE IF NOT EXISTS governor_breaker_events (
+  id         text PRIMARY KEY,
+  at         timestamptz NOT NULL,
+  account_id uuid NOT NULL REFERENCES accounts(id),
+  action     text NOT NULL,
+  payload    jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS governor_breaker_events_account_idx ON governor_breaker_events (account_id, at DESC);
+
 INSERT INTO schema_migrations (version) VALUES (3) ON CONFLICT DO NOTHING;
