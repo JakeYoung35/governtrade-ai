@@ -10,7 +10,8 @@ from .money import ONE, ZERO, to_decimal
 
 _FRACTIONS = ("kelly_fraction", "market_cap", "agent_cap", "event_group_cap", "total_cap",
               "daily_loss_limit", "reliability_prior")
-_POSITIVE_INTS = ("max_quote_age_seconds", "default_proposal_ttl_seconds", "reliability_prior_weight")
+_POSITIVE_INTS = ("max_quote_age_seconds", "default_proposal_ttl_seconds", "reliability_prior_weight",
+                  "approval_ttl_seconds")
 
 
 @dataclass(frozen=True)
@@ -21,14 +22,17 @@ class Policy:
     agent_cap: Decimal = Decimal("0.15")
     event_group_cap: Decimal = Decimal("0.10")
     total_cap: Decimal = Decimal("0.30")
-    # Not read by the pure allocator. The loss breaker (planned governor/breaker.py) latches
+    # Not read by the pure allocator. The loss breaker (governor/breaker.py) latches
     # Portfolio.breaker_latched when equity falls this far below the UTC day-open value,
     # and the allocator then rejects everything with lossBreakerLatched.
     daily_loss_limit: Decimal = Decimal("0.03")
     max_quote_age_seconds: int = 30
-    # Not read by the pure allocator. Worker-proposal parsing (planned governor/batch.py)
+    # Not read by the pure allocator. Worker-proposal parsing (governor/api.py)
     # sets Proposal.expires_at = received_at + this when a worker omits expiresAt.
     default_proposal_ttl_seconds: int = 60
+    # How long a governed order may wait for the user's approval. After that the sizing is stale: the order
+    # stops counting toward exposure and a late approval cancels it instead of trading.
+    approval_ttl_seconds: int = 900
     reliability_prior: Decimal = Decimal("0.5")
     reliability_prior_weight: int = 20
     brier_baseline: Decimal = Decimal("0.25")  # Brier score of a constant 50% forecast

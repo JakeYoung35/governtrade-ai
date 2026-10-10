@@ -69,8 +69,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.valid_host():return self.json(403,{'error':'Localhost access only.'})
         if self.path.startswith('/api/governor/'):return self.governor_get()
         if self.path.startswith('/api/worker'):
-            token=os.environ.get('GOVERNTRADE_AGENT_TOKEN','')
-            if not token or not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token):return self.json(403,{'error':'Worker access denied.'})
+            if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
             s=read('main');return self.json(200,{'agents':WORKSPACE.public(s)['agentConfigs'],'instructions':s['chats']})
         if self.path.startswith('/api/state'):
             if self.headers.get('Origin') and self.headers['Origin']!=f"http://{self.headers.get('Host')}":return self.json(403,{'error':'Cross-origin access denied.'})
@@ -84,9 +83,8 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.valid_host():return self.json(403,{'error':'Localhost access only.'})
         if self.path=='/api/governor/proposals':return self.governor_submit()
         proposal=self.path=='/api/agent/proposals'
-        token=os.environ.get('GOVERNTRADE_AGENT_TOKEN','')
         if proposal:
-            if not token or not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token):return self.json(403,{'error':'Worker access denied.'})
+            if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
         elif self.path!='/api/action':return self.json(404,{'error':'Not found.'})
         elif not self.user_access():return self.json(403,{'error':'Reload the local workspace before making changes.'})
         try:
@@ -106,19 +104,30 @@ class Handler(SimpleHTTPRequestHandler):
         except (KeyError,StopIteration,TypeError,ImportError):self.json(400,{'error':'Invalid configuration or request. Check required fields and installed dependencies.'})
         except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
 SCORE_SECONDS=60  # how often settled markets are checked to score agent forecasts
+def governor_pass(score):
+    # Plan under the lock, read the venue (balances, order books, market outcomes) with the lock released, then
+    # decide, execute and save under the lock. Order placement still runs through Workspace.proposal under the lock.
+    with locked('main'):
+        s=read('main');work=any(r['status'] in ('queued','approved') for r in s.get('governorRequests',[]))
+        plans=GOVERNOR.plan(s);scoring=GOVERNOR.plan_scoring(s) if score else {}
+    if not work and not scoring:return False
+    fetched=GOVERNOR.fetch(plans);outcomes=GOVERNOR.fetch_outcomes(scoring)
+    with locked('main'):
+        s=read('main')
+        if work:GOVERNOR.run_batch(s,fetched)
+        if scoring:GOVERNOR.score_forecasts(s,outcomes)
+        save('main',s)
+    return True
 def governor_loop(seconds):
-    # Decide queued governed proposals in batches and score settled forecasts about once a minute.
     # A failed pass leaves everything queued or unscored for the next one.
     last_scored=0.
     while True:
         time.sleep(seconds)
         try:
-            with locked('main'):
-                s=read('main');changed=False
-                if any(r['status']=='queued' for r in s.get('governorRequests',[])):GOVERNOR.run_batch(s);changed=True
-                if time.monotonic()-last_scored>=SCORE_SECONDS:
-                    last_scored=time.monotonic();changed=GOVERNOR.score_forecasts(s)>0 or changed
-                if changed:save('main',s)
+            score=time.monotonic()-last_scored>=SCORE_SECONDS
+            if STORE and not score and not STORE.governor_work_pending():continue  # idle: skip the full workspace load
+            governor_pass(score)
+            if score:last_scored=time.monotonic()
         except Exception as e:print(f'Governor pass failed ({type(e).__name__}); queued proposals stay queued.',flush=True)
 if __name__=='__main__':
     if STORE:applied=STORE.migrate();print('Postgres storage: '+(', '.join(applied)+' applied.' if applied else 'schema up to date.'),flush=True)

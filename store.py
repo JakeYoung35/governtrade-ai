@@ -129,6 +129,10 @@ class PostgresStore:
         seen.update(self.signatures(s));seen['loaded']=True;self.local.seen=seen
         return s
 
+    def governor_work_pending(self):
+        """Cheap idle check for the governor loop: is any governed request queued or awaiting execution?"""
+        with self.connection() as conn:
+            return conn.execute("SELECT EXISTS(SELECT 1 FROM governor_requests WHERE status IN ('queued','approved')) AS pending").fetchone()['pending']
     def find_governor_request(self,agent_id,proposal_id):
         """An older governed request by the worker's (agent, proposalId), for retries beyond the loaded window."""
         with self.connection() as conn:

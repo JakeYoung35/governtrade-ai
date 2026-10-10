@@ -182,4 +182,13 @@ class StoreTests(unittest.TestCase):
    s=self.store.load();s['governorRequests'].clear()  # as if outside the loaded window
    again,view=GovernorService(self.w,find_request=self.store.find_governor_request).submit(s,payload)
    self.assertEqual((again,view['governorProposalId']),(200,body['governorProposalId']))
+ def test_governor_work_pending_is_a_cheap_idle_check(self):
+  from governor_service import GovernorService
+  s=self.workspace();g=s['agentConfigs'][0]['id']
+  self.assertFalse(self.store.governor_work_pending())
+  payload={'schemaVersion':1,'proposalId':'idle-1','agentId':g,'marketId':'MKT','side':'yes','estimatedYesProbability':0.45,'maxBudgetUsd':5,'reasoning':'Idle check.'}
+  with self.store.session():GovernorService(self.w).submit(s,payload);self.store.save(s)
+  self.assertTrue(self.store.governor_work_pending())
+  with self.store.session():s=self.store.load();s['governorRequests'][0]['status']='submitted';self.store.save(s)
+  self.assertFalse(self.store.governor_work_pending())
 

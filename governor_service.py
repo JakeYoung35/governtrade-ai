@@ -15,6 +15,7 @@ State: s["governorRequests"], newest first (JSON mode keeps older ones in slim f
 in governor_requests, reached through find_request). The governor package stays pure; this module is where
 it meets the venue, the clock and the app state.
 """
+import copy
 import datetime as dt
 from types import SimpleNamespace
 import uuid
@@ -30,10 +31,17 @@ from governor.policy import DEFAULT_POLICY
 from governor.snapshot import build_snapshot, order_book
 
 SCHEMA_PATH = "/api/governor/schema"
+MAX_EVALUATION_ATTEMPTS = 3  # passes a request may fail to be evaluated before it is rejected
 
 
 def utc_now():
     return dt.datetime.now(dt.timezone.utc)
+
+
+def _equity(balance):
+    """Cash + reserved + marked positions: the base for caps and the loss breaker (as Workspace.apply_balance)."""
+    return (to_decimal(balance["cash"], "cash") + to_decimal(balance.get("reserved", 0), "reserved")
+            + to_decimal(balance["positionValue"], "positionValue"))
 
 
 def _invalid(errors):
@@ -107,47 +115,93 @@ class GovernorService:
                 "amount": order.get("amount"), "quantity": order.get("quantity"), "actualCost": order.get("actualCost")},
         }
 
-    # Batches.
+    # Batches. A pass is plan() under the workspace lock, fetch() with the lock released (venue reads only),
+    # then run_batch(s, fetched) under the lock again. run_batch(s) alone plans and fetches inline.
 
-    def run_batch(self, s):
-        """Decide every queued request, one batch per account. Returns a summary per account."""
+    def plan(self, s):
+        """The venue reads the next pass needs: per connected account, its record, queued requests and markets."""
+        queued = [r for r in s.get("governorRequests", []) if r["status"] == "queued"]
+        plans = {}
+        for account in s["accounts"]:
+            items = [r for r in queued if r["accountId"] == account["id"]]
+            if items and account.get("status") != "disconnected":
+                plans[account["id"]] = {"account": copy.deepcopy(account),
+                                        "requestIds": sorted(r["governorProposalId"] for r in items),
+                                        "markets": sorted({r["proposal"]["marketId"] for r in items})}
+        return plans
+
+    def fetch(self, plans):
+        """Balances and order books for a plan. Reads the venue only and changes no state, so it can run unlocked."""
+        fetched = {}
+        for account_id, item in plans.items():
+            try:
+                venue = self.workspace.venue(item["account"])
+            except (ValueError, KeyError):
+                fetched[account_id] = {**item, "error": "The venue account's credentials are unavailable."}
+                continue
+            started = self.clock()
+            balance = self.workspace.fetch_balance(item["account"])
+            books = []
+            for market_id in item["markets"]:
+                try:
+                    raw = venue.get_orderbook(market_id)
+                    order_book(raw)  # validate now; an unusable book leaves the market out (marketNotInSnapshot)
+                except ValueError:
+                    continue
+                books.append(raw)
+            fetched[account_id] = {**item, "startedAt": started, "balance": balance, "books": books}
+        return fetched
+
+    def run_batch(self, s, fetched=None):
+        """Decide the planned queued requests, one batch per account. Returns a summary per account.
+
+        One account's failure never stops the others: its still-queued requests count a failed attempt and
+        are rejected after MAX_EVALUATION_ATTEMPTS, so a persistent fault cannot retry forever.
+        """
         s["clock"] = self.clock().isoformat()
         self._resume(s)
-        queued = [r for r in s.get("governorRequests", []) if r["status"] == "queued"]
-        return [self._run_account(s, account_id, sorted((r for r in queued if r["accountId"] == account_id),
-                                                        key=lambda r: r["governorProposalId"]))
-                for account_id in sorted({r["accountId"] for r in queued})]
+        connected = {a["id"] for a in s["accounts"] if a.get("status") != "disconnected"}
+        self._reject_all([r for r in s.get("governorRequests", []) if r["status"] == "queued" and r["accountId"] not in connected],
+                         "The agent's venue account is not connected.")
+        if fetched is None:
+            fetched = self.fetch(self.plan(s))
+        results = []
+        for account_id in sorted(fetched):
+            planned = set(fetched[account_id]["requestIds"])
+            items = sorted((r for r in s.get("governorRequests", []) if r["status"] == "queued" and r["governorProposalId"] in planned),
+                           key=lambda r: r["governorProposalId"])
+            if not items:
+                continue
+            try:
+                results.append(self._run_account(s, account_id, items, fetched[account_id]))
+            except Exception as exc:  # contain the failure to this account's requests
+                for r in items:
+                    if r["status"] == "queued":
+                        r["attempts"] = r.get("attempts", 0) + 1
+                        if r["attempts"] >= MAX_EVALUATION_ATTEMPTS:
+                            r.update(status="rejected", note=f"Could not be evaluated after {r['attempts']} attempts ({type(exc).__name__}).")
+                results.append({"accountId": account_id, "decided": 0, "error": type(exc).__name__})
+        return results
 
     def _reject_all(self, items, note):
         for r in items:
             r.update(status="rejected", note=note)
 
-    def _run_account(self, s, account_id, items):
-        account = next((a for a in s["accounts"] if a["id"] == account_id), None)
-        if account is None or account.get("status") == "disconnected":
-            self._reject_all(items, "The agent's venue account is not connected.")
-            return {"accountId": account_id, "decided": 0, "note": "account not connected"}
+    def _run_account(self, s, account_id, items, fetched):
+        account = next(a for a in s["accounts"] if a["id"] == account_id)
         live = {a["id"] for a in s["agentConfigs"] if a.get("status") == "active" and a.get("mandate")}
         self._reject_all([r for r in items if r["agentId"] not in live],
                          "The agent was paused or deleted before its proposal was decided.")
         items = [r for r in items if r["agentId"] in live]
         if not items:
             return {"accountId": account_id, "decided": 0, "note": "no live agents"}
-        try:
-            venue = self.workspace.venue(account)
-        except (ValueError, KeyError):
-            self._reject_all(items, "The venue account's credentials are unavailable.")
-            return {"accountId": account_id, "decided": 0, "note": "credentials unavailable"}
-        started = self.clock()
-        balance = self.workspace.refresh(s, account)
-        books = []
-        for market_id in sorted({r["proposal"]["marketId"] for r in items}):
-            try:
-                raw = venue.get_orderbook(market_id)
-                order_book(raw)  # validate now; an unusable book leaves the market out (marketNotInSnapshot)
-            except ValueError:
-                continue
-            books.append(raw)
+        if fetched.get("error"):
+            self._reject_all(items, fetched["error"])
+            return {"accountId": account_id, "decided": 0, "note": fetched["error"]}
+        venue = self.workspace.venue(account)
+        started = fetched["startedAt"]
+        balance = self.workspace.apply_balance(s, account, fetched["balance"])
+        books = fetched["books"]
         snapshot_id = self.new_id()
         snapshot = build_snapshot(books, snapshot_id=snapshot_id, taken_at=started)
         now = self.clock()
@@ -167,7 +221,7 @@ class GovernorService:
                                         batchId=batch["id"], decision=d.outcome)
         for d in decisions:
             if d.outcome != "rejected":
-                self._execute(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id])
+                self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id])
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
     def _portfolio(self, s, account, balance, snapshot, now):
@@ -175,8 +229,7 @@ class GovernorService:
         paused = s["permissions"].get("automation") is False
         if balance is None:
             return Portfolio(ZERO, ZERO, (), paused=paused, breaker_latched=state.latched, valuation_stale=True)
-        cash = to_decimal(balance["cash"], "cash")
-        equity = cash + to_decimal(balance.get("reserved", 0), "reserved") + to_decimal(balance["positionValue"], "positionValue")
+        equity = _equity(balance)
         baseline = account.get("baseline") or {}
         day_open = baseline.get("equity") if baseline.get("day") == now.date().isoformat() else None
         result = check(state, equity=equity, day_open_equity=day_open, now=now, policy=self.policy)
@@ -186,10 +239,11 @@ class GovernorService:
                 "action": "breakerLatched", "at": now.isoformat(), "reason": result.state.reason, "equity": str(equity),
                 "base": None if result.base is None else str(result.base)}, self.new_id())
             event(s, f"Loss breaker latched: {result.state.reason}", "BREAKER")
-        return Portfolio(equity, max(ZERO, cash), self._exposures(s, account, balance, snapshot), paused=paused,
+        return Portfolio(equity, max(ZERO, to_decimal(balance["cash"], "cash")),
+                         self._exposures(s, account, balance, snapshot, now), paused=paused,
                          breaker_latched=result.state.latched, valuation_stale=bool(account.get("stale")))
 
-    def _exposures(self, s, account, balance, snapshot):
+    def _exposures(self, s, account, balance, snapshot, now):
         """Venue positions are the source of truth for loss-at-risk; filled orders attribute them to agents."""
         orders = [o for o in s["orders"] if o.get("accountId") == account["id"]]
         attribution = {}
@@ -201,6 +255,14 @@ class GovernorService:
             book = snapshot.books.get(market_id)
             return known or (book.event_group if book else market_id)
 
+        def pending(o):
+            if o.get("committed") and o.get("status") == "submission unknown":
+                return True  # budget reserved for a submission whose venue result is unknown
+            if o.get("status") != "awaiting approval":
+                return False
+            approve_by = (o.get("governedTerms") or {}).get("approveBy")
+            return approve_by is None or now <= dt.datetime.fromisoformat(approve_by)  # still approvable
+
         exposures = []
         for position in balance.get("positions") or []:
             quantity = to_decimal(position.get("position_fp", 0), "position_fp")
@@ -210,8 +272,8 @@ class GovernorService:
             ticker = position["ticker"]
             agent, known = attribution.get(ticker, ("external", None))
             exposures.append(Exposure(ticker, agent, group(ticker, known), "yes" if quantity > ZERO else "no", amount))
-        for o in orders:  # budget the user may still approve, or reserved for submissions with an unknown result
-            if o.get("status") == "awaiting approval" or (o.get("committed") and o.get("status") == "submission unknown"):
+        for o in orders:
+            if pending(o):
                 market_id = o["market"]["id"]
                 exposures.append(Exposure(market_id, o["agent"], group(market_id, o.get("governorEventGroup")),
                                           "yes" if o["direction"] == "Yes" else "no", to_decimal(o["amount"], "amount")))
@@ -222,6 +284,7 @@ class GovernorService:
 
         Safe to repeat: the order's idempotency key is the governor proposal id, so an order created before
         the crash is returned rather than placed again. Expired proposals are skipped, never executed late.
+        Each request's failure is contained to that request.
         """
         for request in [r for r in s.get("governorRequests", []) if r["status"] == "approved"]:
             decision = next((d for d in s.get("governorDecisions", []) if d["proposalId"] == request["governorProposalId"]), None)
@@ -235,86 +298,101 @@ class GovernorService:
             try:
                 venue = self.workspace.venue(account)
                 book = order_book(venue.get_orderbook(decision["marketId"]))
-            except (ValueError, KeyError):
+            except Exception:  # noqa: BLE001 - any venue fault skips this request only
                 request.update(status="skipped", note="The market was unavailable when execution resumed.")
                 continue
-            self._execute(s, request, SimpleNamespace(
+            self._execute_safely(s, request, SimpleNamespace(
                 proposal_id=decision["proposalId"], agent_id=decision["agentId"], market_id=decision["marketId"],
                 side=decision["side"], approved_budget=to_decimal(decision["approvedBudgetUsd"], "approvedBudgetUsd"),
                 contracts=to_decimal(decision["contracts"], "contracts"),
                 limit_price=to_decimal(decision["limitPrice"], "limitPrice")), venue, book)
 
+    def _execute_safely(self, s, request, decision, venue, book):
+        """_execute with any unexpected failure contained to this request, linking an order if one exists."""
+        try:
+            self._execute(s, request, decision, venue, book)
+        except Exception as exc:  # noqa: BLE001 - never let one order stop the batch or wedge later passes
+            order_id = s["keys"].get(f"{request['agentId']}:governor:{request['governorProposalId']}")
+            request.update(status="executionFailed",
+                           note=f"Execution failed ({type(exc).__name__})." + (" Check the linked order." if order_id else ""))
+            if order_id:
+                request["orderId"] = order_id
+
     def _execute(self, s, request, decision, venue, book):
         # The app authorizes whole cents, so round the approval up (by under a cent). The order itself buys exactly
-        # the approved contracts at the limit price, so actual spending never exceeds the governor's approval.
+        # the approved contracts as an immediate-or-cancel at the governor's limit price, so spending never exceeds
+        # the approval and a market that moved above the limit simply leaves the order unfilled.
         amount = round_up(decision.approved_budget, CENT)
         if amount < 1:
             request.update(status="skipped", note="The approved stake is below the app's $1 order minimum.")
             return
-        # Safety net: the contracts at the limit price plus exact fees must fit the authorized amount.
         contracts, limit = decision.contracts, decision.limit_price
-        while contracts > ZERO and limit * contracts + taker_fee(contracts, limit, book.fee_multiplier) > amount:
-            contracts -= book.contract_step
-        if contracts <= ZERO:
-            request.update(status="skipped", note="No whole contract fits the cent-rounded approved stake.")
-            return
+        if limit * contracts + taker_fee(contracts, limit, book.fee_multiplier) > amount:
+            request.update(status="executionFailed", note="The approved contracts do not fit the authorized amount.")
+            return  # cannot happen for allocator decisions, which are sized at or below this cost
         direction = "Yes" if decision.side == "yes" else "No"
-        try:
-            quote = venue.get_quote(decision.market_id, direction)
-            price = to_decimal(quote["price"], "price")
-        except (ValueError, KeyError):
-            request.update(status="skipped", note="No fresh quote was available before execution.")
-            return
-        if not ZERO < price <= decision.limit_price:
-            request.update(status="skipped", note=f"The price moved above the governor's limit of ${decision.limit_price}.")
-            return
+        approve_by = (self.clock() + dt.timedelta(seconds=self.policy.approval_ttl_seconds)).isoformat()
         try:
             order = self.workspace.proposal(s, {
                 "agentId": decision.agent_id, "marketId": decision.market_id, "direction": direction,
                 "amount": float(amount), "reasoning": request["reasoning"],
                 "idempotencyKey": f"governor:{decision.proposal_id}"},
-                governed={"contracts": str(contracts), "limitPrice": str(limit)})
+                governed={"contracts": str(contracts), "limitPrice": str(limit), "approveBy": approve_by})
         except (ValueError, KeyError, StopIteration) as exc:
             request.update(status="executionFailed", note=(str(exc) or "Execution failed.")[:300])
             return
         order.update(governorProposalId=decision.proposal_id, governorEventGroup=book.event_group)
         request.update(status="submitted", orderId=order["id"])
 
-    # Scoring.
+    # Scoring: plan_scoring() under the lock, fetch_outcomes() unlocked, score_forecasts(s, outcomes) locked.
 
-    def score_forecasts(self, s):
-        """Resolve forecasts whose markets have settled. Returns how many were scored.
-
-        Each account's venue reports outcomes for that account's agents only, so demo and live
-        results never mix. Every forecast is scored, including rejected proposals', which keeps
-        reliability independent of the governor's own decisions.
-        """
-        now = self.clock()
+    def plan_scoring(self, s):
+        """Per connected account, the markets with unscored forecasts by that account's agents."""
         accounts = {a["id"]: a for a in s["accounts"] if a.get("status") != "disconnected"}
         agent_account = {a["id"]: a["accountId"] for a in s["agentConfigs"] if a.get("accountId") in accounts}
         pending = {}
         for f in s.get("governorForecasts", []):
             if f["outcome"] is None and f["agentId"] in agent_account:
                 pending.setdefault(agent_account[f["agentId"]], set()).add(f["marketId"])
-        scored = 0
-        for account_id in sorted(pending):
+        return {account_id: {"account": copy.deepcopy(accounts[account_id]), "markets": sorted(markets)}
+                for account_id, markets in sorted(pending.items())}
+
+    def fetch_outcomes(self, plans):
+        """Settled results per account (market -> YES settlement value). Venue reads only; changes no state."""
+        outcomes = {}
+        for account_id, item in plans.items():
             try:
-                venue = self.workspace.venue(accounts[account_id])
+                venue = self.workspace.venue(item["account"])
             except (ValueError, KeyError):
                 continue
-            outcomes = {}
-            for market_id in sorted(pending[account_id]):
+            results = {}
+            for market_id in item["markets"]:
                 try:
                     value = venue.get_market_outcome(market_id)["outcome"]
-                    if value is None:
-                        continue
-                    outcome = to_decimal(value, "outcome")
+                    if value is not None:
+                        outcome = to_decimal(value, "outcome")
+                        if ZERO <= outcome <= 1:
+                            results[market_id] = outcome
                 except (ValueError, KeyError):
                     continue  # unavailable or unreadable this time; try again on the next pass
-                if ZERO <= outcome <= 1:
-                    outcomes[market_id] = outcome
-            agents = {agent for agent, account in agent_account.items() if account == account_id}
-            scored += records.resolve_forecasts(s, outcomes, now, agents=agents) if outcomes else 0
+            outcomes[account_id] = results
+        return outcomes
+
+    def score_forecasts(self, s, outcomes=None):
+        """Resolve forecasts whose markets have settled. Returns how many were scored.
+
+        Each account's results score that account's agents only, so demo and live results never mix. Every
+        forecast is scored, including rejected proposals', which keeps reliability independent of the
+        governor's own decisions.
+        """
+        if outcomes is None:
+            outcomes = self.fetch_outcomes(self.plan_scoring(s))
+        now = self.clock()
+        scored = 0
+        for account_id, results in sorted(outcomes.items()):
+            agents = {a["id"] for a in s["agentConfigs"] if a.get("accountId") == account_id}
+            if results:
+                scored += records.resolve_forecasts(s, results, now, agents=agents)
         return scored
 
     # Operator controls and dashboard.
@@ -326,8 +404,7 @@ class GovernorService:
         balance = self.workspace.refresh(s, account)
         if balance is None:
             raise ValueError("A current balance is needed to reset the loss breaker. Refresh and try again.")
-        equity = (to_decimal(balance["cash"], "cash") + to_decimal(balance.get("reserved", 0), "reserved")
-                  + to_decimal(balance["positionValue"], "positionValue"))
+        equity = _equity(balance)
         now = self.clock()
         state, audit = reset(records.breaker_state(s, account_id), operator=operator, reason=reason, equity=equity, now=now)
         records.save_breaker(s, account_id, state)

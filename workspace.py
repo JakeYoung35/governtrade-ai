@@ -1,5 +1,5 @@
 """User management and the narrow, governed agent integration boundary."""
-import copy, math, uuid
+import copy, datetime, math, uuid
 from adapters import adapter,ADAPTERS,VenueError,now
 from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling,PERSONALITIES
 from vault import masks
@@ -8,15 +8,19 @@ from providers import validate_model_key,catalog
 class Workspace:
     def __init__(self,vault,persist=lambda s:None):self.vault=vault;self.persist=persist
     def venue(self,a):return adapter(a['venue'],self.vault.get(a['credentialRef']),a['environment'],a.get('subaccount',0))
-    def refresh(self,s,a):
+    def refresh(self,s,a):return self.apply_balance(s,a,self.fetch_balance(a))
+    def fetch_balance(self,a):
+        # Venue read only, no state changes, so the governor can fetch outside the workspace lock. None on failure.
         try:
-            v=self.venue(a)
-            b=v.get_balance_positions()
+            b=self.venue(a).get_balance_positions()
             if not all(math.isfinite(float(b[k])) and float(b[k])>=0 for k in ('cash','positionValue','exposure')):raise VenueError('Venue returned invalid balance values.')
-            equity=b['cash']+b.get('reserved',0)+b['positionValue'];day=now()[:10]
-            if a.get('baseline',{}).get('day')!=day:a['baseline']={'day':day,'equity':equity}
-            b['dailyLoss']=max(0,a['baseline']['equity']-equity);a.update(balance=b,status='connected',stale=False,error=None);return b
-        except (ValueError,KeyError,ImportError):a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.');return None
+            return b
+        except (ValueError,KeyError,ImportError):return None
+    def apply_balance(self,s,a,b):
+        if b is None:a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.');return None
+        equity=b['cash']+b.get('reserved',0)+b['positionValue'];day=now()[:10]
+        if a.get('baseline',{}).get('day')!=day:a['baseline']={'day':day,'equity':equity}
+        b['dailyLoss']=max(0,a['baseline']['equity']-equity);a.update(balance=b,status='connected',stale=False,error=None);return b
     def evaluate(self,s,o,approved=False):
         a=next(x for x in s['accounts'] if x['id']==o['accountId']);v=self.venue(a);s['clock']=now();b=self.refresh(s,a)
         try:m=v.get_quote(o['market']['id'],o['direction'])
@@ -133,6 +137,10 @@ class Workspace:
         elif action=='decision':
             o=next(x for x in s['orders'] if x['id']==b['id'])
             if o['status']!='awaiting approval':return o
+            approve_by=(o.get('governedTerms') or {}).get('approveBy')
+            if b['approve'] is True and approve_by and datetime.datetime.fromisoformat(now())>datetime.datetime.fromisoformat(approve_by):
+                # The governor's sizing is only valid for a limited time; a late approval must not trade on it.
+                o['status']='cancelled';event(s,'Approval window expired; the governor sized this trade for earlier market conditions.','EXPIRED',o['id']);return o
             if b['approve'] is True:return self.evaluate(s,o,True)
             o['status']='denied';event(s,'User denied exact proposal.','DENIED',o['id'])
         elif action=='chat':
