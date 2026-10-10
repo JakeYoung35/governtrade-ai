@@ -92,7 +92,7 @@ class KalshiAdapter(VenueAdapter):
         try:
             resting=self.request('GET','/portfolio/summary/total_resting_order_value')
             reserved=float(resting['total_resting_order_value'])/100
-            reserved_source='Kalshi resting-order summary'
+            reserved_source='Reserved cash reported by Kalshi'
             if self.subaccount!=0:raise VenueError('Summary is not scoped to a subaccount.')
         except VenueError:
             # Official summary is FCM-only. For normal members/subaccounts,
@@ -103,7 +103,7 @@ class KalshiAdapter(VenueAdapter):
                 quantity=float(o['remaining_count_fp']);side=o.get('side') or ('yes' if o.get('book_side')=='bid' else 'no')
                 price=float(o['yes_price_dollars'] if side=='yes' else o['no_price_dollars'])
                 reserved+=quantity*price
-            reserved_source='Scoped resting orders (FCM summary unavailable)'
+            reserved_source='Reserved cash calculated from your open orders'
         settled={x['ticker'] for x in settlements}
         # Position realized P/L includes trading closes; settlement rows provide
         # missing settlement outcomes. Never add both records for the same ticker.
