@@ -22,6 +22,7 @@ Environment variables:
 - `PORT`: optional, default 3110.
 - `GOVERNTRADE_MASTER_KEY`: required if macOS Keychain is unavailable; no default plaintext key file.
 - `GOVERNTRADE_AGENT_TOKEN`: required only for trusted worker HTTP integration; use a random secret. Without it, worker endpoints are disabled.
+- `DATABASE_URL`: optional Postgres connection string. When set, the main workspace (accounts, agents, mandates, orders, evaluations, events, chats) is stored in Postgres instead of `.data/main.json`; see Database storage below.
 
 ## Connect accounts
 
@@ -56,10 +57,18 @@ See [docs/agent-config.md](docs/agent-config.md) for the JSON schema, examples, 
 
 `.data/` contains the private local store, encrypted vault and separate demo state; it is ignored by Git. Old main simulation data is preserved locally as `legacy-simulation.json` and replaced by an empty connected-account workspace. The store is serialized and atomic within a single server process, not a distributed database. Local API protections include host/origin validation, HttpOnly SameSite cookies and CSRF tokens. They are not isolation from other trusted processes running as the same OS user.
 
+## Database storage
+
+Without `DATABASE_URL` the app uses local JSON files exactly as before. With it, the main workspace is stored in Postgres (developed against Tiger Cloud/TimescaleDB); the presenter demo always stays in local JSON. Venue and provider credentials never leave the local encrypted vault: the database holds only opaque vault references and masks, so the same vault key (macOS Keychain or `GOVERNTRADE_MASTER_KEY`) is still required on any machine using the database.
+
+`migrations/` holds the schema. The server applies pending migrations at startup; `DATABASE_URL=... python store.py migrate` applies them without starting the server. `events` and `balance_snapshots` are TimescaleDB hypertables (`balance_snapshots` is created for balance history but not yet written). Each request holds a Postgres advisory lock, so writers are serialized even across server processes; budget reservations are committed before venue submission, as with JSON. Only the most recent 500 events are loaded into the app; older events remain in the database.
+
+With Tiger Cloud, run the server without printing the password: `DATABASE_URL="$(tiger db uri <service-id> --with-password)" python server.py`. Never commit the connection string or put it in a plaintext `.env` file. Trade records then live in your cloud database rather than only on this machine. Existing `.data/main.json` contents are not imported automatically.
+
 ## Verification and remaining work
 
 ```sh
-python3 -m unittest discover -s . -p test_engine.py -v
+python3 -m unittest discover -s . -p 'test_*.py' -v
 node --check static/app.js
 ```
 
