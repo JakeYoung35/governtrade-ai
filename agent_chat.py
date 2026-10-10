@@ -27,8 +27,19 @@ MAX_REPLY_CHARS = 6000  # chat_messages.text allows 8,000; leaves room for the g
 MAX_STEPS = 10  # model calls per chat turn
 TURN_SECONDS = 120  # wall-clock budget for one chat turn, across all its model calls
 MAX_PROPOSALS = 5  # proposals per chat turn
-# Dollar amounts the user typed: "$25", "$1,000.50", "25 dollars", "25 usd", "25 bucks".
-AMOUNT = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?|\b(\d+)(\.\d{1,2})?\s*(?:dollars|usd|bucks)\b", re.IGNORECASE)
+# Dollar amounts the user typed: "$25", "$1,000.50", "$5k", "$2 million", "25 dollars", "25 usd", "25 bucks".
+AMOUNT = re.compile(r"\$\s?(?P<a>\d{1,3}(?:,\d{3})+|\d+)(?P<ac>\.\d{1,2})?(?:\s?(?P<as>k|m|thousand|million)\b)?"
+                    r"|\b(?P<b>\d+)(?P<bc>\.\d{1,2})?\s*(?P<bs>k|thousand|million)?\s*(?:dollars|usd|bucks)\b", re.IGNORECASE)
+SCALE = {"k": 1000, "thousand": 1000, "m": 1000000, "million": 1000000}
+# Many Kalshi markets are defined by a dollar level ("Bitcoin above $100,000"), so only amounts in a stake position
+# count: after a staking verb ("put $10"), or followed by what they are placed on ("$10 on", "$10 worth").
+STAKE_VERBS = {"put", "bet", "spend", "risk", "wager", "use", "stake", "invest", "buy", "place", "allocate", "spread",
+               "commit", "add"}
+STAKE_AFTER = {"on", "worth", "in", "into", "for", "each", "across", "of", "total"}
+# An amount right after one of these words, or followed by "or above", is a price level, never a stake.
+LEVEL_BEFORE = {"above", "below", "over", "under", "at", "than", "reach", "reaches", "hit", "hits", "between", "to",
+                "from", "near", "around", "exceed", "exceeds", "past", "beyond", "tops"}
+LEVEL_AFTER = re.compile(r"^\s*(?:or|and)\s+(?:above|more|higher|over|below|less|lower|under|up)\b", re.IGNORECASE)
 # Proposal ids made from chat turns: chat-<index of the user's message>-<n>, unique per agent. The prefix is
 # reserved: the worker route refuses it, so a worker's proposal can never take a chat proposal's id.
 CHAT_PROPOSAL_PREFIX = "chat-"
@@ -80,13 +91,29 @@ def utc_now():
     return dt.datetime.now(dt.timezone.utc)
 
 
+def _words(text):
+    return re.findall(r"[a-z]+", text.lower())
+
+
 def stated_amounts(text):
-    """The dollar amounts in a user's message, as Decimals."""
-    amounts = []
+    """The stakes in a user's message, as Decimals: the most this turn may propose, per proposal and in total.
+
+    Price levels ("above $100,000", "between $90,000 and $95,000", "$3.50 or more") never count. If no amount is in
+    a stake position, the smallest remaining amount counts, which errs low ("Bitcoin to $100k, $10" -> $10).
+    """
+    stakes, others, between = [], [], False
     for match in AMOUNT.finditer(text):
-        whole, cents = (match.group(1), match.group(2)) if match.group(1) else (match.group(3), match.group(4))
-        amounts.append(Decimal(whole.replace(",", "") + (cents or "")))
-    return [a for a in amounts if a > 0]
+        whole, cents, scale = ((match.group("a"), match.group("ac"), match.group("as")) if match.group("a") else
+                               (match.group("b"), match.group("bc"), match.group("bs")))
+        amount = Decimal(whole.replace(",", "") + (cents or "")) * SCALE.get((scale or "").lower(), 1)
+        before, after = _words(text[:match.start()])[-2:], _words(text[match.end():])[:1]
+        level = ((before[-1:] and before[-1] in LEVEL_BEFORE) or (between and before[-1:] == ["and"])
+                 or bool(LEVEL_AFTER.match(text[match.end():])))
+        between = bool(before[-1:] == ["between"])  # "between $X and $Y": $Y is a level too
+        if amount <= 0 or level:
+            continue
+        (stakes if set(before) & STAKE_VERBS or (after and after[0] in STAKE_AFTER) else others).append(amount)
+    return stakes or ([min(others)] if others else [])
 
 
 def public_market_data(account):

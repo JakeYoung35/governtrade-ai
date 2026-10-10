@@ -279,8 +279,18 @@ class LimitTests(ChatTest):
     """Review fixes: the user's amount is enforced in code, replies fit the database, and a turn has a deadline."""
 
     def test_amounts_are_read_from_the_message(self):
-        cases = {"Put $25 on it": ["25"], "$1,000.50 and $3": ["1000.50", "3"], "25 dollars on PHI": ["25"],
-                 "bet 12.5 USD": ["12.5"], "ten bucks": [], "Buy 3 contracts": [], "$0": []}
+        cases = {"Put $25 on it": ["25"], "25 dollars on PHI": ["25"], "bet 12.5 USD": ["12.5"], "ten bucks": [],
+                 "Buy 3 contracts": [], "$0": [], "Use $5k on the Lakers": ["5000"], "Put $2 million on it": ["2000000"],
+                 # Price levels are not stakes (review of 93a1733).
+                 "Put $10 on the Eagles to win": ["10"],
+                 "Put $10 on Bitcoin closing above $100,000 today": ["10"],
+                 "Put $10 on the S&P 500 above $6,000 and $5 on Nasdaq": ["10", "5"],
+                 "Bet $5 that gas averages over $3.50 this week": ["5"],
+                 "Bet $20 on Bitcoin between $90,000 and $95,000": ["20"],
+                 "$10 on BTC at $100k or above": ["10"],
+                 "Is Bitcoin above $100,000?": [],
+                 # No amount in a stake position: the smallest other amount, erring low.
+                 "$1,000.50 and $3": ["3"], "Bitcoin to $100k, $10": ["10"]}
         for text, expected in cases.items():
             with self.subTest(text=text):
                 self.assertEqual([str(a) for a in agent_chat.stated_amounts(text)], expected)
@@ -298,6 +308,12 @@ class LimitTests(ChatTest):
         self.chat(model, text="$10 on Cleveland, and the rest elsewhere")  # one amount: $10 in total
         self.assertTrue(model.results[0][0]["accepted"])
         self.assertIn("Together these proposals exceed the $10", model.results[0][1]["error"])
+
+    def test_a_price_level_in_the_message_does_not_raise_the_cap(self):
+        model = ScriptedModel(calls(propose(maxBudgetUsd=50)), ModelTurn("Done."))
+        self.chat(model, text="Put $10 on Bitcoin closing above $100,000 today")
+        self.assertIn("above the $10 the user gave", model.results[0][0]["error"])
+        self.assertIn("at most $10", model.opened["system"])
 
     def test_no_amount_means_no_proposal(self):
         model = ScriptedModel(calls(propose()), ModelTurn("How much?"))
