@@ -18,6 +18,17 @@ NOW = datetime(2026, 10, 10, 14, 30, tzinfo=timezone.utc)
 ACCOUNT = "acct-1"
 
 
+KNOWN_AGENTS = ("a1", "a2", "a3", "g", "g0", "g1", "g2", "x", "y")
+
+
+def state():
+    """Workspace state that knows the agents and account these tests record for."""
+    s = main_seed()
+    s["accounts"] = [{"id": ACCOUNT}]
+    s["agentConfigs"] = [{"id": agent} for agent in KNOWN_AGENTS]
+    return s
+
+
 def book(market_id, *, event="GAME", yes_ask="0.37", no_ask="0.64", depth="500"):
     """A get_orderbook payload whose asks are yes_ask / no_ask."""
     return {"id": market_id, "name": market_id, "eventTicker": event, "agent": "sports", "venue": "kalshi",
@@ -129,7 +140,7 @@ class BreakerTests(unittest.TestCase):
 
 class BatchRecordTests(unittest.TestCase):
     def test_stored_batch_replays_to_identical_decisions_after_json_round_trip(self):
-        s = main_seed()
+        s = state()
         batch, decisions = run_batch(s)
         saved = json.loads(json.dumps(s, allow_nan=False))  # what server.save writes to disk
         stored_batch = saved["governorBatches"][0]
@@ -141,7 +152,7 @@ class BatchRecordTests(unittest.TestCase):
             self.assertEqual((stored[d.proposal_id]["batchId"], stored[d.proposal_id]["accountId"]), ("b1", ACCOUNT))
 
     def test_replay_detects_any_tampered_input(self):
-        s = main_seed()
+        s = state()
         batch, decisions = run_batch(s)
         tampered = copy.deepcopy(batch)
         tampered["inputs"]["portfolio"]["availableCash"] = "5"
@@ -154,7 +165,7 @@ class BatchRecordTests(unittest.TestCase):
             Policy.from_dict({**DEFAULT_POLICY.to_dict(), "surprise": 1})
 
     def test_records_are_write_once(self):
-        s = main_seed()
+        s = state()
         run_batch(s)
         with self.assertRaisesRegex(ValueError, "already recorded"):
             run_batch(s, "b1")
@@ -162,13 +173,13 @@ class BatchRecordTests(unittest.TestCase):
             run_batch(s, "b2")
 
     def test_newest_first_with_descending_ids_within_a_batch(self):
-        s = main_seed()
+        s = state()
         run_batch(s)
         self.assertEqual([d["proposalId"] for d in s["governorDecisions"]], ["p3", "p2", "p1"])
 
     def test_recording_never_drops_records_before_they_are_saved(self):
         # Review: trimming at record time lost rows when more than a window accrued between saves.
-        s = main_seed()
+        s = state()
         earlier = lambda i: (NOW - timedelta(minutes=i + 1)).isoformat()
         s["governorBatches"] = [{"id": f"old{i}", "accountId": ACCOUNT, "startedAt": earlier(i)} for i in range(records.BATCH_WINDOW)]
         s["governorDecisions"] = [{"proposalId": f"old{i}", "batchId": f"old{i % records.BATCH_WINDOW}", "decidedAt": earlier(i)}
@@ -179,7 +190,7 @@ class BatchRecordTests(unittest.TestCase):
         self.assertEqual((s["governorBatches"][0]["id"], s["governorDecisions"][0]["proposalId"]), ("b9", "p3"))
 
     def test_json_compaction_bounds_history_and_keeps_replayable_decisions(self):
-        s = main_seed()
+        s = state()
         earlier = lambda i: (NOW - timedelta(minutes=i + 1)).isoformat()
         s["governorBatches"] = [{"id": f"b{i:03d}", "startedAt": earlier(i)} for i in range(records.BATCH_WINDOW + 10)]
         s["governorDecisions"] = [{"proposalId": f"p{i:04d}", "batchId": f"b{i // 5:03d}", "decidedAt": earlier(i // 5)}
@@ -217,26 +228,26 @@ class ForecastTests(unittest.TestCase):
         # Review: the first-processed forecast used to win even if another was submitted earlier.
         early = Proposal("early", "a1", "M1", "yes", D("0.9"), D(5), NOW, NOW + timedelta(seconds=60))
         late = Proposal("late", "a1", "M1", "yes", D("0.4"), D(5), NOW + timedelta(seconds=5), NOW + timedelta(seconds=60))
-        s = main_seed()
+        s = state()
         self.assertTrue(records.record_forecast(s, late))
         self.assertTrue(records.record_forecast(s, early))
         self.assertFalse(records.record_forecast(s, late))
         self.assertEqual([f["proposalId"] for f in s["governorForecasts"]], ["early"])
-        resolved = main_seed()
+        resolved = state()
         records.record_forecast(resolved, late)
         records.resolve_forecasts(resolved, {"M1": 1}, NOW)
         self.assertFalse(records.record_forecast(resolved, early))  # a scored forecast is never replaced
         self.assertEqual(resolved["governorForecasts"][0]["proposalId"], "late")
 
     def test_first_forecast_per_agent_and_market_only(self):
-        s = main_seed()
+        s = state()
         self.assertTrue(records.record_forecast(s, proposal("p1", p="0.40")))
         self.assertFalse(records.record_forecast(s, proposal("p2", p="0.90")))
         self.assertTrue(records.record_forecast(s, proposal("p3", agent="a2", p="0.20")))
         self.assertEqual([f["proposalId"] for f in s["governorForecasts"]], ["p1", "p3"])
 
     def test_resolution_feeds_reliability(self):
-        s = main_seed()
+        s = state()
         records.record_forecast(s, proposal("p1", p="0.90"))
         records.record_forecast(s, proposal("p2", market="M2", p="0.20"))
         self.assertEqual(records.reliability(s)["a1"].resolved_count, 0)
@@ -252,14 +263,14 @@ class ForecastTests(unittest.TestCase):
 
 class StateTests(unittest.TestCase):
     def test_breaker_state_in_workspace_state(self):
-        s = main_seed()
+        s = state()
         self.assertEqual(records.breaker_state(s, ACCOUNT), BreakerState())
         latched = check(BreakerState(), equity=D(960), day_open_equity=D(1000), now=NOW).state
         records.save_breaker(s, ACCOUNT, latched)
         self.assertEqual(records.breaker_state(json.loads(json.dumps(s)), ACCOUNT), latched)
 
     def test_breaker_events_are_write_once_newest_first_and_all_kept_until_saved(self):
-        s = main_seed()
+        s = state()
         for i in range(records.BREAKER_EVENT_WINDOW + 5):
             at = (NOW + timedelta(seconds=i)).isoformat()
             records.record_breaker_event(s, ACCOUNT, {"action": "breakerReset", "at": at, "n": i}, f"ev-{i:03d}")
@@ -276,9 +287,9 @@ class StateTests(unittest.TestCase):
                 records.record_breaker_event(s, ACCOUNT, event, event_id)
 
     def test_reset_audit_records_as_a_breaker_event(self):
-        s = main_seed()
+        s = state()
         latched = check(BreakerState(), equity=D(960), day_open_equity=D(1000), now=NOW).state
-        state, audit = reset(latched, operator="ops", reason="reviewed", equity=D(960), now=NOW)
+        _, audit = reset(latched, operator="ops", reason="reviewed", equity=D(960), now=NOW)
         records.record_breaker_event(s, ACCOUNT, audit, "reset-1")
         self.assertEqual(json.loads(json.dumps(s))["governorBreakerEvents"][0]["reason"], "reviewed")
 
@@ -308,12 +319,60 @@ class JsonModeTests(unittest.TestCase):
         self.assertEqual(len(s["governorBreakerEvents"]), records.BREAKER_EVENT_WINDOW + 3)
 
 
+class GuardTests(unittest.TestCase):
+    """Follow-up review of e8553b6."""
+
+    def test_unknown_agents_and_accounts_are_refused_before_recording(self):
+        s = state()
+        books, proposals, portfolio, reliability = batch_inputs()
+        stranger = proposal("p9", agent="not-a-configured-agent")
+        with self.assertRaisesRegex(ValueError, "Unknown agent"):
+            records.record_forecast(s, stranger)
+        snapshot = build_snapshot(books, snapshot_id="s", taken_at=NOW)
+        decisions = decide(proposals + [stranger], snapshot, portfolio, reliability, NOW)
+        batch = records.batch_record(batch_id="b", account_id=ACCOUNT, started_at=NOW, evaluated_at=NOW, snapshot_id="s",
+                                     books=books, proposals=proposals + [stranger], portfolio=portfolio, reliability=reliability)
+        with self.assertRaisesRegex(ValueError, "not-a-configured-agent"):
+            records.record_batch(s, batch, decisions, NOW)
+        with self.assertRaisesRegex(ValueError, "Unknown agent or account: elsewhere"):
+            records.record_batch(s, {**batch, "accountId": "elsewhere"}, decisions[:1], NOW)
+        with self.assertRaisesRegex(ValueError, "elsewhere"):
+            records.record_breaker_event(s, "elsewhere", {"action": "breakerReset", "at": NOW.isoformat()}, "e1")
+        self.assertEqual((s["governorBatches"], s["governorDecisions"], s["governorForecasts"], s["governorBreakerEvents"]),
+                         ([], [], [], []))
+
+    def test_replaced_forecasts_are_tracked_explicitly(self):
+        s = state()
+        late = Proposal("late", "a1", "M1", "yes", D("0.4"), D(5), NOW + timedelta(seconds=5), NOW + timedelta(seconds=60))
+        early = Proposal("early", "a1", "M1", "yes", D("0.9"), D(5), NOW, NOW + timedelta(seconds=60))
+        records.record_forecast(s, late)
+        records.record_forecast(s, early)
+        self.assertEqual(s["governorReplacedForecasts"], ["late"])
+        self.assertEqual(records.compact_for_json(s)["governorReplacedForecasts"], [])
+
+    def test_forecast_decimals_are_stored_in_plain_notation(self):
+        s = state()
+        records.record_forecast(s, Proposal("p", "a1", "M1", "yes", D("1E-7"), D(5), NOW, NOW + timedelta(seconds=60)))
+        records.resolve_forecasts(s, {"M1": D("1E+0")}, NOW)
+        self.assertEqual((s["governorForecasts"][0]["estimatedYesProbability"], s["governorForecasts"][0]["outcome"]),
+                         ("0.0000001", "1"))
+
+    def test_public_state_leaves_out_governor_records(self):
+        from test_engine import FakeVault
+        from workspace import Workspace
+        s = state()
+        run_batch(s)
+        public = Workspace(FakeVault()).public({**s, "accounts": [], "agentConfigs": []})
+        self.assertFalse([k for k in public if k.startswith("governor")])
+        self.assertIn("orders", public)
+
+
 class OrderingTests(unittest.TestCase):
     """State lists use (time, id) in code-point order, the order Postgres loads under COLLATE "C"."""
 
     def test_ids_sort_by_code_point_not_locale(self):
         # Locale collations ignore hyphens and fold case ("ab" < "a-c", "a" < "B"); code point order does not.
-        s = main_seed()
+        s = state()
         books, _, portfolio, reliability = batch_inputs()
         markets = ["M1", "M2", "M1"]
         ids = ["ab", "a-c", "B"]
@@ -326,7 +385,7 @@ class OrderingTests(unittest.TestCase):
 
     def test_order_is_independent_of_insertion_order(self):
         early, late = NOW, NOW + timedelta(microseconds=500)
-        forward, backward = main_seed(), main_seed()
+        forward, backward = state(), state()
         items = [proposal("p2", agent="x", market="M1"), proposal("p1", agent="y", market="M1")]
         items = [Proposal(p.proposal_id, p.agent_id, p.market_id, p.side, p.estimated_yes_probability, p.requested_budget,
                           t, t + timedelta(seconds=60)) for p, t in zip(items, (late, early))]
@@ -338,7 +397,7 @@ class OrderingTests(unittest.TestCase):
         self.assertEqual([f["proposalId"] for f in forward["governorForecasts"]], ["p1", "p2"])
 
     def test_batches_with_equal_times_sort_by_id(self):
-        s = main_seed()
+        s = state()
         run_batch(s, "b-a")
         s["governorDecisions"].clear()
         run_batch(s, "b-b")

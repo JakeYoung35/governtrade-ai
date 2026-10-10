@@ -15,7 +15,7 @@ MIGRATIONS=Path(__file__).parent/'migrations'
 LOCK_KEY=0x476f7654726164  # "GovTrad"
 EVENT_LIMIT=500  # Older events stay in the database; only recent ones are loaded into state.
 SAFETY_COLUMNS={'dailyLossCap':'daily_loss_cap','marketCap':'market_cap','exposureCap':'exposure_cap','slippage':'slippage_max'}
-TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion','governorBatches','governorDecisions','governorForecasts','governorBreakerEvents'}
+TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion','governorBatches','governorDecisions','governorForecasts','governorBreakerEvents','governorReplacedForecasts'}
 DECISION_ROW_FIELDS={'batchId','accountId','decidedAt'}  # columns of governor_decisions; the rest is payload
 BREAKER_EVENT_ROW_FIELDS={'id','accountId'}  # columns of governor_breaker_events; the rest is payload
 ACCOUNT_FIELDS={'id','name','venue','environment','subaccount','liveEnabled','credentialRef','credentialMasks','status','stale','error','ceiling','baseline','balance'}
@@ -120,7 +120,7 @@ class PostgresStore:
                 for r in q('SELECT proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability::text AS p,outcome::text AS o,resolved_at FROM governor_forecasts ORDER BY submitted_at,proposal_id COLLATE "C"')]
             s['governorBreakerEvents']=[{**r['payload'],'id':r['id'],'accountId':r['account_id']}
                 for r in conn.execute('SELECT id,account_id,payload FROM governor_breaker_events ORDER BY at DESC,id COLLATE "C" DESC LIMIT %s',(BREAKER_EVENT_WINDOW,))]
-        seen.update(self.signatures(s));self.local.seen=seen
+        seen.update(self.signatures(s));seen['loaded']=True;self.local.seen=seen
         return s
 
     def signatures(self,s):
@@ -140,6 +140,9 @@ class PostgresStore:
         from psycopg.types.json import Jsonb
         j=lambda v:None if v is None else Jsonb(v)
         seen=getattr(self.local,'seen',None) or {};changed=lambda kind,x:seen.get((kind,x['id']))!=signature(x)
+        # Governor rows are write-once with no ON CONFLICT, so without a load they would all look new and collide.
+        if not seen.get('loaded') and any(s.get(k) for k in ('governorBatches','governorDecisions','governorForecasts','governorBreakerEvents')):
+            raise ValueError('Load the workspace in this session before saving governor records.')
         with self.connection() as conn,conn.transaction():
             cur=conn.cursor();run=lambda sql,rows:rows and cur.executemany(sql,rows)
             settings=self.settings(s)
@@ -173,9 +176,8 @@ class PostgresStore:
                 [(d['proposalId'],d['batchId'],d['accountId'],d['agentId'],d['marketId'],d['side'],d['decision'],Decimal(d['approvedBudgetUsd']),Decimal(d['contracts']),
                   list(d['reasonCodes']),d['policyVersion'],d['decidedAt'],Jsonb({k:v for k,v in d.items() if k not in DECISION_ROW_FIELDS}))
                  for d in reversed(s.get('governorDecisions',[])) if d['proposalId'] not in seen.get('governorDecisions',())])
-            # Forecasts are loaded in full, so one that left state was replaced by an earlier submission.
-            replaced=[k[1] for k in seen if isinstance(k,tuple) and k[0]=='forecast']
-            replaced=sorted(set(replaced)-{f['proposalId'] for f in s.get('governorForecasts',[])})
+            # Delete only forecasts record_forecast replaced, never rows that are merely outside a loaded window.
+            replaced=sorted(set(s.get('governorReplacedForecasts',[])))
             if replaced:cur.execute('DELETE FROM governor_forecasts WHERE proposal_id = ANY(%s)',(replaced,))
             run(FORECAST_UPSERT,[(f['proposalId'],f['agentId'],f['marketId'],f['submittedAt'],Decimal(f['estimatedYesProbability']),
                 None if f['outcome'] is None else Decimal(f['outcome']),f['resolvedAt'])
@@ -185,7 +187,8 @@ class PostgresStore:
                  for e in reversed(s.get('governorBreakerEvents',[])) if e['id'] not in seen.get('governorBreakerEvents',())])
         seen=self.signatures(s)
         seen.update({('evaluations',o['id']):len(o['evaluations']) for o in s['orders']})
-        self.local.seen=seen
+        seen['loaded']=True;self.local.seen=seen
+        s['governorReplacedForecasts']=[]  # deleted above; nothing left to replace
 
 if __name__=='__main__':
     import os,sys

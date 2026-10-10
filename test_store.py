@@ -113,7 +113,8 @@ class StoreTests(unittest.TestCase):
   with self.store.session():
    for i in range(records.BREAKER_EVENT_WINDOW+5):records.record_breaker_event(s,a,{'action':'breakerReset','at':(start+timedelta(seconds=i)).isoformat(),'n':i},f'ev-{i:03d}')
    self.store.save(s);self.store.save(s)
-  loaded=self.reload();self.assertEqual(loaded,s)
+  # State holds all 205 until saved; a reload returns the newest window while Postgres keeps every row.
+  loaded=self.reload();self.assertEqual(loaded,{**s,'governorBreakerEvents':s['governorBreakerEvents'][:records.BREAKER_EVENT_WINDOW]})
   self.assertEqual((len(loaded['governorBreakerEvents']),self.count('governor_breaker_events')),(records.BREAKER_EVENT_WINDOW,records.BREAKER_EVENT_WINDOW+5))
  def test_earlier_forecast_replaces_the_stored_row(self):
   from datetime import datetime,timedelta,timezone
@@ -142,4 +143,22 @@ class StoreTests(unittest.TestCase):
     s=self.store.load();reuse(s)  # the original left the loaded window, so state accepts the id
     with self.assertRaises(Exception):self.store.save(s)
   self.assertEqual((self.count('governor_batches'),self.count('governor_breaker_events')),(records.BATCH_WINDOW+1,records.BREAKER_EVENT_WINDOW+1))
+ def test_saving_governor_records_without_a_load_is_refused_clearly(self):
+  s=self.workspace()
+  with self.store.session():self.governor_batch(s);self.store.save(s)
+  with self.store.session():
+   with self.assertRaisesRegex(ValueError,'Load the workspace'):self.store.save(s)
+  self.assertEqual(self.count('governor_batches'),1)
+ def test_forecasts_missing_from_state_are_not_deleted(self):
+  # Only forecasts record_forecast replaced are deleted, never rows that are merely absent (e.g. a future load LIMIT).
+  from datetime import datetime,timedelta,timezone
+  from decimal import Decimal as D
+  from governor import records
+  from governor.models import Proposal
+  s=self.workspace();g=s['agentConfigs'][0]['id'];t=datetime.now(timezone.utc).replace(microsecond=0)
+  with self.store.session():
+   for m in ('M1','M2'):records.record_forecast(s,Proposal(f'f-{m}',g,m,'yes',D('0.5'),D(5),t,t+timedelta(seconds=60)))
+   self.store.save(s)
+  with self.store.session():s=self.store.load();s['governorForecasts'].pop();self.store.save(s)
+  self.assertEqual(self.count('governor_forecasts'),2)
 

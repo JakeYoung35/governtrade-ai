@@ -49,7 +49,7 @@ def order_book(raw, event_group=None):
         raise ValueError(f"Order book payload is missing {', '.join(missing)}.")
     return OrderBook(
         market_id=raw["id"],
-        event_group=event_group or raw["eventTicker"],
+        event_group=raw["eventTicker"] if event_group is None else event_group,
         taken_at=_timestamp(raw["asOf"]),
         yes_bids=_levels(raw["yesBids"], "yesBids"),
         no_bids=_levels(raw["noBids"], "noBids"),

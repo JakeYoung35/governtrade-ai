@@ -6,6 +6,7 @@ State keys (JSON-safe: decimals as strings, times as ISO-8601 UTC):
   governorForecasts  submission order; only the first forecast per (agent, market)
   governorBreakerEvents  newest first: loss-breaker latches and resets, {id, accountId, action, at, ...}
   governor           {"breakers": {accountId: BreakerState.to_dict()}}
+  governorReplacedForecasts  proposal ids of forecasts replaced since the last save (store.save deletes them)
 
 Recording never drops anything. Postgres mode writes the four lists to the governor_* tables
 (migrations/003_governor.sql), keeps every row, and loads back only recent windows. JSON mode
@@ -43,6 +44,21 @@ def _time(text):
 
 def _optional(value):
     return None if value is None else str(value)
+
+
+def _plain(value):
+    # Fixed-point text, never exponent form, so it matches what Postgres returns for numeric::text.
+    return format(to_decimal(value, "value"), "f")
+
+
+def _require_known(s, *, agents=(), accounts=()):
+    """Refuse ids the workspace does not know; the governor tables reference agents and accounts,
+    so recording one would make every later save of the request fail."""
+    known_agents = {a["id"] for a in s.get("agentConfigs", [])}
+    known_accounts = {a["id"] for a in s.get("accounts", [])}
+    unknown = sorted(set(agents) - known_agents) + sorted(set(accounts) - known_accounts)
+    if unknown:
+        raise ValueError(f"Unknown agent or account: {', '.join(unknown)}.")
 
 
 def _sort(rows, time_key, id_key, newest_first):
@@ -119,6 +135,7 @@ def record_batch(s, batch, decisions, decided_at):
     State only sees recent records, so a repeat of an older id is refused by Postgres when saved
     (the governor inserts have no ON CONFLICT clause) rather than here.
     """
+    _require_known(s, agents=[d.agent_id for d in decisions], accounts=[batch["accountId"]])
     batches = s.setdefault("governorBatches", [])
     stored = s.setdefault("governorDecisions", [])
     if any(b["id"] == batch["id"] for b in batches):
@@ -144,6 +161,7 @@ def record_forecast(s, proposal):
     market resolves; a resolved forecast is never replaced. Returns True when this proposal's
     forecast is the one kept.
     """
+    _require_known(s, agents=[proposal.agent_id])
     rows = s.setdefault("governorForecasts", [])
     key = (proposal.received_at, proposal.proposal_id)
     existing = next((f for f in rows if f["agentId"] == proposal.agent_id and f["marketId"] == proposal.market_id), None)
@@ -151,9 +169,10 @@ def record_forecast(s, proposal):
         if existing["outcome"] is not None or (_time(existing["submittedAt"]), existing["proposalId"]) <= key:
             return False
         rows.remove(existing)
+        s.setdefault("governorReplacedForecasts", []).append(existing["proposalId"])
     rows.append({"proposalId": proposal.proposal_id, "agentId": proposal.agent_id, "marketId": proposal.market_id,
                  "submittedAt": proposal.received_at.isoformat(),
-                 "estimatedYesProbability": str(proposal.estimated_yes_probability),
+                 "estimatedYesProbability": _plain(proposal.estimated_yes_probability),
                  "outcome": None, "resolvedAt": None})
     _sort(rows, "submittedAt", "proposalId", newest_first=False)
     return True
@@ -171,7 +190,7 @@ def resolve_forecasts(s, outcomes, now):
     count = 0
     for f in s.get("governorForecasts", []):
         if f["outcome"] is None and f["marketId"] in parsed:
-            f["outcome"], f["resolvedAt"] = str(parsed[f["marketId"]]), resolved_at
+            f["outcome"], f["resolvedAt"] = _plain(parsed[f["marketId"]]), resolved_at
             count += 1
     return count
 
@@ -204,8 +223,10 @@ def save_breaker(s, account_id, state):
 def record_breaker_event(s, account_id, event, event_id):
     """Audit a latch or reset (needs "action" and an ISO "at"). Write-once by event_id.
 
-    Never trimmed here: every event reaches Postgres, which keeps it permanently.
+    Recording never trims, so every event reaches Postgres, which keeps it permanently. JSON mode
+    has no database: its file keeps only the newest BREAKER_EVENT_WINDOW (see compact_for_json).
     """
+    _require_known(s, accounts=[account_id])
     if not isinstance(event_id, str) or not event_id.strip() or len(event_id) > 200:
         raise ValueError("A breaker event needs an id of 1 to 200 characters.")
     if not isinstance(event.get("action"), str) or not event["action"]:
@@ -231,4 +252,5 @@ def compact_for_json(s):
     out["governorBatches"] = batches
     out["governorDecisions"] = [d for d in s.get("governorDecisions", []) if d["batchId"] in kept][:DECISION_WINDOW]
     out["governorBreakerEvents"] = s.get("governorBreakerEvents", [])[:BREAKER_EVENT_WINDOW]
+    out["governorReplacedForecasts"] = []  # the file holds the full forecast list; nothing to delete
     return out

@@ -91,6 +91,20 @@ class GetOrderbookTests(unittest.TestCase):
             "executionNote": "Only binary quadratic-fee markets with a valid ask are supported."})
 
 
+class OrderbookValidationTests(unittest.TestCase):
+    def test_malformed_levels_raise_a_venue_error(self):
+        from adapters import VenueError
+        for sides in ({"yes_dollars": [["0.36"]]}, {"yes_dollars": [["0.36", None]]}, {"no_dollars": "0.63"},
+                      {"yes_dollars": [[True, "5"]]}):
+            adapter, _ = kalshi(orderbook={"orderbook_fp": sides})
+            with self.subTest(sides=sides), self.assertRaisesRegex(VenueError, "malformed order book levels"):
+                adapter.get_orderbook(TICKER)
+
+    def test_explicit_empty_event_group_is_refused(self):
+        with self.assertRaises(ValueError):
+            build_snapshot([payload()], snapshot_id="s", taken_at=NOW, event_groups={TICKER: ""})
+
+
 class SnapshotConversionTests(unittest.TestCase):
     def test_book_matches_the_live_quote(self):
         book = order_book(payload())

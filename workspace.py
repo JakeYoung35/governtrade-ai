@@ -138,7 +138,8 @@ class Workspace:
             agent=next(x for x in s['agentConfigs'] if x['id']==b['agent']);s['chats'][agent['id']].append({'role':'customer','text':str(b['text'])[:8000]});s['chats'][agent['id']].append({'role':'agent','text':'Instruction saved for the agentic integration. No model was called and no trade was proposed. Your teammate’s worker will consume instructions and submit through the governed proposal API.'})
         else:raise ValueError('Unsupported user action.')
     def public(self,s):
-        public=copy.deepcopy(s)
+        # Governor records (batch inputs with order books, traces, forecasts) are large and not used by the UI.
+        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor')})
         for a in public['accounts']:
             a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'

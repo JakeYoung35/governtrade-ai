@@ -95,7 +95,11 @@ class KalshiAdapter(VenueAdapter):
         book=self.request('GET','/markets/'+quote(market_id,safe='')+'/orderbook',public=True).get('orderbook_fp')
         # A missing or malformed book is an error, not an empty book that silently blocks every proposal.
         if not isinstance(book,dict):raise VenueError('Kalshi returned an unrecognized order book.')
-        levels=lambda rows:[[str(p),str(q)] for p,q in rows or []]
+        def levels(rows):
+            if rows is None:return []
+            if not isinstance(rows,list) or not all(isinstance(r,(list,tuple)) and len(r)==2 and all(isinstance(v,(str,int,float)) and not isinstance(v,bool) for v in r) for r in rows):
+                raise VenueError('Kalshi returned malformed order book levels.')
+            return [[str(p),str(q)] for p,q in rows]
         return {'id':market_id,'name':m.get('title',market_id),'eventTicker':m['event_ticker'],'agent':category,'venue':self.venue,'open':m.get('status')=='active','executionReady':supported,'feeMultiplier':multiplier,'closeAt':m.get('close_time'),'yesBids':levels(book.get('yes_dollars')),'noBids':levels(book.get('no_dollars')),'asOf':now()}
     def get_balance_positions(self):
         scope='subaccount='+str(self.subaccount)
