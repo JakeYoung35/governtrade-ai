@@ -64,6 +64,7 @@ Windows notes:
 - Use `python` instead of `python3`.
 - Check that your terminal prompt starts with `(.venv)`. If pip says "Defaulting to user installation", the virtual environment is not active.
 - If saving a credential fails with "Fernet key must be 32 url-safe base64-encoded bytes", the key is incomplete, usually from a copy and paste that dropped the final `=`. Generate a new one with the commands above.
+- If you set `GOVERNTRADE_MASTER_KEY` as a user environment variable while Cursor, VS Code or another editor was open, its terminals will not see it until the editor is fully restarted. To load it into an open terminal without restarting, run `$env:GOVERNTRADE_MASTER_KEY = [Environment]::GetEnvironmentVariable("GOVERNTRADE_MASTER_KEY","User")`.
 
 ## Connect Kalshi
 
