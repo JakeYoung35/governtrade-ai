@@ -23,7 +23,7 @@ def allowed_host(authority):
         hostname = parsed.hostname
     except ValueError:
         return False
-    allowed = {'localhost', '127.0.0.1'}
+    allowed = set() if hosted() else {'localhost', '127.0.0.1'}
     allowed.update(x.strip().lower() for x in os.environ.get('GOVERNTRADE_ALLOWED_HOSTS', '').split(',') if x.strip())
     render_host = os.environ.get('RENDER_EXTERNAL_HOSTNAME', '').strip().lower()
     if render_host:

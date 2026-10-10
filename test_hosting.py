@@ -26,6 +26,8 @@ class HostingTests(unittest.TestCase):
             for host in ('governtradeai.us.evil.example','evil@governtradeai.us','governtradeai.us/path',
                          'governtradeai.us:bad','governtradeai.us#fragment'):
                 self.assertFalse(hosting.allowed_host(host))
+            self.assertFalse(hosting.allowed_host('localhost:3110'))
+            self.assertFalse(hosting.allowed_host('127.0.0.1'))
 
 
 class HostedHttpTests(unittest.TestCase):
@@ -60,7 +62,12 @@ class HostedHttpTests(unittest.TestCase):
             self.assertEqual(status,200)
             self.assertNotIn('Set-Cookie',headers)
             if method=='HEAD':self.assertEqual(body,b'')
-        self.assertEqual(self.call('GET','/healthz',{'Host':'evil.example'})[0],403)
+        self.assertEqual(self.call('GET','/healthz',{'Host':'evil.example'})[0],200)
+
+    def test_legacy_agent_proposals_retired_when_hosted(self):
+        with patch.dict(os.environ, {'GOVERNTRADE_ACCESS_PASSWORD':'test-password'}):
+            self.assertEqual(self.call('POST','/api/agent/proposals',{'Authorization':'Bearer worker-token'},'{}')[0],410)
+            self.assertEqual(self.call('POST','/api/agent/proposals',self.auth(),'{}')[0],410)
 
     def test_password_gate_worker_scope_and_https_csrf(self):
         with patch.dict(os.environ, {'GOVERNTRADE_ACCESS_PASSWORD':'test-password'}):

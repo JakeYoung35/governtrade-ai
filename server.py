@@ -74,12 +74,12 @@ class Handler(SimpleHTTPRequestHandler):
     def same_origin(self):
         origin=self.headers.get('Origin');return not origin or origin==hosting.expected_origin(self.headers.get('Host',''))
     def entry_access(self):
-        if not self.valid_host():
-            self.json(403,{'error':'Host access denied.'});return False
         if urlsplit(self.path).path=='/healthz' and self.command in ('GET','HEAD'):
             raw=b'{"status":"ok"}';self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.send_header('Content-Length',str(len(raw)));self.end_headers()
             if self.command!='HEAD':self.wfile.write(raw)
             return False
+        if not self.valid_host():
+            self.json(403,{'error':'Host access denied.'});return False
         if authentication.enabled():
             try:multiuser_ready()
             except (ValueError,TypeError):
@@ -95,10 +95,12 @@ class Handler(SimpleHTTPRequestHandler):
                     self.json(403,{'error':'Cross-origin access denied.'});return False
             return True
         if not hosting.hosted():return True
+        path=urlsplit(self.path).path
+        if path=='/api/agent/proposals':
+            self.json(410,{'error':'This route is retired on hosted instances. Submit through /api/governor/proposals.'});return False
         if not os.environ.get('GOVERNTRADE_ACCESS_PASSWORD'):
             self.json(503,{'error':'Hosted workspace is locked. Configure an access password before connecting accounts.'});return False
-        path=urlsplit(self.path).path
-        worker_path=path in ('/api/worker','/api/agent/proposals','/api/governor/proposals','/api/governor/schema') or path.startswith('/api/governor/proposals/')
+        worker_path=path in ('/api/worker','/api/governor/proposals','/api/governor/schema') or path.startswith('/api/governor/proposals/')
         if (worker_path and self.worker_ok()) or hosting.password_ok(self.headers.get('Authorization','')):return True
         self.send_response(401);self.send_header('WWW-Authenticate','Basic realm="GovernTrade private workspace", charset="UTF-8"');self.send_header('Cache-Control','no-store');self.send_header('Content-Length','0');self.end_headers();return False
     def do_HEAD(self):
