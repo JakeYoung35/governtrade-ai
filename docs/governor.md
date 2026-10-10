@@ -83,10 +83,11 @@ not depend on the governor's own decisions. Run it on demand with `{"action": "g
 - While the lock is released, other requests can change the account. If the account was refreshed under the
   lock after the governor's read started (as `Workspace.evaluate` does after every order), the decision uses
   that newer balance, also when the governor's own read failed, rather than rolling it back. Each order records
-  when the venue answered (`executedAt`). Filled or committed orders answered at or after the start of the
-  balance read actually used count as exposure on top of its positions; orders answered earlier are already in
-  them. A fill that lands while the unlocked read is running may be counted twice for that one pass, which
-  only makes stakes smaller.
+  when the venue answered (`executedAt`). Orders answered while the lock was released count as exposure on top
+  of the positions unless the venue data shows them: when deciding on a newer refresh, a fill is skipped only if
+  that ticker's position grew by at least its quantity since the governor's read. A fill Kalshi's positions do not
+  show yet is therefore still counted, and a fill that lands while the unlocked read is running may be counted
+  twice for that one pass. Both only make stakes smaller.
 
 ## Configuration
 

@@ -31,6 +31,9 @@ from governor.policy import DEFAULT_POLICY
 from governor.snapshot import build_snapshot, order_book
 
 SCHEMA_PATH = "/api/governor/schema"
+# Orders created this long before a pass's venue read cannot have been answered during it (an order is created and
+# answered within one locked request), so _in_flight stops scanning there.
+IN_FLIGHT_LOOKBACK = dt.timedelta(minutes=10)
 MAX_EVALUATION_ATTEMPTS = 3  # passes a request may fail to be evaluated before it is rejected
 
 
@@ -200,8 +203,8 @@ class GovernorService:
             return {"accountId": account_id, "decided": 0, "note": fetched["error"]}
         venue = self.workspace.venue(account)
         started = fetched["startedAt"]
-        balance, read_started = self._newest_balance(s, account, fetched["balance"], started)
-        in_flight = self._in_flight(s, account, read_started)
+        balance, refreshed = self._newest_balance(s, account, fetched["balance"], started)
+        in_flight = self._in_flight(s, account, started, balance if refreshed else None, fetched["balance"])
         books = fetched["books"]
         snapshot_id = self.new_id()
         snapshot = build_snapshot(books, snapshot_id=snapshot_id, taken_at=started)
@@ -226,40 +229,72 @@ class GovernorService:
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
     def _newest_balance(self, s, account, fetched, started):
-        """The balance to decide on, and when its venue read started (see _in_flight).
+        """The balance to decide on, and whether it is a refresh newer than the governor's own read.
 
         Normally the fetched read, which started at `started` with the lock released. If the account was refreshed
-        under the lock after that read started (e.g. Workspace.evaluate's refresh after a fill), that newer balance
-        is used instead, including when the unlocked read failed: applying the older read, or marking the account
-        errored, would roll back a fresh balance. A refresh under the lock never overlaps an order placement, so
-        its asOf is a safe read start.
+        under the lock after that (e.g. Workspace.evaluate's refresh after a fill), that newer balance is used
+        instead, including when the unlocked read failed: applying the older read, or marking the account errored,
+        would roll back a fresh balance.
         """
         current = account.get("balance")
         if current and not account.get("stale"):
             try:
-                current_as_of = dt.datetime.fromisoformat(current["asOf"])
-                newer = current_as_of > (dt.datetime.fromisoformat(fetched["asOf"]) if fetched is not None else started)
+                newer = dt.datetime.fromisoformat(current["asOf"]) > (
+                    dt.datetime.fromisoformat(fetched["asOf"]) if fetched is not None else started)
             except (KeyError, TypeError, ValueError):
                 newer = False  # an unreadable timestamp: fall back to the fetched read
             if newer:
-                return current, current_as_of
-        return self.workspace.apply_balance(s, account, fetched), started
+                return current, True
+        return self.workspace.apply_balance(s, account, fetched), False
 
-    def _in_flight(self, s, account, read_started):
-        """Orders the venue answered at or after the balance read started, so its positions may not include them.
+    def _in_flight(self, s, account, started, refreshed, fetched):
+        """Orders the venue answered while the lock was released whose fill the chosen positions may not show.
 
-        Counted as exposure on top of the positions. An order placed before the read started is already in the
-        positions; one placed while the unlocked read ran may or may not be, and is counted (conservative, only
-        for orders placed in those few seconds). Orders without executedAt predate it and are never counted.
+        Counted as exposure on top of the positions. Only orders answered at or after `started` (the unlocked read's
+        start) are candidates; earlier fills are in either read. Then:
+        - deciding on the fetched read (refreshed is None): every candidate counts, since a fill that landed while
+          the read ran may or may not be in it;
+        - deciding on a newer refresh: a ticker's filled candidates are skipped only if the refreshed position grew
+          by at least their quantity since the fetched read. Otherwise (Kalshi's positions lagging behind the fill,
+          or no fetched read to compare with) they count. Committed orders without a fill count always count.
+        Errs toward smaller stakes. Committed `submitted` orders answered before `started` are not counted here
+        (nor in the positions, if the venue never reported their fill): a known gap, see the PR #16 follow-ups.
         """
-        def executed_since(o):
+        def executed_at(o):
             try:
-                return dt.datetime.fromisoformat(o["executedAt"]) >= read_started
+                return dt.datetime.fromisoformat(o["executedAt"])
             except (KeyError, TypeError, ValueError):
-                return False
-        return [o for o in s["orders"] if o.get("accountId") == account["id"]
-                and (o.get("filled") or (o.get("committed") and o.get("status") in ("submitted", "open")))
-                and executed_since(o)]
+                return None
+        lookback = started - IN_FLIGHT_LOOKBACK
+        candidates = []
+        for o in s["orders"]:  # newest first by creation time, and an order is answered after it is created
+            try:
+                if dt.datetime.fromisoformat(o["time"]) < lookback:
+                    break
+            except (KeyError, TypeError, ValueError):
+                pass
+            if (o.get("accountId") == account["id"]
+                    and (o.get("filled") or (o.get("committed") and o.get("status") in ("submitted", "open")))
+                    and (executed_at(o) or lookback) >= started):
+                candidates.append(o)
+        if refreshed is None or not candidates:
+            return candidates
+
+        def positions(balance):
+            return {p.get("ticker"): to_decimal(p.get("position_fp", 0), "position_fp")
+                    for p in (balance or {}).get("positions") or []}
+        now_held, before = positions(refreshed), positions(fetched) if fetched is not None else None
+        counted = []
+        for ticker in {o["market"]["id"] for o in candidates}:
+            orders = [o for o in candidates if o["market"]["id"] == ticker]
+            filled = [o for o in orders if o.get("filled") and o.get("quantity")]
+            counted += [o for o in orders if o not in filled]  # quantity unknown: cannot be checked against positions
+            expected = sum((to_decimal(o["quantity"], "quantity") * (1 if o["direction"] == "Yes" else -1) for o in filled), ZERO)
+            grown = None if before is None else now_held.get(ticker, ZERO) - before.get(ticker, ZERO)
+            shown = grown is not None and expected != ZERO and (grown >= expected if expected > ZERO else grown <= expected)
+            if not shown:
+                counted += filled
+        return [o for o in candidates if o in counted]
 
     def _portfolio(self, s, account, balance, snapshot, now, in_flight=()):
         state = records.breaker_state(s, account["id"])

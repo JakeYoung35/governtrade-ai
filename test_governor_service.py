@@ -523,6 +523,28 @@ class ContainmentTests(ServiceTest):
         self.service.run_batch(self.s, fetched)
         self.assertEqual([e["amount"] for e in self.market_exposures()], ["9.50"])  # the refreshed position only
 
+    def place_mid_pass(self, key="mid-pass"):
+        order = self.workspace.proposal(self.s, {"agentId": "agent-2", "marketId": MARKET, "direction": "Yes", "amount": 10,
+                                                 "reasoning": "Placed while the governor's read ran.", "idempotencyKey": key})
+        self.assertEqual(order["status"], "filled")
+        return order
+
+    def test_a_fill_the_refreshed_positions_do_not_show_yet_is_counted(self):
+        # Kalshi's positions lag behind the fill: the refresh after it still shows nothing on MARKET.
+        self.submit(marketId=OTHER)
+        fetched = self.service.fetch(self.service.plan(self.s))
+        order = self.place_mid_pass()
+        self.service.run_batch(self.s, fetched)
+        self.assertEqual([e["amount"] for e in self.market_exposures()], [str(D(str(order["actualCost"])))])
+
+    def test_a_lagging_fill_on_an_existing_position_is_counted(self):
+        self.venue.positions = [{"ticker": MARKET, "position_fp": "19.00", "market_exposure_dollars": "9.50"}]
+        self.submit(marketId=OTHER)
+        fetched = self.service.fetch(self.service.plan(self.s))  # already shows the older 19 contracts
+        order = self.place_mid_pass()  # the refresh after the fill still shows 19, not 20
+        self.service.run_batch(self.s, fetched)
+        self.assertEqual(sorted(e["amount"] for e in self.market_exposures()), sorted(["9.50", str(D(str(order["actualCost"])))]))
+
     def test_orders_placed_before_the_read_are_not_counted_twice(self):
         earlier = (utc_now() - timedelta(minutes=5)).isoformat()
         self.s["orders"].insert(0, self.filled_order("filled-earlier", earlier))
