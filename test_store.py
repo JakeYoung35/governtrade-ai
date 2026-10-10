@@ -21,7 +21,7 @@ class StoreTests(unittest.TestCase):
  def tearDownClass(cls):
   with PostgresStore(URL).connect() as c:c.execute(f'DROP SCHEMA {cls.schema} CASCADE')
  def setUp(self):
-  with self.store.connect() as c:c.execute('TRUNCATE events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
+  with self.store.connect() as c:c.execute('TRUNCATE governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
   self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def workspace(self):
   s=main_seed();a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{'dailyCap':100}}
@@ -71,3 +71,32 @@ class StoreTests(unittest.TestCase):
    with server.locked('main'):server.save('main',s)
    with server.locked('main'):self.assertEqual(server.read('main'),s)
    self.assertIn('demoAgents',server.read('demo'))
+ def governor_batch(self,s,batch_id='batch-1'):
+  # Real account/agent ids so the governor tables' foreign keys hold.
+  from datetime import datetime,timedelta,timezone
+  from decimal import Decimal as D
+  from governor import records
+  from governor.allocator import decide
+  from governor.models import Portfolio,Proposal
+  from governor.snapshot import build_snapshot
+  now=datetime.now(timezone.utc).replace(microsecond=0);a=s['accounts'][0]['id'];g=s['agentConfigs'][0]['id']
+  books=[{'id':'MKT','name':'MKT','eventTicker':'EVT','agent':'sports','venue':'kalshi','open':True,'executionReady':True,'feeMultiplier':1.0,'closeAt':None,'yesBids':[['0.36','500']],'noBids':[['0.63','500']],'asOf':now.isoformat()}]
+  proposals=[Proposal(f'{batch_id}-{i}',g,'MKT',side,D(p),D(25),now,now+timedelta(seconds=60)) for i,(side,p) in enumerate((('yes','0.45'),('no','0.30')))]
+  for p in proposals:records.record_forecast(s,p)
+  portfolio=Portfolio(D(1000),D(1000));decisions=decide(proposals,build_snapshot(books,snapshot_id='snap',taken_at=now),portfolio,{},now)
+  batch=records.batch_record(batch_id=batch_id,account_id=a,started_at=now,evaluated_at=now,snapshot_id='snap',books=books,proposals=proposals,portfolio=portfolio,reliability={})
+  records.record_batch(s,batch,decisions,now);return decisions
+ def test_governor_records_round_trip_and_replay(self):
+  from governor import records
+  s=self.workspace()
+  with self.store.session():decisions=self.governor_batch(s);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s)
+  self.assertEqual([d.to_dict() for d in records.replay(loaded['governorBatches'][0])],[d.to_dict() for d in decisions])
+ def test_governor_rows_written_once_and_outcomes_update(self):
+  from governor import records
+  s=self.workspace()
+  with self.store.session():self.governor_batch(s);self.store.save(s);self.store.save(s)
+  with self.store.session():
+   s=self.store.load();self.assertEqual(records.resolve_forecasts(s,{'MKT':1},records._time(s['governorBatches'][0]['startedAt'])),1);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorForecasts'][0]['outcome'],'1')
+  self.assertEqual((self.count('governor_batches'),self.count('governor_decisions'),self.count('governor_forecasts')),(1,2,1))

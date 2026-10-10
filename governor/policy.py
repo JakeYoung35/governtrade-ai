@@ -51,10 +51,21 @@ class Policy:
         object.__setattr__(self, "brier_baseline", baseline)
 
     def to_dict(self):
-        def camel(name):
-            head, *rest = name.split("_")
-            return head + "".join(part.title() for part in rest)
-        return {camel(k): (str(v) if isinstance(v, Decimal) else v) for k, v in asdict(self).items()}
+        return {_camel(k): (str(v) if isinstance(v, Decimal) else v) for k, v in asdict(self).items()}
+
+    @classmethod
+    def from_dict(cls, data):
+        """Inverse of to_dict, so a stored batch replays under the exact policy it used."""
+        fields = {_camel(name): name for name in cls.__dataclass_fields__}
+        unknown = set(data) - set(fields)
+        if unknown:
+            raise ValueError(f"Unknown policy fields: {', '.join(sorted(unknown))}.")
+        return cls(**{fields[key]: value for key, value in data.items()})
+
+
+def _camel(name):
+    head, *rest = name.split("_")
+    return head + "".join(part.title() for part in rest)
 
 
 DEFAULT_POLICY = Policy()
