@@ -219,5 +219,55 @@ class BatchInvariants(unittest.TestCase):
             decide([proposal("p1"), proposal("p1")], snapshot(), portfolio(), {}, NOW)
 
 
+class ReviewRegressions(unittest.TestCase):
+    """Edge cases raised in the PR #4 review."""
+
+    def test_fractional_steps_never_exceed_the_budget(self):
+        # Before the fix, 13 of these combinations overspent by up to $0.0001: a fractional
+        # step's fee rounds up and can exceed its share of one contract's fee.
+        from governor.allocator import _walk_ladder
+        for step in (D(1), D("0.01")):
+            for price in ("0.05", "0.37", "0.5", "0.93"):
+                for k in range(1, 400):
+                    budget = D(k) * D("0.001731")
+                    fill = _walk_ladder([PriceLevel(price, "100000")], None, D("0.99"), budget, D(1), step)
+                    with self.subTest(step=step, price=price, budget=budget):
+                        self.assertLessEqual(fill.cost, budget)
+
+    def test_fractional_fill_is_the_largest_that_fits(self):
+        from governor.allocator import _walk_ladder
+        budget = D("0.005193")  # 0.01 contracts at 0.50 cost 0.0052 all-in, just over budget
+        fill = _walk_ladder([PriceLevel("0.5", "100")], None, D("0.9"), budget, D(1), D("0.01"))
+        self.assertEqual((fill.contracts, fill.cost), (D(0), D(0)))
+        fill = _walk_ladder([PriceLevel("0.5", "100")], None, D("0.9"), D("0.0052"), D(1), D("0.01"))
+        self.assertEqual((fill.contracts, fill.cost), (D("0.01"), D("0.0052")))
+
+    def test_snapshot_books_cannot_change_after_construction(self):
+        books = {"M1": book("M1", yes_asks=[("0.50", "1000")])}
+        snap = Snapshot("snap-1", NOW, books)
+        books["M2"] = book("M2", yes_asks=[("0.50", "1000")])
+        self.assertNotIn("M2", snap.books)
+        with self.assertRaises(TypeError):
+            snap.books["M3"] = books["M2"]
+
+    def test_decision_trace_is_deeply_read_only(self):
+        d = run([proposal("p1", p="0.9", budget="500")], snapshot(book("M1", yes_asks=[("0.50", "10000")])))["p1"]
+        with self.assertRaises(TypeError):
+            d.trace["stage"] = "tampered"
+        with self.assertRaises(TypeError):
+            d.trace["headroom"]["cashLimit"] = "0"
+        self.assertIsInstance(d.trace["fills"], tuple)
+        copy = d.to_dict()
+        copy["trace"]["headroom"]["cashLimit"] = "0"
+        self.assertNotEqual(d.trace["headroom"]["cashLimit"], "0")
+        json.dumps(d.to_dict())
+
+    def test_evaluation_time_in_any_offset_gives_identical_decisions(self):
+        snap = snapshot(book("M1", yes_asks=[("0.50", "1000")]))
+        eastern = NOW.astimezone(timezone(timedelta(hours=-4)))
+        utc = [d.to_dict() for d in decide([proposal("p1")], snap, portfolio(), {}, NOW)]
+        self.assertEqual([d.to_dict() for d in decide([proposal("p1")], snap, portfolio(), {}, eastern)], utc)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from . import rules
 from .fees import fee_per_contract, taker_fee
-from .models import Decision, _require_utc
+from .models import Decision, to_utc
 from .money import ZERO, round_down
 from .policy import DEFAULT_POLICY
 from .sizing import full_kelly, target_stake
@@ -72,9 +72,15 @@ def _walk_ladder(asks, ceiling, win_probability, budget, multiplier, step):
             break
         available = round_down(level.quantity, step)
         per_contract = level.price + fee_per_contract(level.price, multiplier)
-        # Lower bound: the per-contract fee never understates the fee of a larger fill.
+        def fits(count):
+            return level.price * count + taker_fee(count, level.price, multiplier) <= budget - spent
+        # Start from the per-contract estimate, then settle on the exact fee in both
+        # directions. For whole contracts the estimate never overshoots, but a fractional
+        # step's fee rounds up to $0.0001 and can exceed its share of one contract's fee.
         n = min(available, round_down((budget - spent) / per_contract, step))
-        while n + step <= available and level.price * (n + step) + taker_fee(n + step, level.price, multiplier) <= budget - spent:
+        while n > ZERO and not fits(n):
+            n -= step
+        while n + step <= available and fits(n + step):
             n += step
         if n > ZERO:
             fee = taker_fee(n, level.price, multiplier)
@@ -98,7 +104,7 @@ def decide(proposals, snapshot, portfolio, reliability, now, policy=DEFAULT_POLI
     ids = [p.proposal_id for p in proposals]
     if len(ids) != len(set(ids)):
         raise ValueError("A batch cannot contain the same proposal_id twice.")
-    _require_utc(now, "now")
+    now = to_utc(now, "now")
     equity = portfolio.equity
     decisions = {}
 

@@ -21,8 +21,13 @@ class Policy:
     agent_cap: Decimal = Decimal("0.15")
     event_group_cap: Decimal = Decimal("0.10")
     total_cap: Decimal = Decimal("0.30")
+    # Not read by the pure allocator. The loss breaker (planned governor/breaker.py) latches
+    # Portfolio.breaker_latched when equity falls this far below the UTC day-open value,
+    # and the allocator then rejects everything with lossBreakerLatched.
     daily_loss_limit: Decimal = Decimal("0.03")
     max_quote_age_seconds: int = 30
+    # Not read by the pure allocator. Worker-proposal parsing (planned governor/batch.py)
+    # sets Proposal.expires_at = received_at + this when a worker omits expiresAt.
     default_proposal_ttl_seconds: int = 60
     reliability_prior: Decimal = Decimal("0.5")
     reliability_prior_weight: int = 20

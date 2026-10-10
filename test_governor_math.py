@@ -121,30 +121,61 @@ class SizingTests(unittest.TestCase):
                                       reliability=D(1), requested_budget=D(10), kelly_fraction=D(1)), D(0))
 
 
+def forecast(agent, market, p, outcome=None, *, seconds=0, pid=None):
+    return Forecast(agent, market, pid or f"{agent}-{market}-{seconds}", NOW + timedelta(seconds=seconds), p, outcome)
+
+
 class ReliabilityTests(unittest.TestCase):
     def test_new_agent_starts_at_prior(self):
         score = score_agent("a1", [])
         self.assertEqual((score.score, score.resolved_count, score.brier), (D("0.5"), 0, None))
 
     def test_one_good_forecast_moves_score_a_little(self):
-        score = score_agent("a1", [Forecast("a1", "M1", "0.9", 1)])
+        score = score_agent("a1", [forecast("a1", "M1", "0.9", 1)])
         self.assertEqual(score.brier, D("0.01"))
         expected = D(20) / D(21) * D("0.5") + D(1) / D(21) * D("0.96")
         self.assertEqual(score.score, expected)
 
     def test_first_forecast_per_market_only_and_unresolved_ignored(self):
-        forecasts = [Forecast("a1", "M1", "0.9", 1), Forecast("a1", "M1", "0.1", 1),
-                     Forecast("a1", "M2", "0.7"), Forecast("a2", "M1", "0.2", 1)]
+        forecasts = [forecast("a1", "M1", "0.9", 1, seconds=0), forecast("a1", "M1", "0.1", 1, seconds=5),
+                     forecast("a1", "M2", "0.7"), forecast("a2", "M1", "0.2", 1)]
         scores = score_all(forecasts)
         self.assertEqual(scores["a1"].resolved_count, 1)
         self.assertEqual(scores["a1"].brier, D("0.01"))
         self.assertEqual(scores["a2"].brier, D("0.64"))
 
+    def test_earliest_submission_counts_regardless_of_input_order(self):
+        # PR #4 review: "first" used to mean first in the list, so storage order could change scores.
+        early, late = forecast("a1", "M1", "0.9", 1, seconds=0), forecast("a1", "M1", "0.1", 1, seconds=5)
+        self.assertEqual(score_agent("a1", [late, early]), score_agent("a1", [early, late]))
+        self.assertEqual(score_agent("a1", [late, early]).brier, D("0.01"))
+
+    def test_same_timestamp_breaks_ties_by_proposal_id(self):
+        a = forecast("a1", "M1", "0.9", 1, pid="p-a")
+        b = forecast("a1", "M1", "0.1", 1, pid="p-b")
+        self.assertEqual(score_agent("a1", [b, a]).brier, D("0.01"))
+
+    def test_forecast_requires_identity_and_aware_time(self):
+        for args in (("a1", "M1", "", NOW, "0.5"), ("a1", "M1", "p", datetime(2026, 10, 10), "0.5")):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                Forecast(*args)
+
     def test_terrible_forecaster_bottoms_out_but_stays_bounded(self):
-        forecasts = [Forecast("a1", f"M{i}", "0.99", 0) for i in range(200)]
+        forecasts = [forecast("a1", f"M{i}", "0.99", 0) for i in range(200)]
         score = score_agent("a1", forecasts)
         self.assertGreaterEqual(score.score, D(0))
         self.assertLess(score.score, D("0.05"))
+
+
+class UtcTests(unittest.TestCase):
+    def test_times_are_normalized_to_utc(self):
+        # PR #4 review: any aware timezone was accepted and kept as-is.
+        eastern = timezone(timedelta(hours=-4))
+        p = proposal(received_at=datetime(2026, 10, 10, 9, 59, tzinfo=eastern),
+                     expires_at=datetime(2026, 10, 10, 10, 1, tzinfo=eastern))
+        self.assertEqual(p.received_at, datetime(2026, 10, 10, 13, 59, tzinfo=timezone.utc))
+        self.assertIs(p.received_at.tzinfo, timezone.utc)
+        self.assertIs(OrderBook("M", "E", datetime(2026, 10, 10, 10, tzinfo=eastern)).taken_at.tzinfo, timezone.utc)
 
 
 if __name__ == "__main__":

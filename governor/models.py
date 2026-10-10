@@ -4,8 +4,9 @@ Prices are dollars per contract for the named side, with a $1 winning payout.
 `estimated_yes_probability` always describes YES, whatever side is proposed.
 """
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
+from types import MappingProxyType
 
 from .money import ONE, ZERO, to_decimal
 
@@ -22,9 +23,30 @@ def _require_id(value, name):
         raise ValueError(f"{name} must be a non-empty string of at most 200 characters.")
 
 
-def _require_utc(value, name):
+def to_utc(value, name):
+    """Require a timezone-aware datetime and normalize it to UTC, so stored and traced
+    times have one representation whatever offset the caller used."""
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise ValueError(f"{name} must be a timezone-aware datetime.")
+    return value.astimezone(timezone.utc)
+
+
+def _freeze(value):
+    """Read-only deep copy: dicts become mapping proxies and lists become tuples."""
+    if isinstance(value, dict) or isinstance(value, MappingProxyType):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value):
+    """Plain JSON-safe copy of a frozen structure."""
+    if isinstance(value, MappingProxyType):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    return value
 
 
 def _require_price(value, name):
@@ -60,8 +82,8 @@ class Proposal:
             ceiling = to_decimal(self.max_entry_price, "max_entry_price")
             _require_price(ceiling, "max_entry_price")
             _set(self, "max_entry_price", ceiling)
-        _require_utc(self.received_at, "received_at")
-        _require_utc(self.expires_at, "expires_at")
+        _set(self, "received_at", to_utc(self.received_at, "received_at"))
+        _set(self, "expires_at", to_utc(self.expires_at, "expires_at"))
         if self.expires_at <= self.received_at:
             raise ValueError("expires_at must be after received_at.")
 
@@ -102,7 +124,7 @@ class OrderBook:
     def __post_init__(self):
         _require_id(self.market_id, "market_id")
         _require_id(self.event_group, "event_group")
-        _require_utc(self.taken_at, "taken_at")
+        _set(self, "taken_at", to_utc(self.taken_at, "taken_at"))
         _set(self, "yes_bids", tuple(self.yes_bids))
         _set(self, "no_bids", tuple(self.no_bids))
         if not all(isinstance(level, PriceLevel) for level in self.yes_bids + self.no_bids):
@@ -137,14 +159,17 @@ class OrderBook:
 class Snapshot:
     snapshot_id: str
     taken_at: datetime
-    books: dict = field(default_factory=dict)  # market_id -> OrderBook
+    books: dict = field(default_factory=dict)  # market_id -> OrderBook, read-only after construction
 
     def __post_init__(self):
         _require_id(self.snapshot_id, "snapshot_id")
-        _require_utc(self.taken_at, "taken_at")
-        for market_id, book in self.books.items():
+        _set(self, "taken_at", to_utc(self.taken_at, "taken_at"))
+        # Copy so later changes to the caller's dict cannot alter a stored batch input.
+        books = dict(self.books)
+        for market_id, book in books.items():
             if not isinstance(book, OrderBook) or book.market_id != market_id:
                 raise ValueError("Snapshot books must be keyed by their own market_id.")
+        _set(self, "books", MappingProxyType(books))
 
 
 @dataclass(frozen=True)
@@ -203,13 +228,15 @@ class Decision:
     reliability: Decimal
     policy_version: str
     snapshot_id: str
-    trace: dict
+    trace: dict  # deep read-only after construction; to_dict() returns a plain copy
 
     def __post_init__(self):
         if self.outcome not in OUTCOMES:
             raise ValueError("Unknown decision outcome.")
         if (self.outcome == "rejected") != (self.contracts == ZERO):
             raise ValueError("Rejected decisions have zero contracts; approved ones have more.")
+        _set(self, "reason_codes", tuple(self.reason_codes))
+        _set(self, "trace", _freeze(self.trace))
 
     def to_dict(self):
         """JSON-safe form with exact decimal strings, for persistence and the API."""
@@ -220,5 +247,5 @@ class Decision:
             "side": self.side, "decision": self.outcome, "approvedBudgetUsd": text(self.approved_budget),
             "contracts": text(self.contracts), "limitPrice": text(self.limit_price),
             "reasonCodes": list(self.reason_codes), "reliabilityScore": text(self.reliability),
-            "policyVersion": self.policy_version, "snapshotId": self.snapshot_id, "trace": self.trace,
+            "policyVersion": self.policy_version, "snapshotId": self.snapshot_id, "trace": _thaw(self.trace),
         }
