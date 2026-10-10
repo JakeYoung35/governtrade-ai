@@ -2,6 +2,14 @@
 
 A separate local simulation based on the existing GovernPay design. Five market agents share one investment account and an independent server-side governance engine.
 
+## Kalshi demo execution
+
+The standalone `kalshi_demo.py` CLI connects to Kalshi's mock-funds demo exchange
+for balances, markets, quotes, limit orders, status and cancellation. See
+[KALSHI_DEMO.md](KALSHI_DEMO.md) for credentials, installation and first-order
+commands. This optional script has its own dependency and order journal; the
+browser simulation below remains separate.
+
 ## Run
 
 Requires Python 3.12 or later. No package installation is needed.
