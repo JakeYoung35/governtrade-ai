@@ -21,7 +21,7 @@ class StoreTests(unittest.TestCase):
  def tearDownClass(cls):
   with PostgresStore(URL).connect() as c:c.execute(f'DROP SCHEMA {cls.schema} CASCADE')
  def setUp(self):
-  with self.store.connect() as c:c.execute('TRUNCATE events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
+  with self.store.connect() as c:c.execute('TRUNCATE governor_requests,governor_breaker_events,governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
   self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def workspace(self):
   s=main_seed();a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{'dailyCap':100}}
@@ -71,3 +71,104 @@ class StoreTests(unittest.TestCase):
    with server.locked('main'):server.save('main',s)
    with server.locked('main'):self.assertEqual(server.read('main'),s)
    self.assertIn('demoAgents',server.read('demo'))
+ def governor_batch(self,s,batch_id='batch-1',ids=None):
+  # Real account/agent ids so the governor tables' foreign keys hold.
+  from datetime import datetime,timedelta,timezone
+  from decimal import Decimal as D
+  from governor import records
+  from governor.allocator import decide
+  from governor.models import Portfolio,Proposal
+  from governor.snapshot import build_snapshot
+  now=datetime.now(timezone.utc).replace(microsecond=0);a=s['accounts'][0]['id'];g=s['agentConfigs'][0]['id']
+  books=[{'id':'MKT','name':'MKT','eventTicker':'EVT','agent':'sports','venue':'kalshi','open':True,'executionReady':True,'feeMultiplier':1.0,'closeAt':None,'yesBids':[['0.36','500']],'noBids':[['0.63','500']],'asOf':now.isoformat()}]
+  ids=ids or [f'{batch_id}-{i}' for i in range(2)]
+  proposals=[Proposal(pid,g,'MKT',('yes','no')[i%2],D(('0.45','0.30')[i%2]),D(25),now,now+timedelta(seconds=60)) for i,pid in enumerate(ids)]
+  for p in proposals:records.record_forecast(s,p)
+  portfolio=Portfolio(D(1000),D(1000));decisions=decide(proposals,build_snapshot(books,snapshot_id='snap',taken_at=now),portfolio,{},now)
+  batch=records.batch_record(batch_id=batch_id,account_id=a,started_at=now,evaluated_at=now,snapshot_id='snap',books=books,proposals=proposals,portfolio=portfolio,reliability={})
+  records.record_batch(s,batch,decisions,now);return decisions
+ def test_governor_records_round_trip_and_replay(self):
+  from governor import records
+  s=self.workspace()
+  with self.store.session():decisions=self.governor_batch(s);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s)
+  self.assertEqual([d.to_dict() for d in records.replay(loaded['governorBatches'][0])],[d.to_dict() for d in decisions])
+ def test_governor_rows_written_once_and_outcomes_update(self):
+  from governor import records
+  s=self.workspace()
+  with self.store.session():self.governor_batch(s);self.store.save(s);self.store.save(s)
+  with self.store.session():
+   s=self.store.load();self.assertEqual(records.resolve_forecasts(s,{'MKT':1},records._time(s['governorBatches'][0]['startedAt'])),1);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorForecasts'][0]['outcome'],'1')
+  self.assertEqual((self.count('governor_batches'),self.count('governor_decisions'),self.count('governor_forecasts')),(1,2,1))
+ def test_governor_ids_reload_in_code_point_order(self):
+  # Locale collation would order "ab" before "a-c" and "a" before "B"; reloads must match state exactly.
+  s=self.workspace()
+  with self.store.session():self.governor_batch(s,ids=['ab','a-c','B']);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual([d['proposalId'] for d in loaded['governorDecisions']],['ab','a-c','B'])
+ def test_breaker_events_are_permanent_beyond_the_state_window(self):
+  from datetime import datetime,timedelta,timezone
+  from governor import records
+  s=self.workspace();a=s['accounts'][0]['id'];start=datetime.now(timezone.utc).replace(microsecond=0)
+  with self.store.session():
+   for i in range(records.BREAKER_EVENT_WINDOW+5):records.record_breaker_event(s,a,{'action':'breakerReset','at':(start+timedelta(seconds=i)).isoformat(),'n':i},f'ev-{i:03d}')
+   self.store.save(s);self.store.save(s)
+  # State holds all 205 until saved; a reload returns the newest window while Postgres keeps every row.
+  loaded=self.reload();self.assertEqual(loaded,{**s,'governorBreakerEvents':s['governorBreakerEvents'][:records.BREAKER_EVENT_WINDOW]})
+  self.assertEqual((len(loaded['governorBreakerEvents']),self.count('governor_breaker_events')),(records.BREAKER_EVENT_WINDOW,records.BREAKER_EVENT_WINDOW+5))
+ def test_earlier_forecast_replaces_the_stored_row(self):
+  from datetime import datetime,timedelta,timezone
+  from decimal import Decimal as D
+  from governor import records
+  from governor.models import Proposal
+  s=self.workspace();g=s['agentConfigs'][0]['id'];t=datetime.now(timezone.utc).replace(microsecond=0)
+  late=Proposal('late',g,'MKT','yes',D('0.4'),D(5),t+timedelta(seconds=5),t+timedelta(seconds=60))
+  early=Proposal('early',g,'MKT','yes',D('0.9'),D(5),t,t+timedelta(seconds=60))
+  with self.store.session():records.record_forecast(s,late);self.store.save(s)
+  with self.store.session():s=self.store.load();self.assertTrue(records.record_forecast(s,early));self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual([f['proposalId'] for f in loaded['governorForecasts']],['early'])
+  self.assertEqual(self.count('governor_forecasts'),1)
+ def test_reusing_an_id_outside_the_state_window_fails_loudly(self):
+  from datetime import datetime,timedelta,timezone
+  from governor import records
+  s=self.workspace();a=s['accounts'][0]['id'];t=datetime.now(timezone.utc).replace(microsecond=0)
+  batch=lambda i:{'id':f'batch-{i:03d}','accountId':a,'startedAt':(t+timedelta(seconds=i)).isoformat(),'policyVersion':'v','inputs':{}}
+  event=lambda i:{'action':'breakerReset','at':(t+timedelta(seconds=i)).isoformat()}
+  with self.store.session():
+   for i in range(records.BATCH_WINDOW+1):records.record_batch(s,batch(i),[],t)
+   for i in range(records.BREAKER_EVENT_WINDOW+1):records.record_breaker_event(s,a,event(i),f'ev-{i:03d}')
+   self.store.save(s)
+  for reuse in (lambda s:records.record_batch(s,batch(0),[],t),lambda s:records.record_breaker_event(s,a,event(0),'ev-000')):
+   with self.store.session():
+    s=self.store.load();reuse(s)  # the original left the loaded window, so state accepts the id
+    with self.assertRaises(Exception):self.store.save(s)
+  self.assertEqual((self.count('governor_batches'),self.count('governor_breaker_events')),(records.BATCH_WINDOW+1,records.BREAKER_EVENT_WINDOW+1))
+ def test_saving_governor_records_without_a_load_is_refused_clearly(self):
+  s=self.workspace()
+  with self.store.session():self.governor_batch(s);self.store.save(s)
+  with self.store.session():
+   with self.assertRaisesRegex(ValueError,'Load the workspace'):self.store.save(s)
+  self.assertEqual(self.count('governor_batches'),1)
+ def test_forecasts_missing_from_state_are_not_deleted(self):
+  # Only forecasts record_forecast replaced are deleted, never rows that are merely absent (e.g. a future load LIMIT).
+  from datetime import datetime,timedelta,timezone
+  from decimal import Decimal as D
+  from governor import records
+  from governor.models import Proposal
+  s=self.workspace();g=s['agentConfigs'][0]['id'];t=datetime.now(timezone.utc).replace(microsecond=0)
+  with self.store.session():
+   for m in ('M1','M2'):records.record_forecast(s,Proposal(f'f-{m}',g,m,'yes',D('0.5'),D(5),t,t+timedelta(seconds=60)))
+   self.store.save(s)
+  with self.store.session():s=self.store.load();s['governorForecasts'].pop();self.store.save(s)
+  self.assertEqual(self.count('governor_forecasts'),2)
+ def test_governor_requests_round_trip_and_status_updates(self):
+  from governor_service import GovernorService
+  s=self.workspace();g=s['agentConfigs'][0]['id'];service=GovernorService(self.w)
+  payload={'schemaVersion':1,'proposalId':'req-1','agentId':g,'marketId':'MKT','side':'yes','estimatedYesProbability':0.45,'maxBudgetUsd':5,'reasoning':'Round trip.'}
+  with self.store.session():code,body=service.submit(s,payload);self.assertEqual(code,202);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorRequests'][0]['status'],'queued')
+  with self.store.session():
+   s=self.store.load();s['governorRequests'][0].update(status='decided',decision='rejected');self.store.save(s);self.store.save(s)
+  loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorRequests'][0]['status'],'decided')
+  self.assertEqual(self.count('governor_requests'),1)
+

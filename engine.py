@@ -79,10 +79,13 @@ DEMO_AGENTS=[
  {'id':'demo-moderate','name':'Sports Analyst','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate']),'demoMarket':'sports','priorDailySpend':0},
  {'id':'demo-aggressive','name':'Momentum Trader','personality':'Aggressive','mandate':copy.deepcopy(PERSONALITIES['Aggressive']),'demoMarket':'crypto','priorDailySpend':80},
  {'id':'demo-new-market','name':'Discovery Agent','personality':'Moderate','mandate':{**PERSONALITIES['Moderate'],'newMarketApproval':True},'demoMarket':'politics','priorDailySpend':0}]
+# Governor records (see governor/records.py): loss-breaker state, batch inputs, decisions, forecasts.
+def governor_seed():return {'governor':{'breakers':{}},'governorBatches':[],'governorDecisions':[],'governorForecasts':[],'governorBreakerEvents':[],'governorReplacedForecasts':[],'governorRequests':[]}
 def main_seed():
- return {'schemaVersion':3,'mode':'main','clock':dt.datetime.now(dt.timezone.utc).isoformat(),'accounts':[],'agentConfigs':[],'permissions':copy.deepcopy(MAIN_DEFAULT),'safety':copy.deepcopy(SAFETY),'orders':[],'events':[],'keys':{},'chats':{},'positions':[]}
+ return {'schemaVersion':3,'mode':'main','clock':dt.datetime.now(dt.timezone.utc).isoformat(),'accounts':[],'agentConfigs':[],'permissions':copy.deepcopy(MAIN_DEFAULT),'safety':copy.deepcopy(SAFETY),'orders':[],'events':[],'keys':{},'chats':{},'positions':[],**governor_seed()}
 def migrate(s):
  if s.get('mode')!='main':return s
+ for k,v in governor_seed().items():s.setdefault(k,v)
  if s.get('schemaVersion')==2:
   old=s['permissions'];s['safety']={k:old.get(k,v) for k,v in SAFETY.items()};s['permissions']={k:old.get(k,v) for k,v in MAIN_DEFAULT.items()}
   for a in s['accounts']:

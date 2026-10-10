@@ -1,4 +1,4 @@
-import contextlib,json,os,secrets,threading,hmac
+import contextlib,json,os,secrets,threading,hmac,time
 from pathlib import Path
 from urllib.parse import urlsplit
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
@@ -6,6 +6,8 @@ from engine import seed,main_seed,action,AGENTS,migrate
 from workspace import Workspace
 from vault import Vault
 from store import PostgresStore
+from governor.records import compact_for_json
+from governor_service import GovernorService
 ROOT=Path(__file__).parent;DATA=ROOT/'.data';DATA.mkdir(exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
 # DATABASE_URL moves the main workspace to Postgres; the presenter demo always stays in local JSON.
 STORE=PostgresStore(os.environ['DATABASE_URL']) if os.environ.get('DATABASE_URL') else None
@@ -21,10 +23,12 @@ def read(env):
     return migrate(s) if env=='main' else (s if s.get('demoAgents') else seed())
 def save(env,s):
     if env=='main' and STORE:return STORE.save(s)
+    if env=='main':s=compact_for_json(s)  # no database in JSON mode, so bound the governor history kept on disk
     p=DATA/(env+'.json');tmp=p.with_suffix('.tmp');fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
     with os.fdopen(fd,'w') as f:json.dump(s,f,allow_nan=False)
     tmp.replace(p)
 WORKSPACE=Workspace(Vault(DATA),lambda s:save('main',s))
+GOVERNOR=GovernorService(WORKSPACE)
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw):super().__init__(*a,directory=str(ROOT/'static'),**kw)
     def valid_host(self):
@@ -33,9 +37,37 @@ class Handler(SimpleHTTPRequestHandler):
         raw=json.dumps(p,allow_nan=False).encode();self.send_response(code);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff');self.send_header('Set-Cookie',f'governtrade={SESSION}; HttpOnly; SameSite=Strict; Path=/');self.send_header('Content-Length',len(raw));self.end_headers();self.wfile.write(raw)
     def user_access(self):
         origin=self.headers.get('Origin');return (not origin or origin==f"http://{self.headers.get('Host')}") and f'governtrade={SESSION}' in self.headers.get('Cookie','') and hmac.compare_digest(self.headers.get('X-CSRF-Token',''),CSRF)
+    def worker_ok(self):
+        token=os.environ.get('GOVERNTRADE_AGENT_TOKEN','');return bool(token) and hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token)
+    def governor_get(self):
+        # Governed proposal API (governor/api.py describes the contract). The summary is a same-origin read like /api/state.
+        path=urlsplit(self.path).path
+        if path=='/api/governor/summary':
+            if self.headers.get('Origin') and self.headers['Origin']!=f"http://{self.headers.get('Host')}":return self.json(403,{'error':'Cross-origin access denied.'})
+            with locked('main'):return self.json(200,GOVERNOR.summary(read('main')))
+        if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
+        if path=='/api/governor/schema':return self.json(200,GOVERNOR.schema())
+        if path.startswith('/api/governor/proposals/'):
+            with locked('main'):found=GOVERNOR.lookup(read('main'),path.rsplit('/',1)[1])
+            return self.json(200,found) if found else self.json(404,{'error':'Unknown governorProposalId.'})
+        return self.json(404,{'error':'Not found.'})
+    def governor_submit(self):
+        if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
+        try:
+            size=int(self.headers.get('Content-Length',0))
+            if not 0<size<=100000:raise ValueError('Request too large or empty.')
+            payload=json.loads(self.rfile.read(size))
+        except ValueError:return self.json(400,{'error':'Invalid JSON.','errors':[{'field':'','error':'body must be one JSON object of at most 100 kB'}],'schema':'/api/governor/schema'})
+        try:
+            with locked('main'):
+                s=read('main');code,body=GOVERNOR.submit(s,payload)
+                if code==202:save('main',s)
+            self.json(code,body)
+        except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
     def response(self,env,s,result=None):return {'state':WORKSPACE.public(s) if env=='main' else s,'agents':AGENTS,'result':result,'csrf':CSRF}
     def do_GET(self):
         if not self.valid_host():return self.json(403,{'error':'Localhost access only.'})
+        if self.path.startswith('/api/governor/'):return self.governor_get()
         if self.path.startswith('/api/worker'):
             token=os.environ.get('GOVERNTRADE_AGENT_TOKEN','')
             if not token or not hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token):return self.json(403,{'error':'Worker access denied.'})
@@ -50,6 +82,7 @@ class Handler(SimpleHTTPRequestHandler):
         else:super().do_GET()
     def do_POST(self):
         if not self.valid_host():return self.json(403,{'error':'Localhost access only.'})
+        if self.path=='/api/governor/proposals':return self.governor_submit()
         proposal=self.path=='/api/agent/proposals'
         token=os.environ.get('GOVERNTRADE_AGENT_TOKEN','')
         if proposal:
@@ -63,7 +96,7 @@ class Handler(SimpleHTTPRequestHandler):
             with locked(env):
                 s=read(env)
                 if proposal:result=WORKSPACE.proposal(s,b)
-                elif env=='main':result=WORKSPACE.action(s,b)
+                elif env=='main':result=GOVERNOR.action(s,b) if str(b.get('action','')).startswith('governor-') else WORKSPACE.action(s,b)
                 elif b['action']=='reset':s=seed();result=None
                 else:result=action(s,b)
                 save(env,s)
@@ -72,6 +105,23 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError as e:self.json(400,{'error':str(e) if not isinstance(e,json.JSONDecodeError) else 'Invalid JSON.'})
         except (KeyError,StopIteration,TypeError,ImportError):self.json(400,{'error':'Invalid configuration or request. Check required fields and installed dependencies.'})
         except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
+SCORE_SECONDS=60  # how often settled markets are checked to score agent forecasts
+def governor_loop(seconds):
+    # Decide queued governed proposals in batches and score settled forecasts about once a minute.
+    # A failed pass leaves everything queued or unscored for the next one.
+    last_scored=0.
+    while True:
+        time.sleep(seconds)
+        try:
+            with locked('main'):
+                s=read('main');changed=False
+                if any(r['status']=='queued' for r in s.get('governorRequests',[])):GOVERNOR.run_batch(s);changed=True
+                if time.monotonic()-last_scored>=SCORE_SECONDS:
+                    last_scored=time.monotonic();changed=GOVERNOR.score_forecasts(s)>0 or changed
+                if changed:save('main',s)
+        except Exception as e:print(f'Governor pass failed ({type(e).__name__}); queued proposals stay queued.',flush=True)
 if __name__=='__main__':
     if STORE:applied=STORE.migrate();print('Postgres storage: '+(', '.join(applied)+' applied.' if applied else 'schema up to date.'),flush=True)
+    seconds=float(os.environ.get('GOVERNOR_BATCH_SECONDS','5'))
+    if seconds>0:threading.Thread(target=governor_loop,args=(seconds,),daemon=True).start()
     port=int(os.environ.get('PORT','3110'));print(f'GovernTrade AI: http://localhost:{port}',flush=True);ThreadingHTTPServer(('127.0.0.1',port),Handler).serve_forever()

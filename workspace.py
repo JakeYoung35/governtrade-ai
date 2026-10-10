@@ -45,7 +45,8 @@ class Workspace:
             except ValueError:event(s,'Submission result unknown; budget remains reserved. Reconcile with venue before retrying.','UNKNOWN',o['id'])
             self.refresh(s,a)
         return o
-    def proposal(self,s,b):
+    def proposal(self,s,b,governed=None):
+        # governed: exact {'contracts','limitPrice'} passed server-side by the portfolio governor, never by workers.
         if set(b)-{'agentId','marketId','direction','amount','reasoning','idempotencyKey'}:raise ValueError('Workers may only submit trade terms, never mandates, ceilings or approvals.')
         key=b.get('idempotencyKey','')
         if not isinstance(key,str) or not 1<=len(key)<=200:raise ValueError('An idempotencyKey is required.')
@@ -54,7 +55,7 @@ class Workspace:
         amount=b['amount']
         if type(amount) not in (int,float) or not math.isfinite(amount) or not 1<=amount<=1000000:raise ValueError('Use a finite all-in USD budget between $1 and $1,000,000.')
         if not isinstance(b.get('marketId'),str) or not isinstance(b.get('reasoning'),str) or len(b['reasoning'])>8000:raise ValueError('marketId and agent reasoning are required.')
-        a=next(x for x in s['accounts'] if x['id']==agent['accountId']);v=self.venue(a);m=v.get_quote(b['marketId'],b['direction']);o={'id':str(uuid.uuid4()),'agent':agent['id'],'accountId':a['id'],'market':m,'amount':round(amount,2),'direction':b['direction'],'request':b['reasoning'],'time':now(),'evaluations':[],'filled':False};s['orders'].insert(0,o);s['keys'][scoped]=o['id'];return self.evaluate(s,o)
+        a=next(x for x in s['accounts'] if x['id']==agent['accountId']);v=self.venue(a);m=v.get_quote(b['marketId'],b['direction']);o={'id':str(uuid.uuid4()),'agent':agent['id'],'accountId':a['id'],'market':m,'amount':round(amount,2),'direction':b['direction'],'request':b['reasoning'],'time':now(),'evaluations':[],'filled':False,**({'governedTerms':dict(governed)} if governed else {})};s['orders'].insert(0,o);s['keys'][scoped]=o['id'];return self.evaluate(s,o)
     def action(self,s,b):
         action=b['action'];s['clock']=now()
         if action=='refresh':
@@ -138,7 +139,8 @@ class Workspace:
             agent=next(x for x in s['agentConfigs'] if x['id']==b['agent']);s['chats'][agent['id']].append({'role':'customer','text':str(b['text'])[:8000]});s['chats'][agent['id']].append({'role':'agent','text':'Instruction saved for the agentic integration. No model was called and no trade was proposed. Your teammate’s worker will consume instructions and submit through the governed proposal API.'})
         else:raise ValueError('Unsupported user action.')
     def public(self,s):
-        public=copy.deepcopy(s)
+        # Governor records (batch inputs with order books, traces, forecasts) are large and not used by the UI.
+        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor')})
         for a in public['accounts']:
             a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'
