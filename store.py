@@ -15,7 +15,7 @@ MIGRATIONS=Path(__file__).parent/'migrations'
 LOCK_KEY=0x476f7654726164  # "GovTrad"
 EVENT_LIMIT=500  # Older events stay in the database; only recent ones are loaded into state.
 SAFETY_COLUMNS={'dailyLossCap':'daily_loss_cap','marketCap':'market_cap','exposureCap':'exposure_cap','slippage':'slippage_max'}
-TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion','governorBatches','governorDecisions','governorForecasts','governorBreakerEvents','governorReplacedForecasts'}
+TOP_FIELDS={'accounts','agentConfigs','permissions','safety','orders','events','keys','chats','schemaVersion','governorBatches','governorDecisions','governorForecasts','governorBreakerEvents','governorReplacedForecasts','governorRequests'}
 DECISION_ROW_FIELDS={'batchId','accountId','decidedAt'}  # columns of governor_decisions; the rest is payload
 BREAKER_EVENT_ROW_FIELDS={'id','accountId'}  # columns of governor_breaker_events; the rest is payload
 ACCOUNT_FIELDS={'id','name','venue','environment','subaccount','liveEnabled','credentialRef','credentialMasks','status','stale','error','ceiling','baseline','balance'}
@@ -37,6 +37,10 @@ VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
 ON CONFLICT (id) DO UPDATE SET market_id=EXCLUDED.market_id,market=EXCLUDED.market,amount=EXCLUDED.amount,reasoning=EXCLUDED.reasoning,status=EXCLUDED.status,decision=EXCLUDED.decision,
 committed=EXCLUDED.committed,filled=EXCLUDED.filled,automatic=EXCLUDED.automatic,venue_order_id=EXCLUDED.venue_order_id,quantity=EXCLUDED.quantity,actual_cost=EXCLUDED.actual_cost,extra=EXCLUDED.extra'''
 
+REQUEST_WINDOW=500  # matches governor_service.REQUEST_WINDOW: every queued request plus the newest decided ones
+REQUEST_UPSERT='''INSERT INTO governor_requests (governor_proposal_id,agent_id,account_id,proposal_id,status,received_at,payload)
+VALUES (%s,%s,%s,%s,%s,%s,%s)
+ON CONFLICT (governor_proposal_id) DO UPDATE SET status=EXCLUDED.status,payload=EXCLUDED.payload'''
 FORECAST_UPSERT='''INSERT INTO governor_forecasts (proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability,outcome,resolved_at)
 VALUES (%s,%s,%s,%s,%s,%s,%s)
 ON CONFLICT (proposal_id) DO UPDATE SET outcome=EXCLUDED.outcome,resolved_at=EXCLUDED.resolved_at'''
@@ -118,6 +122,9 @@ class PostgresStore:
                 for r in conn.execute('SELECT payload,batch_id,account_id,decided_at FROM governor_decisions ORDER BY decided_at DESC,proposal_id COLLATE "C" DESC LIMIT %s',(DECISION_WINDOW,))]
             s['governorForecasts']=[{'proposalId':r['proposal_id'],'agentId':r['agent_id'],'marketId':r['market_id'],'submittedAt':iso(r['submitted_at']),'estimatedYesProbability':r['p'],'outcome':r['o'],'resolvedAt':iso(r['resolved_at'])}
                 for r in q('SELECT proposal_id,agent_id,market_id,submitted_at,estimated_yes_probability::text AS p,outcome::text AS o,resolved_at FROM governor_forecasts ORDER BY submitted_at,proposal_id COLLATE "C"')]
+            s['governorRequests']=[r['payload'] for r in conn.execute('''SELECT payload FROM governor_requests WHERE status='queued' OR governor_proposal_id IN
+                (SELECT governor_proposal_id FROM governor_requests WHERE status<>'queued' ORDER BY received_at DESC,governor_proposal_id COLLATE "C" DESC LIMIT %s)
+                ORDER BY received_at DESC,governor_proposal_id COLLATE "C" DESC''',(REQUEST_WINDOW,))]
             s['governorBreakerEvents']=[{**r['payload'],'id':r['id'],'accountId':r['account_id']}
                 for r in conn.execute('SELECT id,account_id,payload FROM governor_breaker_events ORDER BY at DESC,id COLLATE "C" DESC LIMIT %s',(BREAKER_EVENT_WINDOW,))]
         seen.update(self.signatures(s));seen['loaded']=True;self.local.seen=seen
@@ -128,6 +135,7 @@ class PostgresStore:
               'governorBatches':{b['id'] for b in s.get('governorBatches',[])},'governorDecisions':{d['proposalId'] for d in s.get('governorDecisions',[])},
               'governorBreakerEvents':{e['id'] for e in s.get('governorBreakerEvents',[])}}
         seen.update({('forecast',f['proposalId']):signature(f) for f in s.get('governorForecasts',[])})
+        seen.update({('request',r['governorProposalId']):signature(r) for r in s.get('governorRequests',[])})
         seen.update({('chat',agent):len(messages) for agent,messages in s['chats'].items()})
         for kind,rows in (('account',s['accounts']),('agent',s['agentConfigs']),('order',s['orders'])):
             seen.update({(kind,x['id']):signature(x) for x in rows})
@@ -188,6 +196,9 @@ class PostgresStore:
             run(FORECAST_UPSERT,[(f['proposalId'],f['agentId'],f['marketId'],f['submittedAt'],Decimal(f['estimatedYesProbability']),
                 None if f['outcome'] is None else Decimal(f['outcome']),f['resolvedAt'])
                 for f in s.get('governorForecasts',[]) if seen.get(('forecast',f['proposalId']))!=signature(f)])
+            # Requests change status over time, so they upsert when changed (never collide on a repeat save).
+            run(REQUEST_UPSERT,[(r['governorProposalId'],r['agentId'],r['accountId'],r['proposalId'],r['status'],r['receivedAt'],Jsonb(r))
+                for r in reversed(s.get('governorRequests',[])) if seen.get(('request',r['governorProposalId']))!=signature(r)])
             run('INSERT INTO governor_breaker_events (id,at,account_id,action,payload) VALUES (%s,%s,%s,%s,%s)',
                 [(e['id'],e['at'],e['accountId'],e['action'],Jsonb({k:v for k,v in e.items() if k not in BREAKER_EVENT_ROW_FIELDS}))
                  for e in reversed(s.get('governorBreakerEvents',[])) if e['id'] not in seen.get('governorBreakerEvents',())])

@@ -64,14 +64,16 @@ class KalshiAdapter(VenueAdapter):
         self.base=('https://external-api.demo.kalshi.co' if environment=='sandbox' else 'https://external-api.kalshi.com')+'/trade-api/v2'
     def headers(self,method,url):
         from cryptography.hazmat.primitives import hashes,serialization
-        from cryptography.hazmat.primitives.asymmetric import padding,rsa
+        from cryptography.hazmat.primitives.asymmetric import ed25519,padding,rsa
         try:
             key=serialization.load_pem_private_key(self.credentials['private_key'].encode(),password=None)
-            if not isinstance(key,rsa.RSAPrivateKey):raise ValueError()
             timestamp=str(int(time.time()*1000));message=(timestamp+method+urlsplit(url).path).encode()
-            signature=key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.DIGEST_LENGTH),hashes.SHA256())
+            # Kalshi issues RSA and Ed25519 API keys; Ed25519 signs the message directly.
+            if isinstance(key,ed25519.Ed25519PrivateKey):signature=key.sign(message)
+            elif isinstance(key,rsa.RSAPrivateKey):signature=key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.DIGEST_LENGTH),hashes.SHA256())
+            else:raise ValueError()
             return {'KALSHI-ACCESS-KEY':self.credentials['key_id'],'KALSHI-ACCESS-TIMESTAMP':timestamp,'KALSHI-ACCESS-SIGNATURE':base64.b64encode(signature).decode()}
-        except (ValueError,KeyError,TypeError):raise VenueError('Kalshi requires an API key ID and an unencrypted RSA PEM private key.') from None
+        except (ValueError,KeyError,TypeError):raise VenueError('Kalshi requires an API key ID and an unencrypted RSA or Ed25519 PEM private key.') from None
     def get_markets(self,category):
         return self.request('GET','/markets?status=open&limit=100',public=True).get('markets',[])
     def _market(self,market_id):

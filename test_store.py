@@ -21,7 +21,7 @@ class StoreTests(unittest.TestCase):
  def tearDownClass(cls):
   with PostgresStore(URL).connect() as c:c.execute(f'DROP SCHEMA {cls.schema} CASCADE')
  def setUp(self):
-  with self.store.connect() as c:c.execute('TRUNCATE governor_breaker_events,governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
+  with self.store.connect() as c:c.execute('TRUNCATE governor_requests,governor_breaker_events,governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
   self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def workspace(self):
   s=main_seed();a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{'dailyCap':100}}
