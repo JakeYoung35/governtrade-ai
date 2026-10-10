@@ -1,6 +1,6 @@
 # Agent integration contract
 
-The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. The agentic teammate's worker owns model calls and market selection. The UI starts no AI worker; the server runs only the governor's batch loop.
+The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. The user's own LLM, or a trusted worker, owns model calls and market selection and submits through the governed API. The UI starts no AI worker; the server runs only the governor's batch loop.
 
 ## Public agent contract (version 2)
 
@@ -32,9 +32,23 @@ New agents are drafts until the user saves a mandate. Only user UI actions mutat
 
 Internal stored configs additionally contain `modelCredentialRef`, an opaque vault reference. Connected accounts have `credentialRef`. Neither reference nor plaintext credentials is returned to the browser/HTTP worker. The trusted local Python worker may load `Vault(DATA).get(reference)` using the same Keychain or master-key environment. Never give venue credentials or permission mutation tools to the language model. Do not log model keys.
 
+## Connect your own LLM (agent API tokens)
+
+The user hosts the LLM. GovernTrade never calls it: the user's LLM calls the governed API below, and every proposal goes through the portfolio governor, then the agent's mandate and the account ceiling.
+
+1. Create an agent with the provider **Your own LLM** (`provider` `self-hosted`). It needs only a model name for display; no provider key is stored or validated. Save its mandate as for any agent.
+2. On the agent's page, **Connect your LLM** > **Create API token**. The token (`gt_…`) is shown once; the server stores only its SHA-256. Creating a new token stops the old one, and **Revoke** or deleting the agent stops it too.
+3. The LLM sends `Authorization: Bearer <token>` on every request:
+   - `GET /api/governor/schema`: the proposal format. With an agent token, `agentId` and the example are filled in for that agent.
+   - `GET /api/governor/agent`: its agent's id, status, mandate, usage and whether it can propose right now (`canPropose`).
+   - `POST /api/governor/proposals`: one proposal. `agentId` may be omitted; a different agent's id is refused (403).
+   - `GET /api/governor/proposals/{governorProposalId}`: the governor's decision and the order. Another agent's proposals are 404.
+
+An agent token acts only for its own agent; `GET /api/worker` with it returns only that agent. On a hosted instance, agent tokens pass the access-password gate for these routes only, never for the UI. Any agent, including one with a provider key, can be given a token.
+
 ## Worker HTTP boundary
 
-Set `GOVERNTRADE_AGENT_TOKEN` to a random secret in both server and trusted worker environments. Use `Authorization: Bearer ...`. `GET /api/worker` returns public configurations and saved chat instructions. Consume only newly observed customer messages and persist your own cursor; do not repeatedly trade on historical messages. This token does not implement per-agent isolation; the trusted worker can submit for configured agents. Host is localhost only.
+For an operator-run worker that acts for several agents, set `GOVERNTRADE_AGENT_TOKEN` to a random secret in both server and trusted worker environments; prefer agent API tokens (above) for a user's own LLM. Use `Authorization: Bearer ...`. `GET /api/worker` returns public configurations and saved chat instructions. Consume only newly observed customer messages and persist your own cursor; do not repeatedly trade on historical messages. This token does not implement per-agent isolation; the trusted worker can submit for configured agents. Host is localhost only.
 
 ### Governed proposal contract (schema version 1)
 

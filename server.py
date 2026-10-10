@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
 from engine import seed,main_seed,action,AGENTS,migrate
-from workspace import Workspace
+from workspace import Workspace,TOKEN_PREFIX,agent_for_token,agent_profile
 from vault import Vault
 from store import PostgresStore
 from governor.records import compact_for_json
@@ -49,8 +49,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.json(410,{'error':'This route is retired on hosted instances. Submit through /api/governor/proposals.'});return False
         if not os.environ.get('GOVERNTRADE_ACCESS_PASSWORD'):
             self.json(503,{'error':'Hosted workspace is locked. Configure an access password before connecting accounts.'});return False
-        worker_path=path in ('/api/worker','/api/governor/proposals','/api/governor/schema') or path.startswith('/api/governor/proposals/')
-        if (worker_path and self.worker_ok()) or hosting.password_ok(self.headers.get('Authorization','')):return True
+        worker_path=path in ('/api/worker','/api/governor/proposals','/api/governor/schema','/api/governor/agent') or path.startswith('/api/governor/proposals/')
+        if (worker_path and (self.worker_ok() or self.agent_bearer())) or hosting.password_ok(self.headers.get('Authorization','')):return True
         self.send_response(401);self.send_header('WWW-Authenticate','Basic realm="GovernTrade private workspace", charset="UTF-8"');self.send_header('Cache-Control','no-store');self.send_header('Content-Length','0');self.end_headers();return False
     def do_HEAD(self):
         if self.entry_access():super().do_HEAD()
@@ -63,20 +63,38 @@ class Handler(SimpleHTTPRequestHandler):
         return self.same_origin() and f'governtrade={SESSION}' in self.headers.get('Cookie','') and hmac.compare_digest(self.headers.get('X-CSRF-Token',''),CSRF)
     def worker_ok(self):
         token=os.environ.get('GOVERNTRADE_AGENT_TOKEN','');return bool(token) and hmac.compare_digest(self.headers.get('Authorization',''),'Bearer '+token)
+    def agent_bearer(self):return self.headers.get('Authorization','').startswith('Bearer '+TOKEN_PREFIX)  # verified by caller()
+    def caller(self,s):
+        # Who is calling the governed API: ('operator',None) for the shared worker token, which may act for any agent;
+        # ('agent',agent) for an agent API token (the user's own LLM), which acts only for its agent; None otherwise.
+        if self.worker_ok():return ('operator',None)
+        agent=agent_for_token(s,self.headers.get('Authorization',''))
+        return ('agent',agent) if agent else None
     def governor_get(self):
         # Governed proposal API (governor/api.py describes the contract). The summary is a same-origin read like /api/state.
         path=urlsplit(self.path).path
         if path=='/api/governor/summary':
             if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             with locked('main'):return self.json(200,GOVERNOR.summary(read('main')))
-        if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
-        if path=='/api/governor/schema':return self.json(200,GOVERNOR.schema())
-        if path.startswith('/api/governor/proposals/'):
-            with locked('main'):found=GOVERNOR.lookup(read('main'),path.rsplit('/',1)[1])
-            return self.json(200,found) if found else self.json(404,{'error':'Unknown governorProposalId.'})
+        if not (self.worker_ok() or self.agent_bearer()):return self.json(403,{'error':'Worker access denied.'})
+        with locked('main'):
+            s=read('main');who=self.caller(s)
+            if who is None:return self.json(403,{'error':'Unknown or revoked agent API token.'})
+            agent=who[1]
+            if path=='/api/governor/schema':
+                schema=GOVERNOR.schema()
+                if agent:schema={**schema,'agentId':agent['id'],'example':{**schema['example'],'agentId':agent['id']}}  # ready to copy
+                return self.json(200,schema)
+            if path=='/api/governor/agent':
+                if agent is None:return self.json(400,{'error':'Call this with an agent API token to see that agent.'})
+                return self.json(200,agent_profile(s,agent))
+            if path.startswith('/api/governor/proposals/'):
+                found=GOVERNOR.lookup(s,path.rsplit('/',1)[1])
+                if found and agent and found['agentId']!=agent['id']:found=None  # an agent token sees only its own
+                return self.json(200,found) if found else self.json(404,{'error':'Unknown governorProposalId.'})
         return self.json(404,{'error':'Not found.'})
     def governor_submit(self):
-        if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
+        if not (self.worker_ok() or self.agent_bearer()):return self.json(403,{'error':'Worker access denied.'})
         try:
             size=int(self.headers.get('Content-Length',0))
             if not 0<size<=100000:raise ValueError('Request too large or empty.')
@@ -84,7 +102,13 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:return self.json(400,{'error':'Invalid JSON.','errors':[{'field':'','error':'body must be one JSON object of at most 100 kB'}],'schema':'/api/governor/schema'})
         try:
             with locked('main'):
-                s=read('main');code,body=GOVERNOR.submit(s,payload)
+                s=read('main');who=self.caller(s)
+                if who is None:return self.json(403,{'error':'Unknown or revoked agent API token.'})
+                agent=who[1]
+                if agent and isinstance(payload,dict):
+                    payload.setdefault('agentId',agent['id'])  # an agent token implies its agent
+                    if payload['agentId']!=agent['id']:return self.json(403,{'error':'This API token can only submit proposals for its own agent.'})
+                code,body=GOVERNOR.submit(s,payload)
                 if code==202:save('main',s)
             self.json(code,body)
         except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
@@ -93,8 +117,13 @@ class Handler(SimpleHTTPRequestHandler):
         if not self.entry_access():return
         if self.path.startswith('/api/governor/'):return self.governor_get()
         if self.path.startswith('/api/worker'):
-            if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
-            s=read('main');return self.json(200,{'agents':WORKSPACE.public(s)['agentConfigs'],'instructions':s['chats']})
+            if not (self.worker_ok() or self.agent_bearer()):return self.json(403,{'error':'Worker access denied.'})
+            with locked('main'):
+                s=read('main');who=self.caller(s)
+                if who is None:return self.json(403,{'error':'Unknown or revoked agent API token.'})
+                mine=lambda agent_id:who[1] is None or agent_id==who[1]['id']  # an agent token sees only its agent
+                return self.json(200,{'agents':[a for a in WORKSPACE.public(s)['agentConfigs'] if mine(a['id'])],
+                                      'instructions':{k:v for k,v in s['chats'].items() if mine(k)}})
         if self.path.startswith('/api/state'):
             if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             env='demo' if 'demo' in self.path else 'main'

@@ -85,6 +85,7 @@ Implemented:
 - Individual agent mandates.
 - Account-wide safety controls.
 - Governed trade-proposal and execution endpoints.
+- Bring your own LLM: create an agent API token and your LLM reads the proposal format and submits trades through the governor ([docs](docs/agent-config.md#connect-your-own-llm-agent-api-tokens)).
 - Trade activity and decision history.
 - An isolated simulated demo.
 
@@ -96,7 +97,7 @@ Still in development:
 - Reliable reconciliation of uncertain order submissions.
 - Authenticated venue acceptance testing.
 
-**Chat currently saves your instructions; it does not independently call an AI model or start trading.** A trusted worker can submit proposals through the governed API.
+**Chat currently saves your instructions; it does not independently call an AI model or start trading.** Your own LLM, connected with an agent API token, or a trusted worker submits proposals through the governed API.
 
 This is a local prototype, not a production-certified financial service.
 

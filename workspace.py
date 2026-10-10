@@ -1,9 +1,29 @@
 """User management and the narrow, governed agent integration boundary."""
-import copy, datetime, math, uuid
+import copy, datetime, hashlib, hmac, math, secrets, uuid
 from adapters import adapter,ADAPTERS,VenueError,now
 from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling,PERSONALITIES
 from vault import masks
 from providers import validate_model_key,catalog
+
+# A self-hosted agent is the user's own LLM: it calls the governed API with an agent API token, and the app never
+# calls a model or stores a provider key for it.
+SELF_HOSTED='self-hosted'
+TOKEN_PREFIX='gt_'  # agent API tokens; only their SHA-256 is stored, the token is shown to the user once
+def token_hash(token):return hashlib.sha256(token.encode()).hexdigest()
+def agent_for_token(s,authorization):
+    """The non-deleted agent whose API token is in this Authorization header, or None."""
+    if not isinstance(authorization,str) or not authorization.startswith('Bearer '+TOKEN_PREFIX):return None
+    digest=token_hash(authorization[len('Bearer '):])
+    return next((a for a in s['agentConfigs'] if a.get('status')!='deleted' and a.get('apiToken') and hmac.compare_digest(a['apiToken']['hash'],digest)),None)
+def agent_profile(s,agent):
+    """What an agent's own LLM may know about itself (GET /api/governor/agent): identity, mandate and the API to use.
+    No credentials, balances of other agents, or anything it could change."""
+    account=next((a for a in s['accounts'] if a['id']==agent['accountId']),{})
+    ready=agent.get('status')=='active' and bool(agent.get('mandate')) and account.get('status')=='connected' and s['permissions'].get('automation') is not False
+    return {'agentId':agent['id'],'name':agent['name'],'status':agent['status'],'canPropose':ready,'personality':agent.get('personality'),
+            'mandate':agent.get('mandate'),'usage':__import__('engine').usage(s,agent['accountId'],agent['id']),
+            'venue':{'name':account.get('venue'),'environment':account.get('environment')},
+            'api':{'schema':'GET /api/governor/schema','submit':'POST /api/governor/proposals','lookup':'GET /api/governor/proposals/{governorProposalId}'}}
 
 class Workspace:
     def __init__(self,vault,persist=lambda s:None):self.vault=vault;self.persist=persist
@@ -100,12 +120,22 @@ class Workspace:
             agent=next((x for x in s['agentConfigs'] if x['id']==b.get('id')),None)
             if agent and agent['status']=='deleted':raise ValueError('Deleted agents cannot be edited.')
             if agent and agent['accountId']!=a['id']:raise ValueError('Create a new agent to change its bound account.')
-            key=b.get('modelKey') or (self.vault.get(agent['modelCredentialRef'])['api_key'] if agent and agent.get('modelCredentialRef') else '')
-            validate_model_key(b['provider'],b['model'],key)
-            reference=self.vault.put({'api_key':key},agent.get('modelCredentialRef') if agent else None)
-            if not agent:
-                agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
-            agent.update(name=b['name'],accountId=a['id'],provider=b['provider'],model=b['model'],modelValidated=True,modelCredentialRef=reference,modelKeyMask=masks({'key':key})['key'])
+            if b.get('provider')==SELF_HOSTED:
+                # Nothing to validate: the user's LLM proves itself with the agent API token on every request.
+                model=b.get('model').strip() if isinstance(b.get('model'),str) else ''
+                if not 1<=len(model)<=100:raise ValueError('Name the model your LLM runs (1–100 characters).')
+                if agent and agent.get('modelCredentialRef'):self.vault.delete(agent['modelCredentialRef'])
+                if not agent:
+                    agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
+                agent.pop('modelCredentialRef',None)
+                agent.update(name=b['name'],accountId=a['id'],provider=SELF_HOSTED,model=model,modelValidated=True,modelKeyMask=None)
+            else:
+                key=b.get('modelKey') or (self.vault.get(agent['modelCredentialRef'])['api_key'] if agent and agent.get('modelCredentialRef') else '')
+                validate_model_key(b['provider'],b['model'],key)
+                reference=self.vault.put({'api_key':key},agent.get('modelCredentialRef') if agent else None)
+                if not agent:
+                    agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
+                agent.update(name=b['name'],accountId=a['id'],provider=b['provider'],model=b['model'],modelValidated=True,modelCredentialRef=reference,modelKeyMask=masks({'key':key})['key'])
             s['chats'].setdefault(agent['id'],[]);event(s,'Agent saved; a user mandate is required before trading.');return {'agentId':agent['id']}
         elif action=='mandate-save':
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
@@ -122,7 +152,18 @@ class Workspace:
             if agent['status']=='deleted':raise ValueError('Deleted agents cannot resume.')
             agent['status']=b['status']
         elif action=='agent-delete':
-            agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted';self.vault.delete(agent['modelCredentialRef']);agent.pop('modelCredentialRef',None)
+            agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted';agent.pop('apiToken',None)
+            if agent.get('modelCredentialRef'):self.vault.delete(agent.pop('modelCredentialRef'))
+        elif action=='agent-token':
+            # The user's own LLM authenticates with this token. Creating one replaces (and so stops) any earlier token.
+            agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
+            if agent['status']=='deleted':raise ValueError('Deleted agents cannot be connected.')
+            if b.get('op')=='revoke':
+                agent.pop('apiToken',None);event(s,f"API token revoked for {agent['name']}. Its LLM can no longer submit proposals.");return {'agentId':agent['id']}
+            if b.get('op')!='create':raise ValueError('Choose create or revoke.')
+            token=TOKEN_PREFIX+secrets.token_urlsafe(32)
+            agent['apiToken']={'hash':token_hash(token),'last4':token[-4:],'createdAt':now()}
+            event(s,f"API token created for {agent['name']}; any earlier token stopped working.");return {'agentId':agent['id'],'token':token}
         elif action=='permissions':
             values=validate_permissions(b['values']);scope=b.get('scope','defaults')
             if scope=='defaults':s['permissions'].update(values)
@@ -154,6 +195,7 @@ class Workspace:
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'
         for a in public['agentConfigs']:
             a.pop('modelCredentialRef',None);a['usage']=__import__('engine').usage(s,a['accountId'],a['id'])
+            token=a.pop('apiToken',None);a['apiToken']={'last4':token['last4'],'createdAt':token['createdAt']} if token else None  # never the hash
         public['providers']=catalog();public['personalities']=copy.deepcopy(PERSONALITIES)
         public['accounts']=[a for a in public['accounts'] if a['venue']=='kalshi']
         visible={a['id'] for a in public['accounts']}
