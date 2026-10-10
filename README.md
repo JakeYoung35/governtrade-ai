@@ -125,7 +125,7 @@ When Google sign-in is configured, each person signs in with their own Google ac
 
 The backend verifies Google's signed identity token and derives the workspace identity from Google's stable account ID. Email addresses and IDs submitted by the browser cannot select another person's workspace. Existing local or shared workspace data is not imported automatically.
 
-For Render deployment, see [Render hosting setup](docs/render-hosting.md). Personal workspaces require Google sign-in configuration, a persistent disk and a server encryption key. Legacy global worker tokens are disabled in personal-workspace mode until user-scoped worker authorization is implemented. Local development and password-protected private shared workspaces remain available when Google sign-in is not configured.
+For Render deployment, see [Render hosting setup](docs/render-hosting.md). Personal workspaces require Auth0 or Google sign-in configuration, an email allowlist (`GOVERNTRADE_ALLOWED_EMAILS`), a persistent disk and a server encryption key. Legacy global worker tokens are disabled in personal-workspace mode until user-scoped worker authorization is implemented. Local development and password-protected private shared workspaces remain available when Google sign-in is not configured.
 
 ## Documentation
 
