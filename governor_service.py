@@ -5,6 +5,7 @@
                positions, check the loss breaker, decide, record the batch, then send approved stakes
                through Workspace.proposal, so mandates, account ceilings and user approval still apply
   lookup()     a request's status, the governor's decision and the downstream order
+  score_forecasts()  record outcomes of settled markets, so agent reliability (and sizing) updates
 
 State: s["governorRequests"], newest first; every queued request plus the newest REQUEST_WINDOW others.
 The governor package stays pure; this module is where it meets the venue, the clock and the app state.
@@ -228,6 +229,43 @@ class GovernorService:
         order.update(governorProposalId=decision.proposal_id, governorEventGroup=event_group)
         request.update(status="submitted", orderId=order["id"])
 
+    # Scoring.
+
+    def score_forecasts(self, s):
+        """Resolve forecasts whose markets have settled. Returns how many were scored.
+
+        Each account's venue reports outcomes for that account's agents only, so demo and live
+        results never mix. Every forecast is scored, including rejected proposals', which keeps
+        reliability independent of the governor's own decisions.
+        """
+        now = self.clock()
+        accounts = {a["id"]: a for a in s["accounts"] if a.get("status") != "disconnected"}
+        agent_account = {a["id"]: a["accountId"] for a in s["agentConfigs"] if a.get("accountId") in accounts}
+        pending = {}
+        for f in s.get("governorForecasts", []):
+            if f["outcome"] is None and f["agentId"] in agent_account:
+                pending.setdefault(agent_account[f["agentId"]], set()).add(f["marketId"])
+        scored = 0
+        for account_id in sorted(pending):
+            try:
+                venue = self.workspace.venue(accounts[account_id])
+            except (ValueError, KeyError):
+                continue
+            outcomes = {}
+            for market_id in sorted(pending[account_id]):
+                try:
+                    value = venue.get_market_outcome(market_id)["outcome"]
+                    if value is None:
+                        continue
+                    outcome = to_decimal(value, "outcome")
+                except (ValueError, KeyError):
+                    continue  # unavailable or unreadable this time; try again on the next pass
+                if ZERO <= outcome <= 1:
+                    outcomes[market_id] = outcome
+            agents = {agent for agent, account in agent_account.items() if account == account_id}
+            scored += records.resolve_forecasts(s, outcomes, now, agents=agents) if outcomes else 0
+        return scored
+
     # Operator controls and dashboard.
 
     def reset_breaker(self, s, account_id, reason, operator="Account owner"):
@@ -250,6 +288,8 @@ class GovernorService:
         kind = b.get("action")
         if kind == "governor-run-batch":
             return self.run_batch(s)
+        if kind == "governor-score":
+            return {"scored": self.score_forecasts(s)}
         if kind == "governor-reset-breaker":
             if not isinstance(b.get("accountId"), str) or not isinstance(b.get("reason"), str):
                 raise ValueError("A breaker reset needs an accountId and a reason.")

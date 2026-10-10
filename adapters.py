@@ -42,6 +42,8 @@ class VenueAdapter(ABC):
     @abstractmethod
     def get_orderbook(self,market_id):pass
     @abstractmethod
+    def get_market_outcome(self,market_id):pass
+    @abstractmethod
     def get_balance_positions(self):pass
     @abstractmethod
     def place_order(self,order):pass
@@ -103,6 +105,14 @@ class KalshiAdapter(VenueAdapter):
                 raise VenueError('Kalshi returned malformed order book levels.')
             return [[str(p),str(q)] for p,q in rows]
         return {'id':market_id,'name':m.get('title',market_id),'eventTicker':m['event_ticker'],'agent':category,'venue':self.venue,'open':m.get('status')=='active','executionReady':supported,'feeMultiplier':multiplier,'closeAt':m.get('close_time'),'yesBids':levels(book.get('yes_dollars')),'noBids':levels(book.get('no_dollars')),'asOf':now()}
+    def get_market_outcome(self,market_id):
+        # The YES settlement value in dollars once Kalshi settles a market (1 YES, 0 NO, 0.5 for a tie), else None.
+        # Used to score every forecast, including those the governor rejected, so reliability is not biased.
+        m=self.request('GET','/markets/'+quote(market_id,safe=''),public=True)['market']
+        settled=m.get('status') in ('settled','finalized')
+        value=m.get('settlement_value_dollars')
+        if settled and value is None:value={'yes':'1','no':'0'}.get(m.get('result'))
+        return {'id':market_id,'status':m.get('status'),'outcome':str(value) if settled and value is not None else None}
     def get_balance_positions(self):
         scope='subaccount='+str(self.subaccount)
         b=self.request('GET','/portfolio/balance?'+scope)

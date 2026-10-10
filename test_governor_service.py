@@ -30,6 +30,8 @@ class GovernedVenue(FakeVenue):
         self.books = {MARKET: ("0.50", "0.52", "1000"), OTHER: ("0.47", "0.55", "1000")}  # yes ask, no ask, depth
         self.quote_override = None
         self.positions = []
+        self.outcomes = {}  # market_id -> YES settlement value once settled
+        self.broken = set()
 
     def get_orderbook(self, market_id):
         if market_id not in self.books:
@@ -45,6 +47,12 @@ class GovernedVenue(FakeVenue):
         yes_ask, no_ask, _ = self.books.get(k, ("0.50", "0.50", "0"))
         quote["price"] = self.quote_override or float(yes_ask if d == "Yes" else no_ask)
         return quote
+
+    def get_market_outcome(self, market_id):
+        if market_id in self.broken:
+            raise VenueError("kalshi request failed.")
+        outcome = self.outcomes.get(market_id)
+        return {"id": market_id, "status": "finalized" if outcome is not None else "active", "outcome": outcome}
 
     def get_balance_positions(self):
         balance = super().get_balance_positions()
@@ -213,6 +221,74 @@ class BatchTests(ServiceTest):
         self.assertTrue(summary["recentDecisions"])
         self.assertTrue(all("trace" not in d for d in summary["recentDecisions"]))
         self.assertNotIn("inputs", json.dumps(summary))
+
+
+class ScoringTests(ServiceTest):
+    """Step 10: settled markets score every forecast and feed reliability back into sizing."""
+
+    def test_adapter_reports_the_yes_settlement_value_only_once_settled(self):
+        from adapters import KalshiAdapter
+        cases = [({"status": "finalized", "result": "yes", "settlement_value_dollars": "1.0000"}, "1.0000"),
+                 ({"status": "settled", "result": "no"}, "0"),
+                 ({"status": "finalized", "result": "", "settlement_value_dollars": "0.5000"}, "0.5000"),
+                 ({"status": "active", "result": ""}, None), ({"status": "determined", "result": "yes"}, None)]
+        for market, expected in cases:
+            adapter = KalshiAdapter({})
+            adapter.request = lambda *a, market=market, **k: {"market": market}
+            with self.subTest(market=market):
+                self.assertEqual(adapter.get_market_outcome("M")["outcome"], expected)
+
+    def test_settled_markets_score_forecasts_including_rejected_ones(self):
+        self.submit()
+        self.submit(agentId="agent-2", proposalId="p-2", side="no", estimatedYesProbability=0.3)  # loses the conflict
+        self.submit(proposalId="p-3", marketId=OTHER, estimatedYesProbability=0.6)
+        self.service.run_batch(self.s)
+        self.venue.outcomes[MARKET] = "1.0000"
+        self.assertEqual(self.service.score_forecasts(self.s), 2)
+        scored = {f["agentId"]: f for f in self.s["governorForecasts"] if f["outcome"] is not None}
+        self.assertEqual(set(scored), {"agent", "agent-2"})
+        self.assertIsNone(next(f for f in self.s["governorForecasts"] if f["marketId"] == OTHER)["outcome"])
+        self.assertEqual(self.service.score_forecasts(self.s), 0)  # already scored; never rewritten
+
+    def test_reliability_feeds_back_into_the_next_sizing(self):
+        def sized():
+            code, body = self.submit(proposalId=f"size-{len(self.s['governorRequests'])}", marketId=OTHER,
+                                     estimatedYesProbability=0.65, maxBudgetUsd=100)
+            self.service.run_batch(self.s)
+            return D(next(d for d in self.s["governorDecisions"] if d["proposalId"] == body["governorProposalId"])["trace"]["targetStake"])
+        before = sized()
+        for i in range(10):  # ten confident, correct calls on settled markets
+            market = f"SETTLED-{i}"
+            self.service.submit(self.s, submission(proposalId=f"hist-{i}", marketId=market, estimatedYesProbability=0.95))
+            self.venue.outcomes[market] = "1.0000"
+        self.service.run_batch(self.s)
+        self.service.score_forecasts(self.s)
+        self.s["orders"].clear()
+        self.venue.positions = []
+        self.assertGreater(records.reliability(self.s)["agent"].score, D("0.5"))
+        self.assertGreater(sized(), before)
+
+    def test_each_account_scores_only_its_own_agents(self):
+        live = GovernedVenue()
+        self.s["accounts"].append({**self.s["accounts"][0], "id": "live-account", "environment": "live"})
+        self.s["agentConfigs"][1]["accountId"] = "live-account"
+        self.workspace.venue = lambda account: live if account["id"] == "live-account" else self.venue
+        self.submit()
+        self.submit(agentId="agent-2", proposalId="p-2")
+        self.venue.outcomes[MARKET] = "1.0000"  # demo settled YES; the live market has not settled
+        self.assertEqual(self.service.score_forecasts(self.s), 1)
+        outcomes = {f["agentId"]: f["outcome"] for f in self.s["governorForecasts"]}
+        self.assertEqual(outcomes, {"agent": "1.0000", "agent-2": None})
+
+    def test_unavailable_or_unreadable_results_are_skipped(self):
+        self.submit()
+        self.submit(proposalId="p-3", marketId=OTHER)
+        self.venue.broken.add(MARKET)
+        self.venue.outcomes[OTHER] = "not-a-number"
+        self.assertEqual(self.service.score_forecasts(self.s), 0)
+        self.venue.broken.clear()
+        self.venue.outcomes.update({MARKET: "0", OTHER: "0.5000"})
+        self.assertEqual(self.service.action(self.s, {"action": "governor-score"}), {"scored": 2})
 
 
 class SigningTests(unittest.TestCase):

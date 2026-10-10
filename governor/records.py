@@ -178,8 +178,12 @@ def record_forecast(s, proposal):
     return True
 
 
-def resolve_forecasts(s, outcomes, now):
-    """Set outcomes (market_id -> 1 YES, 0 NO, 0.5 tie) on unresolved forecasts. Returns the count."""
+def resolve_forecasts(s, outcomes, now, agents=None):
+    """Set outcomes (market_id -> 1 YES, 0 NO, 0.5 tie) on unresolved forecasts. Returns the count.
+
+    agents limits scoring to those agent ids, so a result read from one venue environment (demo or
+    live) never scores another environment's forecasts.
+    """
     resolved_at = _iso(now, "now")
     parsed = {}
     for market_id, value in outcomes.items():
@@ -189,7 +193,7 @@ def resolve_forecasts(s, outcomes, now):
         parsed[market_id] = outcome
     count = 0
     for f in s.get("governorForecasts", []):
-        if f["outcome"] is None and f["marketId"] in parsed:
+        if f["outcome"] is None and f["marketId"] in parsed and (agents is None or f["agentId"] in agents):
             f["outcome"], f["resolvedAt"] = _plain(parsed[f["marketId"]]), resolved_at
             count += 1
     return count

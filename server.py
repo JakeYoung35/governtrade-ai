@@ -105,15 +105,21 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError as e:self.json(400,{'error':str(e) if not isinstance(e,json.JSONDecodeError) else 'Invalid JSON.'})
         except (KeyError,StopIteration,TypeError,ImportError):self.json(400,{'error':'Invalid configuration or request. Check required fields and installed dependencies.'})
         except Exception:self.json(500,{'error':'Operation failed. Credentials and provider responses are not included in errors.'})
+SCORE_SECONDS=60  # how often settled markets are checked to score agent forecasts
 def governor_loop(seconds):
-    # Decide queued governed proposals in batches. A failed batch leaves them queued for the next run.
+    # Decide queued governed proposals in batches and score settled forecasts about once a minute.
+    # A failed pass leaves everything queued or unscored for the next one.
+    last_scored=0.
     while True:
         time.sleep(seconds)
         try:
             with locked('main'):
-                s=read('main')
-                if any(r['status']=='queued' for r in s.get('governorRequests',[])):GOVERNOR.run_batch(s);save('main',s)
-        except Exception as e:print(f'Governor batch failed ({type(e).__name__}); queued proposals stay queued.',flush=True)
+                s=read('main');changed=False
+                if any(r['status']=='queued' for r in s.get('governorRequests',[])):GOVERNOR.run_batch(s);changed=True
+                if time.monotonic()-last_scored>=SCORE_SECONDS:
+                    last_scored=time.monotonic();changed=GOVERNOR.score_forecasts(s)>0 or changed
+                if changed:save('main',s)
+        except Exception as e:print(f'Governor pass failed ({type(e).__name__}); queued proposals stay queued.',flush=True)
 if __name__=='__main__':
     if STORE:applied=STORE.migrate();print('Postgres storage: '+(', '.join(applied)+' applied.' if applied else 'schema up to date.'),flush=True)
     seconds=float(os.environ.get('GOVERNOR_BATCH_SECONDS','5'))
