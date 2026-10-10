@@ -80,7 +80,7 @@ class Workspace:
             if not a:a={'id':str(uuid.uuid4()),'ceiling':{'dailyCap':s['permissions']['dailyCap']}};s['accounts'].append(a)
             a.update(name=str(b.get('name',kind))[:100],venue='kalshi',environment=environment,connectionType=kind,subaccount=subaccount,liveEnabled=environment=='live',credentialRef=reference,status='disconnected',stale=True,error=None)
             if credentials:a['credentialMasks']=masks(credentials)
-            a.pop('balance',None);event(s,'Kalshi connection saved. Test connection to sync balances.')
+            a.pop('balance',None);event(s,'Kalshi connection saved.');return {'accountId':a['id']}
         elif action=='account-test':
             a=next(x for x in s['accounts'] if x['id']==b['id']);self.refresh(s,a)
         elif action=='account-disconnect':
