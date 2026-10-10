@@ -148,7 +148,13 @@ class BatchTests(ServiceTest):
         self.assertEqual(self.venue.calls, 1)
         order = next(o for o in self.s["orders"] if o["id"] == view["order"]["id"])
         self.assertEqual((order["governorProposalId"], order["governorEventGroup"]), (view["governorProposalId"], "KXNFLGAME-26OCT18BALCLE"))
-        self.assertLessEqual(D(str(order["amount"])), D(view["decision"]["approvedBudgetUsd"]))
+        # Authorization rounds up to whole cents; the governed order itself costs at most the approval.
+        from governor.fees import taker_fee
+        approved = D(view["decision"]["approvedBudgetUsd"])
+        self.assertLess(D(str(order["amount"])) - approved, D("0.01"))
+        contracts, limit = D(order["governedTerms"]["contracts"]), D(order["governedTerms"]["limitPrice"])
+        self.assertEqual(contracts, D(view["decision"]["contracts"]))  # exactly what the governor approved
+        self.assertLessEqual(limit * contracts + taker_fee(contracts, limit), approved)
         self.assertEqual(len(self.s["governorBatches"]), 1)
         self.assertEqual(records.replay(self.s["governorBatches"][0])[0].to_dict()["decision"], "approved")
 
@@ -289,6 +295,45 @@ class ScoringTests(ServiceTest):
         self.venue.broken.clear()
         self.venue.outcomes.update({MARKET: "0", OTHER: "0.5000"})
         self.assertEqual(self.service.action(self.s, {"action": "governor-score"}), {"scored": 2})
+
+
+class GovernedOrderTests(ServiceTest):
+    """Orders buy exactly the governor's contracts at its limit price (live check: 4 approved had filled 3)."""
+
+    def placed(self, order):
+        from adapters import KalshiAdapter
+        adapter, sent = KalshiAdapter({}), []
+        adapter.request = lambda method, path, body=None, public=False: sent.append(body) or {"order_id": "x"}
+        adapter.place_order(order)
+        return sent[0]
+
+    def test_place_order_sends_the_governed_count_and_limit(self):
+        market = {"id": MARKET, "price": 0.37, "feeMultiplier": 1.0}
+        yes = self.placed({"id": "o1", "market": market, "direction": "Yes", "amount": 1.5,
+                           "governedTerms": {"contracts": "4", "limitPrice": "0.36"}})
+        self.assertEqual((yes["count"], yes["price"], yes["side"], yes["time_in_force"]), ("4", "0.36", "bid", "immediate_or_cancel"))
+        no = self.placed({"id": "o2", "market": market, "direction": "No", "amount": 1.5,
+                          "governedTerms": {"contracts": "2", "limitPrice": "0.64"}})
+        self.assertEqual((no["count"], no["price"], no["side"]), ("2", "0.36", "ask"))  # NO at 0.64 is YES at 0.36
+        legacy = self.placed({"id": "o3", "market": {**market, "price": 0.5}, "direction": "Yes", "amount": 10})
+        self.assertEqual(legacy["count"], "18")  # unchanged: $10 / (0.50 + 0.03 conservative fee reserve)
+
+    def test_governed_terms_fit_the_cent_rounded_amount(self):
+        from governor.fees import taker_fee
+        code, body = self.submit()
+        self.service.run_batch(self.s)
+        order = next(o for o in self.s["orders"] if o.get("governorProposalId") == body["governorProposalId"])
+        terms = order["governedTerms"]
+        contracts, limit = D(terms["contracts"]), D(terms["limitPrice"])
+        self.assertGreaterEqual(contracts, 1)
+        self.assertLessEqual(limit * contracts + taker_fee(contracts, limit), D(str(order["amount"])))
+        decision = next(d for d in self.s["governorDecisions"] if d["proposalId"] == body["governorProposalId"])
+        self.assertLessEqual(contracts, D(decision["contracts"]))
+
+    def test_workers_cannot_set_governed_terms(self):
+        with self.assertRaisesRegex(ValueError, "Workers may only submit trade terms"):
+            self.workspace.proposal(self.s, {"agentId": "agent", "marketId": MARKET, "direction": "Yes", "amount": 5,
+                                             "reasoning": "x", "idempotencyKey": "k", "governedTerms": {"contracts": "99"}})
 
 
 class SigningTests(unittest.TestCase):

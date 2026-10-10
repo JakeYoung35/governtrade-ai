@@ -157,11 +157,17 @@ class KalshiAdapter(VenueAdapter):
         return {'externalDailySpend':daily,'cash':cash,'reserved':reserved,'reservedSource':reserved_source,'positionValue':value,'exposure':exposure,'realizedPnl':round(realized,4),'unrealizedPnl':round(value-open_cost,4),'positions':positions,'asOf':now(),'source':'Kalshi Demo' if self.environment=='sandbox' else 'Kalshi Live','mock':False,'subaccount':self.subaccount,'pnlMethod':'Venue realized positions; settlement fallback without duplicate tickers; marked open cost; trading fees expensed in realized P/L from positions/fills.'}
     def place_order(self,order):
         m=order['market'];price=Decimal(str(m['price']));budget=Decimal(str(order['amount']))
-        # Worst-case quadratic taker fee occurs at 0.5. Round UP per contract,
-        # plus one cent per contract for balance rounding. Never rely on price improvement.
-        fee=Decimal(str(math.ceil(.0175*m['feeMultiplier']*100)/100+.01))
-        count=int(budget/(price+fee))
-        if count<1:raise VenueError('Budget cannot cover one contract and conservative fee reserve.')
+        terms=order.get('governedTerms')
+        if terms:
+            # Governor-sized order: exactly the approved contracts, limited to the governor's price. Never raise here
+            # (evaluate treats errors as an unknown result); a market above the limit simply leaves the IOC unfilled.
+            count=int(Decimal(terms['contracts']));price=Decimal(terms['limitPrice'])
+        else:
+            # Worst-case quadratic taker fee occurs at 0.5. Round UP per contract,
+            # plus one cent per contract for balance rounding. Never rely on price improvement.
+            fee=Decimal(str(math.ceil(.0175*m['feeMultiplier']*100)/100+.01))
+            count=int(budget/(price+fee))
+            if count<1:raise VenueError('Budget cannot cover one contract and conservative fee reserve.')
         yes_price=price if order['direction']=='Yes' else Decimal('1')-price
         response=self.request('POST','/portfolio/events/orders',{'ticker':m['id'],'client_order_id':order['id'],'side':'bid' if order['direction']=='Yes' else 'ask','count':str(count),'price':str(yes_price),'time_in_force':'immediate_or_cancel','self_trade_prevention_type':'taker_at_cross','cancel_order_on_pause':True,'subaccount':self.subaccount})
         return response

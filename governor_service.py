@@ -17,8 +17,9 @@ from engine import event
 from governor import api, records
 from governor.allocator import decide
 from governor.breaker import check, reset
+from governor.fees import taker_fee
 from governor.models import Exposure, Portfolio, Proposal
-from governor.money import CENT, ZERO, round_down, to_decimal
+from governor.money import CENT, ZERO, round_up, to_decimal
 from governor.policy import DEFAULT_POLICY
 from governor.snapshot import build_snapshot, order_book
 
@@ -153,7 +154,7 @@ class GovernorService:
             request = by_id[d.proposal_id]
             request.update(status="decided", batchId=batch["id"], decision=d.outcome)
             if d.outcome != "rejected":
-                self._execute(s, request, d, venue, snapshot.books[d.market_id].event_group)
+                self._execute(s, request, d, venue, snapshot.books[d.market_id])
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
     def _portfolio(self, s, account, balance, snapshot, now):
@@ -203,10 +204,19 @@ class GovernorService:
                                           "yes" if o["direction"] == "Yes" else "no", to_decimal(o["amount"], "amount")))
         return exposures
 
-    def _execute(self, s, request, decision, venue, event_group):
-        amount = round_down(decision.approved_budget, CENT)
+    def _execute(self, s, request, decision, venue, book):
+        # The app authorizes whole cents, so round the approval up (by under a cent). The order itself buys exactly
+        # the approved contracts at the limit price, so actual spending never exceeds the governor's approval.
+        amount = round_up(decision.approved_budget, CENT)
         if amount < 1:
             request.update(status="skipped", note="The approved stake is below the app's $1 order minimum.")
+            return
+        # Safety net: the contracts at the limit price plus exact fees must fit the authorized amount.
+        contracts, limit = decision.contracts, decision.limit_price
+        while contracts > ZERO and limit * contracts + taker_fee(contracts, limit, book.fee_multiplier) > amount:
+            contracts -= book.contract_step
+        if contracts <= ZERO:
+            request.update(status="skipped", note="No whole contract fits the cent-rounded approved stake.")
             return
         direction = "Yes" if decision.side == "yes" else "No"
         try:
@@ -222,11 +232,12 @@ class GovernorService:
             order = self.workspace.proposal(s, {
                 "agentId": decision.agent_id, "marketId": decision.market_id, "direction": direction,
                 "amount": float(amount), "reasoning": request["reasoning"],
-                "idempotencyKey": f"governor:{decision.proposal_id}"})
+                "idempotencyKey": f"governor:{decision.proposal_id}"},
+                governed={"contracts": str(contracts), "limitPrice": str(limit)})
         except (ValueError, KeyError, StopIteration) as exc:
             request.update(status="executionFailed", note=(str(exc) or "Execution failed.")[:300])
             return
-        order.update(governorProposalId=decision.proposal_id, governorEventGroup=event_group)
+        order.update(governorProposalId=decision.proposal_id, governorEventGroup=book.event_group)
         request.update(status="submitted", orderId=order["id"])
 
     # Scoring.
