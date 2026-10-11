@@ -48,6 +48,16 @@ class StoreTests(unittest.TestCase):
   self.assertEqual(loaded['accounts'][0]['ceiling'],{})  # copied from the old workspace cap, not chosen by the user
   with self.store.session():self.store.save(loaded)
   self.assertEqual(migrate(self.reload())['rules']['previous'],previous)  # the hints survive a save (JSON-safe)
+ def test_percentage_account_ceilings_and_mandates_survive_a_reload(self):
+  s=self.workspace();s['accounts'][0]['ceiling']={'dailyPercent':7.5}
+  s['agentConfigs'][0]['mandate']={'autoLimitPercent':2,'dailyCapPercent':5,'minimumPercent':20,'newMarketApproval':True}
+  with self.store.session():self.store.save(s)
+  loaded=migrate(self.reload())
+  self.assertEqual(loaded['accounts'][0]['ceiling'],{'dailyPercent':7.5})  # a stricter account ceiling must not be lost
+  self.assertEqual(loaded['agentConfigs'][0]['mandate'],s['agentConfigs'][0]['mandate'])
+  loaded['accounts'][0]['ceiling']={}
+  with self.store.session():self.store.save(loaded)
+  self.assertEqual(migrate(self.reload())['accounts'][0]['ceiling'],{})  # removing it sticks
  def test_round_trip_is_lossless(self):
   s=self.workspace()
   s['chatAllowances']={s['agentConfigs'][0]['id']:{'replyIndex':1,'amounts':['20']}}

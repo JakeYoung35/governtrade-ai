@@ -129,6 +129,7 @@ class MigrationTests(unittest.TestCase):
         s = migrate(v1_workspace(balance=None))
         self.assertEqual(s["rules"]["previous"]["dailySpendingPercent"], trading_rules.DEFAULTS["dailySpendingPercent"])
         self.assertIsNone(s["agentConfigs"][0]["mandate"])
+        self.assertEqual(s["agentConfigs"][0]["status"], "paused")  # never shown Active without a mandate
 
     def test_a_pre_rules_workspace_reviews_the_starting_positions(self):
         old = main_seed()
@@ -246,6 +247,21 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.check(order, "Cumulative market budget")["reason"], "Your per-market cap is $0.00 of this account.")
         self.assertEqual(self.check(order, "Total daily spending")["outcome"], "BLOCK")
         self.assertEqual(self.w.public(self.s)["accounts"][0]["effectiveCeiling"]["dailyCap"], 0)
+
+    def test_a_tiny_account_keeps_its_sub_cent_limits(self):
+        trading_rules.fixture(self.s, {"dailyLossPercent": 0.1})  # 0.1% of $4 is $0.004, not a $0.00 limit
+        self.v.cash = 4
+        self.w.refresh(self.s, self.a)
+        self.assertEqual(self.check(self.propose(amount=1), "Daily loss")["outcome"], "ALLOW")
+        self.assertEqual(trading_rules.dollars(0.1, 4), 0.004)
+
+    def test_disconnected_accounts_do_not_count_toward_the_workspace_ceiling(self):
+        from engine import workspace_ceiling
+        trading_rules.fixture(self.s)  # 20% daily spending ceiling
+        self.w.refresh(self.s, self.a)  # $1,000 connected
+        stale = {"id": "old", "status": "disconnected", "balance": {"cash": 9000, "reserved": 0, "positionValue": 0}}
+        self.s["accounts"].append(stale)
+        self.assertEqual(workspace_ceiling(self.s), 200)  # 20% of $1,000, not of $10,000
 
     def test_the_mandate_scales_with_the_account(self):
         trading_rules.fixture(self.s)

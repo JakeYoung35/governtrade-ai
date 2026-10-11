@@ -94,7 +94,9 @@ class PostgresStore:
             s['permissions']={'automation':settings['automation']}
             for r in q('SELECT * FROM accounts ORDER BY created_at,id'):
                 a={**r['extra'],**present(r,{'id':'id','name':'name','venue':'venue','environment':'environment','subaccount':'subaccount','liveEnabled':'live_enabled','credentialRef':'credential_ref','credentialMasks':'credential_masks','status':'status','stale':'stale','balance':'balance'}),'error':r['error']}
-                a['ceiling']={} if r['ceiling_daily_cap'] is None else {'dailyCap':r['ceiling_daily_cap']}
+                # An account's own percentage ceiling (trading rules schema 2) lives in extra; ceiling_daily_cap holds
+                # an older dollar ceiling, which trading_rules.migrate() converts once.
+                a['ceiling']=r['extra'].get('ceiling') or ({} if r['ceiling_daily_cap'] is None else {'dailyCap':r['ceiling_daily_cap']})
                 if r['baseline_day']:a['baseline']={'day':r['baseline_day'].isoformat(),'equity':r['baseline_equity']}
                 s['accounts'].append(a)
             for r in q('SELECT * FROM agents ORDER BY created_at,id'):
@@ -180,7 +182,8 @@ class PostgresStore:
                 cur.execute('UPDATE workspace_settings SET automation=%s,schema_version=%s,extra=%s',
                     (settings['automation'],settings['schemaVersion'],Jsonb(settings['extra'])))
             run(ACCOUNT_UPSERT,[(a['id'],a['name'],a['venue'],a['environment'],a.get('subaccount',0),a.get('liveEnabled',False),a.get('credentialRef'),j(a.get('credentialMasks')),a['status'],a.get('stale',True),a.get('error'),
-                (a.get('ceiling') or {}).get('dailyCap'),(a.get('baseline') or {}).get('day'),(a.get('baseline') or {}).get('equity'),j(a.get('balance')),Jsonb({k:v for k,v in a.items() if k not in ACCOUNT_FIELDS}))
+                (a.get('ceiling') or {}).get('dailyCap'),(a.get('baseline') or {}).get('day'),(a.get('baseline') or {}).get('equity'),j(a.get('balance')),
+                Jsonb({**{k:v for k,v in a.items() if k not in ACCOUNT_FIELDS},**({'ceiling':a['ceiling']} if (a.get('ceiling') or {}).get('dailyPercent') is not None else {})}))
                 for a in s['accounts'] if changed('account',a)])
             run(AGENT_UPSERT,[(g['id'],g['accountId'],g['name'],g['provider'],g['model'],g.get('modelValidated',False),g.get('modelCredentialRef'),g.get('modelKeyMask'),g['status'],g.get('personality'),
                 *((g['mandate'][k] for k in ('autoLimit','dailyCap','minimum','newMarketApproval')) if g.get('mandate') and 'autoLimit' in g['mandate'] else (None,)*4),

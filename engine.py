@@ -104,7 +104,7 @@ def workspace_ceiling(s):
  # (0 until trading rules are set). The demo keeps its scripted dollar ceiling.
  if s.get('mode')!='main':return s['permissions']['dailyCap']
  if not trading_rules.ready(s):return 0
- total=sum(v for v in (trading_rules.account_value(a) for a in s['accounts'] if a.get('status')!='removed') if v)
+ total=sum(v for v in (trading_rules.account_value(a) for a in s['accounts'] if a.get('status') not in ('removed','disconnected')) if v)  # a disconnected account's balance is stale
  return trading_rules.dollars(trading_rules.values(s)['dailySpendingPercent'],total)
 def ceiling(s,account):
  # One account's daily ceiling: the workspace share, or the account's own lower share, of its current value.

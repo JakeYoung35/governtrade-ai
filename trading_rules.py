@@ -154,8 +154,9 @@ def account_value(record):
 
 
 def dollars(percent, value):
-    """percent of value, in dollars (0 if the value is unknown)."""
-    return round((percent or 0) / 100 * (value or 0), 2)
+    """percent of value, in dollars (0 if the value is unknown). Not rounded to cents: a limit is compared exactly,
+    so 0.1% of a $4 account is $0.004, not a $0.00 limit that blocks everything. Displays round."""
+    return round((percent or 0) / 100 * (value or 0), 6)
 
 
 def _percent(amount, value, low=0.0, high=100.0):
@@ -200,6 +201,8 @@ def migrate(s):
         if mandate and "autoLimit" in mandate:
             account = next((a for a in s.get("accounts", []) if a["id"] == agent.get("accountId")), None)
             value = account_value(account)  # unknown or $0: there is nothing to convert against
+            if not value and agent.get("status") == "active":
+                agent["status"] = "paused"  # it cannot trade without a mandate; the owner sets one and resumes it
             agent["mandate"] = None if not value else {
                 "autoLimitPercent": _percent(mandate.get("autoLimit"), value) or 0,
                 "dailyCapPercent": _percent(mandate.get("dailyCap"), value) or 0,
