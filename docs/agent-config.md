@@ -14,7 +14,7 @@ Because the app answers chat messages itself, `GET /api/worker` no longer return
 
 ## Public agent contract (version 2)
 
-Agent fields: `id`, `name`, `accountId` (connected Kalshi Demo/Live), `provider`, `model`, `modelValidated`, `modelKeyMask`, `status` (`draft`, `active`, `paused`, `deleted`), `personality` (`Conservative`, `Moderate`, `Aggressive`, or null before setup), `mandate` (null before setup), and `usage` (`daily`, `market`, `held`, `lastAmount`). There is no market/category field. The provider/model catalog lives exclusively in `static/providers.json`; saving validates the selected model through the provider's authenticated read-only API.
+Agent fields: `id`, `name`, `accountId` (connected Kalshi Demo/Live), `provider`, `model`, `modelValidated`, `modelKeyMask`, `status` (`draft`, `active`, `paused`, `deleted`), `personality` (always null: mandates have no presets; older agents may still carry a label), `mandate` (null before setup), and `usage` (`daily`, `market`, `held`, `lastAmount`). There is no market/category field. The provider/model catalog lives exclusively in `static/providers.json`; saving validates the selected model through the provider's authenticated read-only API.
 
 The mandate schema is:
 
@@ -100,7 +100,7 @@ The legacy `/api/agent/proposals` route uses `direction`, `amount`, and `idempot
 
 Every execution evaluates the agent's own mandate and the account-wide safety ceiling independently. `evaluations[].layers` reports `agent_mandate`, `account_ceiling` and `execution`; each check also names its layer. Approval can satisfy automatic-limit and new-market authorization, but never daily spending, minimum reserves, kill switch or execution hard blocks. The first successful fill, not a denied proposal, establishes market history for that agent.
 
-Trading Permissions contains the shared daily spending ceiling and all-agent kill switch. Turning the switch off physically pauses active agents; turning it on does not silently resume them. Connection ceilings may be stricter. Existing hard market/exposure/slippage/loss protections remain in `engine.SAFETY`. Daily usage is UTC and conservatively counts authorized amounts. External Kalshi turnover and unresolved submissions are included. Observed loss is equity drawdown from the first daily sync, not a complete historical accounting ledger. Connections using different keys for the same underlying account are not automatically deduplicated.
+Trading Rules contains the owner's trading rules ([trading-rules.md](trading-rules.md)), including the shared daily spending ceiling, and the all-agent kill switch. Turning the switch off physically pauses active agents; turning it on does not silently resume them. Connection ceilings may be stricter. The per-market, open exposure and daily loss dollar limits are the owner's trading rules; `engine.SAFETY` is used only by the presenter demo. Daily usage is UTC and conservatively counts authorized amounts. External Kalshi turnover and unresolved submissions are included. Observed loss is equity drawdown from the first daily sync, not a complete historical accounting ledger. Connections using different keys for the same underlying account are not automatically deduplicated.
 
 Balance sources and subaccount reserve fallback are documented in README.md. All model/provider keys are validated on save using authenticated model retrieval, without running inference.
 
