@@ -64,7 +64,7 @@ class Workspace:
         action=b['action'];s['clock']=now()
         if action=='refresh':
             for a in s['accounts']:
-                if a['venue']=='kalshi' and a['status']!='disconnected':self.refresh(s,a)
+                if a['venue']=='kalshi' and a['status'] not in ('disconnected','removed') and a.get('credentialRef'):self.refresh(s,a)
         elif action=='account-save':
             kind=b.get('connectionType');environment={'kalshi-demo':'sandbox','kalshi-live':'live'}.get(kind)
             if not environment:raise ValueError('Choose Kalshi Demo or Kalshi Live.')
@@ -72,6 +72,7 @@ class Workspace:
             subaccount=b.get('subaccount',0)
             if type(subaccount)!=int or not 0<=subaccount<=63:raise ValueError('Subaccount must be an integer from 0 to 63.')
             a=next((a for a in s['accounts'] if a['id']==b.get('id')),None);credentials=b.get('credentials')
+            if a and a.get('status')=='removed':raise ValueError('This Kalshi connection was removed.')
             if a and (a['environment']!=environment or a.get('subaccount',0)!=subaccount):raise ValueError('Create a new connection to change Demo/Live or subaccount; audit history keeps its original account.')
             if not a and not credentials:raise ValueError('Kalshi credentials are required.')
             if a and not credentials and not a.get('credentialRef'):raise ValueError('Kalshi credentials are required. Enter the API key ID and private key.')
@@ -88,16 +89,26 @@ class Workspace:
             a.pop('balance',None);event(s,'Kalshi connection saved.');return {'accountId':a['id']}
         elif action=='account-test':
             a=next(x for x in s['accounts'] if x['id']==b['id'])
+            if a.get('status')=='removed':raise ValueError('This Kalshi connection was removed.')
             if not a.get('credentialRef'):raise ValueError('This account has no saved credentials. Add keys under Settings / rotate keys.')
             self.refresh(s,a)
         elif action=='account-disconnect':
             a=next(x for x in s['accounts'] if x['id']==b['id'])
+            if a.get('status')=='removed':raise ValueError('This Kalshi connection was removed.')
             if any(o.get('committed') and o['accountId']==a['id'] and o['status'] in ('submitted','open','submission unknown') for o in s['orders']):raise ValueError('Reconcile outstanding submissions at the venue before disconnecting.')
             self.vault.delete(a['credentialRef']);a.update(status='disconnected',stale=True);a.pop('credentialRef',None)
             for agent in s['agentConfigs']:
                 if agent['accountId']==a['id']:agent['status']='paused'
+        elif action=='account-remove':
+            a=next(x for x in s['accounts'] if x['id']==b['id'])
+            if a.get('status')=='removed':raise ValueError('This Kalshi connection was removed.')
+            if a.get('credentialRef'):raise ValueError('Disconnect this account before removing it.')
+            if any(g['accountId']==a['id'] and g['status']!='deleted' for g in s['agentConfigs']):raise ValueError('Delete the agents that use this account first.')
+            if any(o.get('committed') and o['accountId']==a['id'] and o['status'] in ('submitted','open','submission unknown') for o in s['orders']):raise ValueError('Reconcile outstanding submissions at the venue before removing this account.')
+            a['status']='removed';event(s,'Kalshi connection removed.')
         elif action=='agent-save':
             a=next(x for x in s['accounts'] if x['id']==b['accountId'])
+            if a.get('status')=='removed':raise ValueError('This Kalshi connection was removed.')
             if a['venue']!='kalshi' or a['status']!='connected':raise ValueError('Choose a connected Kalshi Demo or Live account.')
             if not isinstance(b.get('name'),str) or not b['name'].strip() or len(b['name'])>100:raise ValueError('Enter an agent name of 1–100 characters.')
             agent=next((x for x in s['agentConfigs'] if x['id']==b.get('id')),None)
@@ -158,7 +169,7 @@ class Workspace:
         for a in public['agentConfigs']:
             a.pop('modelCredentialRef',None);a['usage']=__import__('engine').usage(s,a['accountId'],a['id'])
         public['providers']=catalog();public['personalities']=copy.deepcopy(PERSONALITIES)
-        public['accounts']=[a for a in public['accounts'] if a['venue']=='kalshi']
+        public['accounts']=[a for a in public['accounts'] if a['venue']=='kalshi' and a.get('status')!='removed']
         visible={a['id'] for a in public['accounts']}
         public['agentConfigs']=[a for a in public['agentConfigs'] if a['accountId'] in visible]
         return public
