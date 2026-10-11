@@ -15,6 +15,7 @@ from google.auth import crypt, jwt
 import authentication as auth
 import server
 import tenancy
+import trading_rules
 
 
 class IdentityTests(unittest.TestCase):
@@ -130,9 +131,10 @@ class PersonalHttpTests(unittest.TestCase):
         for cookie,secret,other in ((alice,'alice-secret','bob-secret'),(bob,'bob-secret','alice-secret')):
             status,_,body=self.call('GET','/api/state?main',cookie)
             self.assertEqual(status,200);self.assertIn(secret,json.dumps(body));self.assertNotIn(other,json.dumps(body))
-        self.assertEqual(self.call('POST','/api/action',alice,ac,{'action':'permissions','values':{'dailyCap':42},'userId':bid})[0],200)
-        self.assertEqual(self.call('GET','/api/state?main',alice)[2]['state']['permissions']['dailyCap'],42)
-        self.assertNotEqual(self.call('GET','/api/state?main',bob)[2]['state']['permissions']['dailyCap'],42)
+        rules={**trading_rules.LEGACY_VALUES,'dailySpendingCeiling':42}
+        self.assertEqual(self.call('POST','/api/action',alice,ac,{'action':'rules-save','values':rules,'userId':bid})[0],200)
+        self.assertEqual(self.call('GET','/api/state?main',alice)[2]['state']['rules']['values']['dailySpendingCeiling'],42)
+        self.assertIsNone(self.call('GET','/api/state?main',bob)[2]['state']['rules']['values'])  # Bob's rules are his own
         self.assertEqual(self.call('POST','/api/action',bob,ac,{'action':'permissions','values':{'dailyCap':1}})[0],403)
         with tenancy.activate(server.DATA,aid,server.tenant_save):
             self.assertEqual(server.workspace().vault.get('same-reference')['api_key'],'alice-secret')
@@ -147,12 +149,12 @@ class PersonalHttpTests(unittest.TestCase):
         alice,ac,aid=self.login('alice');bob,bc,bid=self.login('bob')
         def set_cap(args):
             cookie,csrf,cap=args
-            return self.call('POST','/api/action',cookie,csrf,{'action':'permissions','values':{'dailyCap':cap}})[0]
+            return self.call('POST','/api/action',cookie,csrf,{'action':'rules-save','values':{**trading_rules.LEGACY_VALUES,'dailySpendingCeiling':cap}})[0]
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             self.assertEqual(list(pool.map(set_cap,[(alice,ac,11),(bob,bc,22)])),[200,200])
         for uid,expected in ((aid,11),(bid,22)):
             with tenancy.activate(server.DATA,uid,server.tenant_save):
-                self.assertEqual(server.read('main')['permissions']['dailyCap'],expected)
+                self.assertEqual(server.read('main')['rules']['values']['dailySpendingCeiling'],expected)
                 with patch.object(server.governor(),'plan',return_value={}) as plan:
                     self.assertFalse(server.governor_pass(False));plan.assert_called_once()
         self.assertIsNone(tenancy.CURRENT.get())

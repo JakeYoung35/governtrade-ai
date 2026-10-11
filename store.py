@@ -91,8 +91,7 @@ class PostgresStore:
             q=lambda sql:conn.execute(sql).fetchall()
             settings=q('SELECT * FROM workspace_settings')[0]
             s.update(settings['extra']);s['schemaVersion']=settings['schema_version']
-            s['permissions']={'dailyCap':settings['daily_cap'],'automation':settings['automation']}
-            s['safety']={key:settings[column] for key,column in SAFETY_COLUMNS.items()}
+            s['permissions']={'automation':settings['automation']}
             for r in q('SELECT * FROM accounts ORDER BY created_at,id'):
                 a={**r['extra'],**present(r,{'id':'id','name':'name','venue':'venue','environment':'environment','subaccount':'subaccount','liveEnabled':'live_enabled','credentialRef':'credential_ref','credentialMasks':'credential_masks','status':'status','stale':'stale','balance':'balance'}),'error':r['error']}
                 a['ceiling']={} if r['ceiling_daily_cap'] is None else {'dailyCap':r['ceiling_daily_cap']}
@@ -126,6 +125,13 @@ class PostgresStore:
                 ORDER BY received_at DESC,governor_proposal_id COLLATE "C" DESC''',(REQUEST_WINDOW,))]
             s['governorBreakerEvents']=[{**r['payload'],'id':r['id'],'accountId':r['account_id']}
                 for r in conn.execute('SELECT id,account_id,payload FROM governor_breaker_events ORDER BY at DESC,id COLLATE "C" DESC LIMIT %s',(BREAKER_EVENT_WINDOW,))]
+            if 'rules' not in settings['extra'] and (settings['extra'] or s['accounts'] or s['agentConfigs'] or s['orders']):
+                # A workspace used before user-set trading rules: expose its old fixed limits once, so migrate() can
+                # offer them as hints. A fresh database (migration 001's seeded row, no data) keeps main_seed's empty
+                # rules record instead. The rules live in extra; daily_cap and the safety columns are no longer used.
+                s.pop('rules',None)  # main_seed's empty record would hide the old values from migrate()
+                s['permissions']['dailyCap']=settings['daily_cap']
+                s['safety']={key:settings[column] for key,column in SAFETY_COLUMNS.items()}
         seen.update(self.signatures(s));seen['loaded']=True;self.local.seen=seen
         return s
 
@@ -149,7 +155,7 @@ class PostgresStore:
             seen.update({(kind,x['id']):signature(x) for x in rows})
         return seen
     def settings(self,s):
-        return {'permissions':s['permissions'],'safety':s.get('safety',{}),'schemaVersion':s.get('schemaVersion',3),'extra':{k:v for k,v in s.items() if k not in TOP_FIELDS}}
+        return {'automation':s['permissions']['automation'],'schemaVersion':s.get('schemaVersion',3),'extra':{k:v for k,v in s.items() if k not in TOP_FIELDS}}
 
     def save(self,s):
         """Write rows changed since this request's load; append-only rows are written exactly once."""
@@ -169,8 +175,8 @@ class PostgresStore:
                 raise ValueError('Load the workspace in this session before saving governor records that already exist.')
             settings=self.settings(s)
             if seen.get('settings')!=signature(settings):
-                cur.execute('UPDATE workspace_settings SET daily_cap=%s,automation=%s,daily_loss_cap=%s,market_cap=%s,exposure_cap=%s,slippage_max=%s,schema_version=%s,extra=%s',
-                    (s['permissions']['dailyCap'],s['permissions']['automation'],*(settings['safety'][k] for k in SAFETY_COLUMNS),settings['schemaVersion'],Jsonb(settings['extra'])))
+                cur.execute('UPDATE workspace_settings SET automation=%s,schema_version=%s,extra=%s',
+                    (settings['automation'],settings['schemaVersion'],Jsonb(settings['extra'])))
             run(ACCOUNT_UPSERT,[(a['id'],a['name'],a['venue'],a['environment'],a.get('subaccount',0),a.get('liveEnabled',False),a.get('credentialRef'),j(a.get('credentialMasks')),a['status'],a.get('stale',True),a.get('error'),
                 (a.get('ceiling') or {}).get('dailyCap'),(a.get('baseline') or {}).get('day'),(a.get('baseline') or {}).get('equity'),j(a.get('balance')),Jsonb({k:v for k,v in a.items() if k not in ACCOUNT_FIELDS}))
                 for a in s['accounts'] if changed('account',a)])

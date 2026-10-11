@@ -1,5 +1,6 @@
 import copy, datetime as dt, uuid, re
 from adapters import BROKER, MARKET_DATA
+import trading_rules
 AGENTS=[('crypto','Crypto Markets Agent','BTC & ETH · 15-minute contracts · Spot crypto'),('sports','Sports Markets Agent','Game winners · Tournaments · Season outcomes'),('politics','Politics & Elections Agent','Elections · Political events'),('economics','Economics & Finance Agent','Inflation · Rates · Economic releases'),('culture','Culture & Entertainment Agent','Awards · Releases · Cultural events')]
 def uid(): return str(uuid.uuid4())[:12]
 def stamp(s): return s['clock']
@@ -71,6 +72,8 @@ PERSONALITIES={
  'Conservative':{'autoLimit':10,'dailyCap':50,'minimum':200,'newMarketApproval':False},
  'Moderate':{'autoLimit':25,'dailyCap':100,'minimum':100,'newMarketApproval':False},
  'Aggressive':{'autoLimit':50,'dailyCap':100,'minimum':50,'newMarketApproval':False}}
+# Fixed limits of the simulated presenter demo and of schema-2 migration only. A real workspace's limits are the
+# user's own trading rules (trading_rules.py); there are no presets.
 MAIN_DEFAULT={'dailyCap':100,'automation':True}
 SAFETY={'dailyLossCap':50,'marketCap':50,'exposureCap':500,'slippage':1}
 CATEGORIES=['crypto','sports','economics','politics','culture','other']
@@ -82,7 +85,7 @@ DEMO_AGENTS=[
 # Governor records (see governor/records.py): loss-breaker state, batch inputs, decisions, forecasts.
 def governor_seed():return {'governor':{'breakers':{}},'governorBatches':[],'governorDecisions':[],'governorForecasts':[],'governorBreakerEvents':[],'governorReplacedForecasts':[],'governorRequests':[]}
 def main_seed():
- return {'schemaVersion':3,'mode':'main','clock':dt.datetime.now(dt.timezone.utc).isoformat(),'accounts':[],'agentConfigs':[],'permissions':copy.deepcopy(MAIN_DEFAULT),'safety':copy.deepcopy(SAFETY),'orders':[],'events':[],'keys':{},'chats':{},'positions':[],**governor_seed()}
+ return {'schemaVersion':3,'mode':'main','clock':dt.datetime.now(dt.timezone.utc).isoformat(),'accounts':[],'agentConfigs':[],'permissions':{'automation':True},'rules':trading_rules.unset(),'orders':[],'events':[],'keys':{},'chats':{},'positions':[],**governor_seed()}
 def migrate(s):
  if s.get('mode')!='main':return s
  for k,v in governor_seed().items():s.setdefault(k,v)
@@ -94,10 +97,15 @@ def migrate(s):
   for a in s['agentConfigs']:
    a.pop('category',None);a.pop('permissions',None);a.update(mandate=None,personality=None,status='draft',modelValidated=False)
   s['schemaVersion']=3
- return s
+ return trading_rules.migrate(s)  # a workspace from before user-set rules must set them before trading
 
+def workspace_ceiling(s):
+ # The user's daily spending ceiling; 0 until trading rules are set. The demo keeps its scripted ceiling.
+ if s.get('mode')!='main':return s['permissions']['dailyCap']
+ return trading_rules.values(s)['dailySpendingCeiling'] if trading_rules.ready(s) else 0
 def ceiling(s,account):
- return {'dailyCap':min(s['permissions']['dailyCap'],account.get('ceiling',{}).get('dailyCap',s['permissions']['dailyCap'])),'automation':s['permissions']['automation']}
+ top=workspace_ceiling(s)
+ return {'dailyCap':min(top,account.get('ceiling',{}).get('dailyCap',top)),'automation':s['permissions']['automation']}
 def rules(s,agent):return copy.deepcopy(agent.get('mandate') or {})
 def usage(s,account_id,agent_id=None,market_id=None):
  orders=[o for o in s['orders'] if o.get('accountId')==account_id and (not agent_id or o['agent']==agent_id) and (o.get('committed') or o.get('filled'))]
@@ -113,7 +121,7 @@ def validate_permissions(values):
  return copy.deepcopy(values)
 def validate_mandate(values,limit):
  import math
- if not isinstance(values,dict) or set(values)!=set(PERSONALITIES['Moderate']):raise ValueError('Complete the four mandate restrictions.')
+ if not isinstance(values,dict) or set(values)!={'autoLimit','dailyCap','minimum','newMarketApproval'}:raise ValueError('Complete the four mandate restrictions.')
  for k in ('autoLimit','dailyCap','minimum'):
   if type(values[k]) not in (float,int) or not math.isfinite(values[k]) or values[k]<0:raise ValueError('Mandate limits must be finite nonnegative amounts.')
  if type(values['newMarketApproval'])!=bool:raise ValueError('Choose whether new markets require approval.')
@@ -131,8 +139,13 @@ def layered_checks(s,o,approved=False):
  demo=s.get('mode')!='main';agents=s.get('demoAgents',[]) if demo else s['agentConfigs'];agent=next(x for x in agents if x['id']==o['agent']);m=o['market'];amount=o['amount'];rows=[]
  account={'id':'demo-account','venue':'Demo Exchange','environment':'sandbox','status':'connected'} if demo else next(x for x in s['accounts'] if x['id']==agent['accountId'])
  b={'cash':s['cash']-s['reserved'],'reserved':s['reserved'],'exposure':exposure(s),'dailyLoss':max(0,-s['realized'])} if demo else o.get('_balance')
- policy=agent.get('mandate');p=policy or PERSONALITIES['Moderate'];cap=ceiling(s,account);safety=s.get('safety',SAFETY)
+ policy=agent.get('mandate');p=policy or {'autoLimit':0,'dailyCap':0,'minimum':0,'newMarketApproval':True};cap=ceiling(s,account)
+ # The user's dollar limits and price freshness (the demo keeps its scripted limits). No rules, no trading.
+ ready=demo or trading_rules.ready(s);v=trading_rules.values(s) if not demo and ready else {}
+ safety=s.get('safety',SAFETY) if demo else {'marketCap':v.get('marketDollarLimit',0),'exposureCap':v.get('exposureDollarLimit',0),'dailyLossCap':v.get('dailyLossDollarLimit',0)}
+ quote_age=300 if demo else v.get('quoteMaxAgeSeconds',0)
  def c(name,ok,reason,layer='execution',approval=False):rows.append({'name':name,'outcome':'ALLOW' if ok else 'REQUIRE_APPROVAL' if approval else 'BLOCK','reason':reason,'layer':layer})
+ c('Trading rules set',ready,'The account owner must set every trading rule before any agent trades.','account_ceiling')
  c('Mandate saved',bool(policy),'The user must save a mandate before this agent trades.','agent_mandate')
  c('Agent enabled',agent.get('status','active')=='active','Paused, draft and deleted agents cannot trade.','agent_mandate')
  c('Provider validated',demo or agent.get('modelValidated',False),'Provider key and selected model must be validated.','agent_mandate')
@@ -141,7 +154,7 @@ def layered_checks(s,o,approved=False):
  c('Total daily spending',total+amount<=cap['dailyCap'],f"${total:.2f} used; account ceiling ${cap['dailyCap']:.2f}.",'account_ceiling')
  if not demo:
   global_spend=sum(x['amount'] for x in s['orders'] if x.get('committed') and x['time'][:10]==s['clock'][:10])
-  c('Workspace daily ceiling',global_spend+amount<=s['permissions']['dailyCap'],'Connected accounts also share the workspace ceiling.','account_ceiling')
+  c('Workspace daily ceiling',global_spend+amount<=workspace_ceiling(s),'Connected accounts also share the workspace ceiling.','account_ceiling')
  c('Agent daily spending',au['daily']+amount<=p['dailyCap'],f"${au['daily']:.2f} used; this agent cap ${p['dailyCap']:.2f}.",'agent_mandate')
  cash=b['cash'] if b else 0;held=u['held']
  c('Fresh account balance',b is not None and account['status']=='connected','A fresh venue balance is required.')
@@ -153,13 +166,12 @@ def layered_checks(s,o,approved=False):
  c('New market authorization',approved or not p['newMarketApproval'] or m['id'] in used_markets,'This agent must receive approval for a market it has not traded before.','agent_mandate',True)
  # Retain existing execution guardrails; approvals cannot remove any hard restriction.
  mu=sum(x['amount'] for x in s['orders'] if (x.get('committed') or x.get('filled')) and x['market']['id']==m['id'] and x['market']['venue']==m['venue'])
- c('Cumulative market budget',mu+amount<=safety['marketCap'],'Split proposals share the existing hard market cap.')
- c('Open exposure',b is not None and b['exposure']+held+amount<=safety['exposureCap'],'Fresh exposure and unresolved submissions must fit the hard limit.')
- c('Daily loss',b is not None and b['dailyLoss']<=safety['dailyLossCap'],'The existing observed-loss guardrail remains enforced.')
+ c('Cumulative market budget',mu+amount<=safety['marketCap'],f"Your per-market dollar limit is ${safety['marketCap']:.2f}.")
+ c('Open exposure',b is not None and b['exposure']+held+amount<=safety['exposureCap'],f"Open exposure and unresolved submissions must fit your ${safety['exposureCap']:.2f} limit.")
+ c('Daily loss',b is not None and b['dailyLoss']<safety['dailyLossCap'],f"Trading stops once today's loss reaches your ${safety['dailyLossCap']:.2f} limit.")
  age=(dt.datetime.fromisoformat(s['clock'])-dt.datetime.fromisoformat(m['quoteAt'])).total_seconds()
- c('Fresh quote',0<=age<=(300 if demo else 60),'Stale venue quotes cannot execute.')
+ c('Fresh quote',0<=age<=quote_age,f"Prices older than {quote_age} seconds cannot execute.")
  c('Market open',m.get('open',True) and s['clock']<m['closeAt'],'Market must still be open.')
- c('Slippage',m['slippage']<=safety['slippage'],'The existing slippage limit is enforced.')
  c('Valid order',amount>=1 and o['direction'] in ('Yes','No'),'Opening prediction orders require at least $1 and Yes/No.')
  c('Execution capability',demo or m.get('executionReady',False),m.get('executionNote','Demo simulated execution.'))
  c('Live confirmation',account['environment']=='sandbox' or account.get('liveEnabled',False),'Live accounts require explicit real-money confirmation.')

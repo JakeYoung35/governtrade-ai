@@ -244,7 +244,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             with locked('main'):return self.json(200,governor().summary(read('main')))
         if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
-        if path=='/api/governor/schema':return self.json(200,governor().schema())
+        if path=='/api/governor/schema':
+            with locked('main'):return self.json(200,governor().schema(read('main')))  # states this workspace's own rules
         if path.startswith('/api/governor/proposals/'):
             with locked('main'):found=governor().lookup(read('main'),path.rsplit('/',1)[1])
             return self.json(200,found) if found else self.json(404,{'error':'Unknown governorProposalId.'})

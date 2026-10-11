@@ -20,6 +20,7 @@ from governor import records  # noqa: E402
 from governor.fees import fee_per_contract  # noqa: E402
 from governor.money import to_decimal  # noqa: E402
 from governor.policy import DEFAULT_POLICY  # noqa: E402
+import trading_rules  # noqa: E402
 from governor.sizing import target_stake  # noqa: E402
 from governor_service import GovernorService  # noqa: E402
 from replay.paper_venue import PaperVenue  # noqa: E402
@@ -49,11 +50,11 @@ def build():
     clock = Clock()
     venue = PaperVenue(clock.now)
     s = main_seed()
-    s["permissions"]["dailyCap"] = 500
-    s["safety"]["dailyLossCap"] = 150  # the app's own hard loss cap, above the governor's 3% breaker for this demo
+    # This scripted demo sets its own rules. The daily loss dollar limit is above the 3% breaker so the breaker shows.
+    trading_rules.fixture(s, {"dailySpendingCeiling": 500, "dailyLossDollarLimit": 150})
     s["accounts"] = [{"id": ACCOUNT, "name": "Paper replay account", "venue": "kalshi", "environment": "sandbox",
                       "status": "connected", "credentialRef": "paper", "ceiling": {"dailyCap": 500}}]
-    s["agentConfigs"] = [{"id": agent, "name": name, "accountId": ACCOUNT, "status": "active", "personality": "Aggressive",
+    s["agentConfigs"] = [{"id": agent, "name": name, "accountId": ACCOUNT, "status": "active", "personality": None,
                           "mandate": copy.deepcopy(MANDATE), "modelValidated": True} for agent, name in AGENTS.items()]
     workspace = Workspace(_NoCredentials())
     workspace.venue = lambda account: venue
