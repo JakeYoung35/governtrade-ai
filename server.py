@@ -95,7 +95,14 @@ GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if S
 AGENT_CHAT=AgentChat(WORKSPACE,GOVERNOR)
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw):super().__init__(*a,directory=str(ROOT/'static'),**kw)
+    def send_response(self,*a,**kw):
+        self.cache_control_sent=False;super().send_response(*a,**kw)
+    def send_header(self,keyword,value):
+        if keyword.lower()=='cache-control':self.cache_control_sent=True
+        super().send_header(keyword,value)
     def end_headers(self):
+        path=urlsplit(self.path).path
+        if not getattr(self,'cache_control_sent',False) and not path.startswith('/api/') and path!='/healthz':self.send_header('Cache-Control','no-cache')
         self.send_header('Referrer-Policy','strict-origin-when-cross-origin')
         self.send_header('X-Frame-Options','DENY')
         self.send_header('Cross-Origin-Opener-Policy','same-origin-allow-popups')

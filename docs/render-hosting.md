@@ -53,7 +53,7 @@ The public page contains sign-in only. Workspace APIs require an unexpired serve
 
 User state and encrypted vaults are stored under `users/<verified-subject-hash>/`, with thread-local context and file locks; each workspace saves to its own folder even outside a request. Both background governor execution and simulated demos use the same isolation. The governor loop reads a small `governor-status.json` marker beside each workspace and skips idle ones without loading them. At most `GOVERNTRADE_MAX_LOADED_WORKSPACES` (default 256) idle workspaces stay in memory; their state is on disk. Existing shared `main.json`, `demo.json` and vault files are never imported into user workspaces.
 
-Legacy `GOVERNTRADE_AGENT_TOKEN` access is disabled in this mode because it has no user identity. The existing UI still saves chat instructions without generating AI proposals. Implement user-scoped worker authentication before enabling external automated agents.
+Legacy `GOVERNTRADE_AGENT_TOKEN` access is disabled in this mode because it has no user identity. The in-app agent chat calls each agent's own model and submits proposals through the governor, so external workers are not needed for chat. Implement user-scoped worker authentication before enabling external automated agents.
 
 Before switching the deployed branch, run the tests and verify Google sign-in, sign-out, two independent users, persistence across a restart and Kalshi Demo connection. Public trading launch also needs venue acceptance testing and order reconciliation; this change does not certify those features.
 
