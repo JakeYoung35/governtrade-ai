@@ -39,6 +39,10 @@ The server uses the authorization code flow with PKCE: `/api/auth/start` sends t
 - `GOVERNTRADE_PERSISTENT_STORAGE`: `true`, only after the disk is attached.
 - `GOVERNTRADE_MASTER_KEY`: a fresh Fernet key, entered as a secret. Keep a secure backup; losing it makes saved credentials unreadable. Do not regenerate it on deploy.
 
+### Free Render project setup
+
+For the project on a Free instance, set `GOVERNTRADE_ALLOW_EPHEMERAL_WORKSPACES=true`, set `GOVERNTRADE_DATA_DIR=/tmp/governtrade`, and leave `GOVERNTRADE_PERSISTENT_STORAGE` unset. Keep the same Auth0 configuration, master encryption key, and allowed hosts. Set `GOVERNTRADE_ALLOWED_EMAILS=*` to allow any verified account, or keep an explicit team list. This opt-in changes only the storage readiness check; token verification, per-user isolation, session revocation, CSRF protection, encryption, and trade governance remain enforced. No storage messaging is added to the interface.
+
 Keep `DATABASE_URL` unset in this mode: the legacy Postgres schema is not tenant-scoped, and the server refuses to combine it with personal workspaces. Use one Render service instance with the attached disk. Scaling to multiple hosts requires a tenant-aware database and credential-storage migration.
 
 In Google Auth Platform, configure the app branding and External audience, then create a Web application client with these **authorized JavaScript origins**:
@@ -53,7 +57,7 @@ The public page contains sign-in only. Workspace APIs require an unexpired serve
 
 User state and encrypted vaults are stored under `users/<verified-subject-hash>/`, with thread-local context and file locks; each workspace saves to its own folder even outside a request. Both background governor execution and simulated demos use the same isolation. The governor loop reads a small `governor-status.json` marker beside each workspace and skips idle ones without loading them. At most `GOVERNTRADE_MAX_LOADED_WORKSPACES` (default 256) idle workspaces stay in memory; their state is on disk. Existing shared `main.json`, `demo.json` and vault files are never imported into user workspaces.
 
-Legacy `GOVERNTRADE_AGENT_TOKEN` access is disabled in this mode because it has no user identity. The existing UI still saves chat instructions without generating AI proposals. Implement user-scoped worker authentication before enabling external automated agents.
+Legacy `GOVERNTRADE_AGENT_TOKEN` access is disabled in this mode because it has no user identity. The in-app agent chat calls each agent's own model and submits proposals through the governor, so external workers are not needed for chat. Implement user-scoped worker authentication before enabling external automated agents.
 
 Before switching the deployed branch, run the tests and verify Google sign-in, sign-out, two independent users, persistence across a restart and Kalshi Demo connection. Public trading launch also needs venue acceptance testing and order reconciliation; this change does not certify those features.
 

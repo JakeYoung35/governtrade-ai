@@ -64,6 +64,22 @@ class HostedHttpTests(unittest.TestCase):
             if method=='HEAD':self.assertEqual(body,b'')
         self.assertEqual(self.call('GET','/healthz',{'Host':'evil.example'})[0],200)
 
+    def cache_headers(self, path, headers=None):
+        conn=http.client.HTTPConnection('127.0.0.1',self.httpd.server_address[1],timeout=5)
+        conn.request('GET',path,headers={'Host':'app.onrender.com',**(headers or {})})
+        response=conn.getresponse();response.read();values=response.msg.get_all('Cache-Control') or []
+        conn.close();return response.status,values
+
+    def test_static_files_revalidate(self):
+        with patch.dict(os.environ, {'GOVERNTRADE_ACCESS_PASSWORD':'test-password'}):
+            for path in ('/app.js','/style.css'):
+                self.assertEqual(self.cache_headers(path,self.auth()),(200,['no-cache']))
+
+    def test_health_and_api_keep_single_no_store(self):
+        with patch.dict(os.environ, {'GOVERNTRADE_ACCESS_PASSWORD':'test-password'}):
+            self.assertEqual(self.cache_headers('/healthz'),(200,['no-store']))
+            self.assertEqual(self.cache_headers('/api/state?demo',self.auth()),(200,['no-store']))
+
     def test_legacy_agent_proposals_retired_when_hosted(self):
         with patch.dict(os.environ, {'GOVERNTRADE_ACCESS_PASSWORD':'test-password'}):
             self.assertEqual(self.call('POST','/api/agent/proposals',{'Authorization':'Bearer worker-token'},'{}')[0],410)

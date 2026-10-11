@@ -34,13 +34,13 @@ _READY={}
 def multiuser_ready():
     if STORE:raise ValueError('Multiuser mode cannot use the unscoped legacy DATABASE_URL storage.')
     if not hosting.hosted():return
-    names=('GOVERNTRADE_PERSISTENT_STORAGE','GOVERNTRADE_DATA_DIR','GOVERNTRADE_MASTER_KEY','GOVERNTRADE_ALLOWED_EMAILS',
+    names=('GOVERNTRADE_PERSISTENT_STORAGE','GOVERNTRADE_DATA_DIR','GOVERNTRADE_MASTER_KEY','GOVERNTRADE_ALLOWED_EMAILS','GOVERNTRADE_ALLOW_EPHEMERAL_WORKSPACES',
            'AUTH0_DOMAIN','AUTH0_CLIENT_ID','AUTH0_CLIENT_SECRET')
     config=tuple(os.environ.get(n,'') for n in names)
     if config in _READY:return  # checked once per configuration, not on every request
-    persistent,data_dir_set,master,allowed,*auth0=config
-    if persistent!='true' or not data_dir_set:
-        raise ValueError('Multiuser hosting requires an explicitly configured persistent data disk.')
+    persistent,data_dir_set,master,allowed,ephemeral,*auth0=config
+    if not data_dir_set or (persistent!='true' and ephemeral!='true'):
+        raise ValueError('Multiuser hosting requires configured data storage and an explicit storage mode.')
     from cryptography.fernet import Fernet
     Fernet(master.encode())
     if not allowed.strip():
@@ -95,7 +95,14 @@ GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if S
 AGENT_CHAT=AgentChat(WORKSPACE,GOVERNOR)
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self,*a,**kw):super().__init__(*a,directory=str(ROOT/'static'),**kw)
+    def send_response(self,*a,**kw):
+        self.cache_control_sent=False;super().send_response(*a,**kw)
+    def send_header(self,keyword,value):
+        if keyword.lower()=='cache-control':self.cache_control_sent=True
+        super().send_header(keyword,value)
     def end_headers(self):
+        path=urlsplit(self.path).path
+        if not getattr(self,'cache_control_sent',False) and not path.startswith('/api/') and path!='/healthz':self.send_header('Cache-Control','no-cache')
         self.send_header('Referrer-Policy','strict-origin-when-cross-origin')
         self.send_header('X-Frame-Options','DENY')
         self.send_header('Cross-Origin-Opener-Policy','same-origin-allow-popups')

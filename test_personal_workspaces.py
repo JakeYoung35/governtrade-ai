@@ -159,6 +159,20 @@ class PersonalHttpTests(unittest.TestCase):
                     self.assertFalse(server.governor_pass(False));plan.assert_called_once()
         self.assertIsNone(tenancy.CURRENT.get())
 
+    def test_free_hosting_requires_explicit_opt_in_and_preserves_isolation(self):
+        with patch.dict(os.environ,{'GOVERNTRADE_PERSISTENT_STORAGE':'',
+                                    'GOVERNTRADE_ALLOW_EPHEMERAL_WORKSPACES':'true'}):
+            self.assertEqual(self.call('GET','/')[0],200)
+            self.assertEqual(self.call('GET','/api/state')[0],401)
+            self.test_concurrent_users_and_governor_context_stay_separate()
+            for name in ('GOVERNTRADE_MASTER_KEY','GOVERNTRADE_DATA_DIR','GOVERNTRADE_ALLOWED_EMAILS'):
+                with patch.dict(os.environ,{name:''}):self.assertEqual(self.call('GET','/')[0],503)
+            with patch.object(server,'STORE',object()):self.assertEqual(self.call('GET','/')[0],503)
+        for value in ('','false','yes'):
+            with patch.dict(os.environ,{'GOVERNTRADE_PERSISTENT_STORAGE':'',
+                                        'GOVERNTRADE_ALLOW_EPHEMERAL_WORKSPACES':value}):
+                self.assertEqual(self.call('GET','/')[0],503)
+
     def test_hosted_configuration_fails_closed(self):
         for name in ('GOVERNTRADE_MASTER_KEY','GOVERNTRADE_PERSISTENT_STORAGE','GOVERNTRADE_DATA_DIR'):
             with patch.dict(os.environ,{name:''}):self.assertEqual(self.call('GET','/')[0],503)
