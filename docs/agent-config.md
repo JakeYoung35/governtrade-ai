@@ -24,7 +24,7 @@ Under **Create your trading agent**, a **GovernTrade free agent** listing offers
 
 ## Public agent contract (version 2)
 
-Agent fields: `id`, `name`, `accountId` (connected Kalshi Demo/Live), `provider`, `model`, `modelValidated`, `modelKeyMask`, `status` (`draft`, `active`, `paused`, `deleted`), `personality` (always null: mandates have no presets; older agents may still carry a label), `mandate` (null before setup), and `usage` (`daily`, `market`, `held`, `lastAmount`). There is no market/category field. The provider/model catalog lives exclusively in `static/providers.json`; saving validates the selected model through the provider's authenticated read-only API.
+Agent fields: `id`, `name`, `accountId` (connected Kalshi Demo/Live), `provider`, `model`, `modelValidated`, `modelKeyMask`, `status` (`draft`, `active`, `paused`, `deleted`), `personality` (always null; older agents may still carry a label), `mandate` (null before setup; `autoLimitPercent`, `dailyCapPercent`, `minimumPercent` as shares of the account's value, and `newMarketApproval`), and `usage` (`daily`, `market`, `held`, `lastAmount`). There is no market/category field. The provider/model catalog lives exclusively in `static/providers.json`; saving validates the selected model through the provider's authenticated read-only API.
 
 The mandate schema is:
 
@@ -32,11 +32,11 @@ The mandate schema is:
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["autoLimit", "dailyCap", "minimum", "newMarketApproval"],
+  "required": ["autoLimitPercent", "dailyCapPercent", "minimumPercent", "newMarketApproval"],
   "properties": {
-    "autoLimit": {"type": "number", "minimum": 0},
-    "dailyCap": {"type": "number", "minimum": 0},
-    "minimum": {"type": "number", "minimum": 0},
+    "autoLimitPercent": {"type": "number", "minimum": 0, "maximum": 100},
+    "dailyCapPercent": {"type": "number", "minimum": 0, "maximum": 100},
+    "minimumPercent": {"type": "number", "minimum": 0, "maximum": 100},
     "newMarketApproval": {"type": "boolean"}
   }
 }
@@ -45,10 +45,10 @@ The mandate schema is:
 Example:
 
 ```json
-{"id":"agent-uuid","name":"My trading agent","accountId":"account-uuid","provider":"openai","model":"gpt-4.1","modelValidated":true,"modelKeyMask":"••••1234","status":"active","personality":"Moderate","mandate":{"autoLimit":25,"dailyCap":100,"minimum":100,"newMarketApproval":true},"usage":{"daily":0,"market":0,"held":0,"lastAmount":null}}
+{"id":"agent-uuid","name":"My trading agent","accountId":"account-uuid","provider":"openai","model":"gpt-4.1","modelValidated":true,"modelKeyMask":"••••1234","status":"active","personality":null,"mandate":{"autoLimitPercent":2.5,"dailyCapPercent":10,"minimumPercent":10,"newMarketApproval":true},"usage":{"daily":0,"market":0,"held":0,"lastAmount":null}}
 ```
 
-New agents are drafts until the user saves a mandate. Only user UI actions mutate mandates or account ceilings. The worker receives neither policy mutation tools nor credential references. `autoLimit <= dailyCap <= effective account ceiling` is mandatory on save. Lowering the account ceiling later immediately governs future trades, including pending approvals.
+New agents are drafts until the user saves a mandate. Only user UI actions mutate mandates or account ceilings. The worker receives neither policy mutation tools nor credential references. `autoLimitPercent <= dailyCapPercent <= the account's daily spending ceiling (%)` is mandatory on save; each is turned into dollars of the account's current value at every check. Lowering the account ceiling later immediately governs future trades, including pending approvals.
 
 Internal stored configs additionally contain `modelCredentialRef`, an opaque vault reference. Connected accounts have `credentialRef`. Neither reference nor plaintext credentials is returned to the browser/HTTP worker. The trusted local Python worker may load `Vault(DATA).get(reference)` using the same Keychain or master-key environment. Never give venue credentials or permission mutation tools to the language model. Do not log model keys.
 

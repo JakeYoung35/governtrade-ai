@@ -134,8 +134,8 @@ class Workspace:
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
             if agent['status']=='deleted' or not agent.get('modelValidated'):raise ValueError('Validate this agent’s provider key before mandate setup.')
             if not trading_rules.ready(s):raise ValueError('Set your trading rules before an agent mandate.')
-            a=next(x for x in s['accounts'] if x['id']==agent['accountId']);values=validate_mandate(b.get('mandate'),ceiling(s,a)['dailyCap'])
-            agent.update(personality=None,mandate=values)  # no presets: the user sets every mandate value
+            a=next(x for x in s['accounts'] if x['id']==agent['accountId']);values=trading_rules.validate_mandate(b.get('mandate'),ceiling(s,a)['dailyPercent'])
+            agent.update(personality=None,mandate=values)  # shares of the account's value; the form starts at presets
             if agent['status']=='draft':agent['status']='active' if s['permissions']['automation'] else 'paused'
             event(s,'User saved the agent mandate; future proposals use the current mandate.');return {'agentId':agent['id']}
         elif action=='agent-status':
@@ -151,14 +151,19 @@ class Workspace:
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted'
             if agent.get('modelCredentialRef'):self.vault.delete(agent.pop('modelCredentialRef'))  # free agents have none
         elif action=='permissions':
-            values=validate_permissions(b['values']);scope=b.get('scope','defaults')
+            scope=b.get('scope','defaults')
             if scope=='defaults':
+                values=validate_permissions(b['values'])
                 if 'dailyCap' in values:raise ValueError('Set the daily spending ceiling under Trading Rules.')
                 s['permissions'].update(values)
             else:
-                a=next(x for x in s['accounts'] if x['id']==scope)
-                if 'automation' in values:raise ValueError('The kill switch applies to every agent, not an individual connection.')
-                a.setdefault('ceiling',{}).update(values)
+                # One account's own, lower daily ceiling, as a share of its value; null removes it.
+                a=next(x for x in s['accounts'] if x['id']==scope);values=b.get('values')
+                if not isinstance(values,dict) or set(values)!={'dailyPercent'}:raise ValueError('Set the account ceiling as a percentage (dailyPercent).')
+                pct=values['dailyPercent']
+                if pct is None:(a.get('ceiling') or {}).pop('dailyPercent',None)
+                elif isinstance(pct,bool) or not isinstance(pct,(int,float)) or not math.isfinite(pct) or not 0<=pct<=100:raise ValueError('The account ceiling must be between 0% and 100%.')
+                else:a.setdefault('ceiling',{})['dailyPercent']=pct
             if s['permissions']['automation'] is False:
                 for agent in s['agentConfigs']:
                     if agent['status']=='active':agent['status']='paused'

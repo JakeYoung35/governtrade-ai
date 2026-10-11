@@ -16,7 +16,7 @@ from adapters import VenueError
 from engine import PERSONALITIES, main_seed
 from governor import api, records, rules
 from governor_service import GovernorService, utc_now
-from test_engine import FakeVault, FakeVenue
+from test_engine import MANDATE, FakeVault, FakeVenue
 from workspace import Workspace
 import trading_rules
 
@@ -66,7 +66,7 @@ def workspace_state():
     s["accounts"] = [{"id": "account", "name": "Kalshi Demo", "venue": "kalshi", "environment": "sandbox",
                       "status": "connected", "credentialRef": "REF", "ceiling": {}}]
     s["agentConfigs"] = [{"id": agent, "name": agent, "accountId": "account", "status": "active", "personality": "Moderate",
-                          "mandate": copy.deepcopy(PERSONALITIES["Moderate"]), "modelValidated": True}
+                          "mandate": copy.deepcopy(MANDATE), "modelValidated": True}
                          for agent in ("agent", "agent-2")]
     return s
 
