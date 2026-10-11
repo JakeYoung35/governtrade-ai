@@ -71,24 +71,6 @@ Trading rules and financial mandate limits use percentages of account value, con
 
 The **in-app DEMO** is a separate scripted simulation with no exchange connection. **Kalshi Demo** uses a connected demo-exchange account and virtual funds. **Kalshi Live** uses real funds and requires explicit confirmation.
 
-## Features and current status
-
-| Feature | Status |
-| --- | --- |
-| Browser dashboard and agent configuration | Implemented |
-| OpenAI, Anthropic, and Gemini model interfaces | Implemented |
-| Optional server-provided Gemini agent | Configurable |
-| Kalshi Demo and Kalshi Live adapters | Implemented |
-| Governed JSON proposal API for external workers | Implemented in supported deployment modes |
-| Agent mandates, account trading rules, and approval checks | Implemented |
-| Portfolio allocation and fractional Kelly sizing | Implemented |
-| Forecast reliability scoring and daily-loss circuit breaker | Implemented |
-| Audit records, persistence, and offline replay demo | Implemented |
-| Polymarket connectivity | Planned |
-| Scheduled and unattended multi-day trading | In development |
-| Comprehensive live-venue acceptance testing and uncertain-order reconciliation | In development |
-
-*Implemented means the functionality exists in this repository, not that every deployment or integration has been independently validated.*
 
 ## Integration: bring your own agent
 
