@@ -34,13 +34,13 @@ _READY={}
 def multiuser_ready():
     if STORE:raise ValueError('Multiuser mode cannot use the unscoped legacy DATABASE_URL storage.')
     if not hosting.hosted():return
-    names=('GOVERNTRADE_PERSISTENT_STORAGE','GOVERNTRADE_DATA_DIR','GOVERNTRADE_MASTER_KEY','GOVERNTRADE_ALLOWED_EMAILS',
+    names=('GOVERNTRADE_PERSISTENT_STORAGE','GOVERNTRADE_DATA_DIR','GOVERNTRADE_MASTER_KEY','GOVERNTRADE_ALLOWED_EMAILS','GOVERNTRADE_ALLOW_EPHEMERAL_WORKSPACES',
            'AUTH0_DOMAIN','AUTH0_CLIENT_ID','AUTH0_CLIENT_SECRET')
     config=tuple(os.environ.get(n,'') for n in names)
     if config in _READY:return  # checked once per configuration, not on every request
-    persistent,data_dir_set,master,allowed,*auth0=config
-    if persistent!='true' or not data_dir_set:
-        raise ValueError('Multiuser hosting requires an explicitly configured persistent data disk.')
+    persistent,data_dir_set,master,allowed,ephemeral,*auth0=config
+    if not data_dir_set or (persistent!='true' and ephemeral!='true'):
+        raise ValueError('Multiuser hosting requires configured data storage and an explicit storage mode.')
     from cryptography.fernet import Fernet
     Fernet(master.encode())
     if not allowed.strip():
