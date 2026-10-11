@@ -12,6 +12,16 @@ The amounts the user types are enforced in code: a proposal above the largest do
 
 Because the app answers chat messages itself, `GET /api/worker` no longer returns them: `instructions` is always `{}` and `chatHandledBy` is `"app"`, so a worker built for the old contract cannot trade each message a second time. Proposal ids starting with `chat-` are reserved for chat proposals; the worker route rejects them with a `proposalId` field error.
 
+### The GovernTrade free agent
+
+A server can offer a **free agent** so users can try the in-app chat without their own model key. Set:
+
+- `GOVERNTRADE_FREE_AGENT_GEMINI_KEY` (secret): a Google AI Studio (Gemini API) key owned by the server operator. When it is unset, the free agent is not offered.
+- `GOVERNTRADE_FREE_AGENT_MODEL` (optional, default `gemini-3.1-flash-lite`): the Gemini model the free agent uses.
+- `GOVERNTRADE_FREE_AGENT_DAILY_MESSAGES` (optional, default `20`): chat messages per workspace per UTC day.
+
+Users choose **GovernTrade free agent (Gemini, no API key needed)** as the provider. The agent stores no key of its own; chat turns use the server key through the Gemini connection, and the key is never sent to the browser. Because every workspace shares the key's free-tier quota, each workspace gets the daily message limit; a message counts when its turn starts. The agent form tells users that Google may use free-tier prompts and replies to improve its products. Everything else is unchanged: proposals go through the governor, the user's trading rules, mandate and approvals. Switching an agent to the free agent deletes its saved key; switching back asks for a key again.
+
 ## Public agent contract (version 2)
 
 Agent fields: `id`, `name`, `accountId` (connected Kalshi Demo/Live), `provider`, `model`, `modelValidated`, `modelKeyMask`, `status` (`draft`, `active`, `paused`, `deleted`), `personality` (always null: mandates have no presets; older agents may still carry a label), `mandate` (null before setup), and `usage` (`daily`, `market`, `held`, `lastAmount`). There is no market/category field. The provider/model catalog lives exclusively in `static/providers.json`; saving validates the selected model through the provider's authenticated read-only API.

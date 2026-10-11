@@ -4,7 +4,7 @@ from adapters import adapter,ADAPTERS,VenueError,now
 from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling
 import trading_rules
 from vault import masks
-from providers import validate_model_key,catalog
+from providers import validate_model_key,validate_free_agent,catalog,FREE_PROVIDER
 
 class Workspace:
     def __init__(self,vault,persist=lambda s:None):self.vault=vault;self.persist=persist
@@ -115,12 +115,20 @@ class Workspace:
             agent=next((x for x in s['agentConfigs'] if x['id']==b.get('id')),None)
             if agent and agent['status']=='deleted':raise ValueError('Deleted agents cannot be edited.')
             if agent and agent['accountId']!=a['id']:raise ValueError('Create a new agent to change its bound account.')
-            key=b.get('modelKey') or (self.vault.get(agent['modelCredentialRef'])['api_key'] if agent and agent.get('modelCredentialRef') else '')
-            validate_model_key(b['provider'],b['model'],key)
-            reference=self.vault.put({'api_key':key},agent.get('modelCredentialRef') if agent else None)
-            if not agent:
-                agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
-            agent.update(name=b['name'],accountId=a['id'],provider=b['provider'],model=b['model'],modelValidated=True,modelCredentialRef=reference,modelKeyMask=masks({'key':key})['key'])
+            if b.get('provider')==FREE_PROVIDER:
+                # The free agent runs on the server's Gemini key: nothing is stored for this agent.
+                validate_free_agent(b.get('model'))
+                if agent and agent.get('modelCredentialRef'):self.vault.delete(agent.pop('modelCredentialRef'))
+                if not agent:
+                    agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
+                agent.update(name=b['name'],accountId=a['id'],provider=FREE_PROVIDER,model=b['model'],modelValidated=True,modelKeyMask=None)
+            else:
+                key=b.get('modelKey') or (self.vault.get(agent['modelCredentialRef'])['api_key'] if agent and agent.get('modelCredentialRef') else '')
+                validate_model_key(b['provider'],b['model'],key)
+                reference=self.vault.put({'api_key':key},agent.get('modelCredentialRef') if agent else None)
+                if not agent:
+                    agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
+                agent.update(name=b['name'],accountId=a['id'],provider=b['provider'],model=b['model'],modelValidated=True,modelCredentialRef=reference,modelKeyMask=masks({'key':key})['key'])
             s['chats'].setdefault(agent['id'],[]);event(s,'Agent saved; a user mandate is required before trading.');return {'agentId':agent['id']}
         elif action=='mandate-save':
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
@@ -140,7 +148,8 @@ class Workspace:
             if b['status']=='active' and (not account or not account.get('credentialRef') or account.get('status')!='connected'):raise ValueError("Reconnect and successfully test this agent's Kalshi account before resuming.")
             agent['status']=b['status']
         elif action=='agent-delete':
-            agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted';self.vault.delete(agent['modelCredentialRef']);agent.pop('modelCredentialRef',None)
+            agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted'
+            if agent.get('modelCredentialRef'):self.vault.delete(agent.pop('modelCredentialRef'))  # free agents have none
         elif action=='permissions':
             values=validate_permissions(b['values']);scope=b.get('scope','defaults')
             if scope=='defaults':
