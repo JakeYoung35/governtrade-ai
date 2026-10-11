@@ -20,6 +20,7 @@ class CatalogTests(unittest.TestCase):
         with patch.dict(os.environ, FREE_ENV, clear=True):
             free = providers.catalog()[providers.FREE_PROVIDER]
             self.assertEqual((free['models'], free['free'], free['dailyMessages']), (['gemini-3.1-flash-lite'], True, 3))
+            self.assertEqual(free['shortLabel'], 'GovernTrade free agent')  # fits on agent cards
             self.assertIn('improve its products', free['notice'])
             self.assertNotIn('server-gemini-key', str(providers.catalog()))  # the key never reaches the browser
         with patch.dict(os.environ, {**FREE_ENV, 'GOVERNTRADE_FREE_AGENT_MODEL': 'gemini-3.5-flash'}, clear=True):

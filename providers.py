@@ -25,7 +25,7 @@ def catalog():
     providers=json.loads((Path(__file__).parent/'static/providers.json').read_text())
     if free_agent_key():
         limit=free_agent_daily_messages()
-        providers={FREE_PROVIDER:{'label':'GovernTrade free agent (Gemini, no API key needed)','models':[free_agent_model()],
+        providers={FREE_PROVIDER:{'label':'GovernTrade free agent (Gemini, no API key needed)','shortLabel':'GovernTrade free agent','models':[free_agent_model()],
             'free':True,'dailyMessages':limit,
             'notice':f'Uses GovernTrade\'s shared Gemini free tier: up to {limit} chat messages per day for your workspace, '
                      'resetting at midnight UTC. Google may use free-tier prompts and replies to improve its products, so '
