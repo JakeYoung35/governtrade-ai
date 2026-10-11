@@ -13,7 +13,7 @@ BROKER=SimulatedBroker()
 MARKET_DATA=SimulatedMarketData()
 
 # Authenticated venue implementations. No provider response body is exposed on errors.
-import base64, datetime, json, math, secrets, time
+import base64, datetime, http.client, json, math, secrets, time
 from abc import ABC, abstractmethod
 from decimal import Decimal
 from urllib.request import Request, urlopen
@@ -37,7 +37,7 @@ class VenueAdapter(ABC):
         try:
             with urlopen(Request(url,data=raw,method=method,headers=headers),timeout=timeout) as r:return json.load(r)
         except HTTPError as e:raise VenueError(f'{self.venue} returned HTTP {e.code}. Check credentials, environment and permissions.') from None
-        except (URLError,TimeoutError,ValueError):raise VenueError(f'{self.venue} request failed. No confirmed execution result.') from None
+        except (OSError,http.client.HTTPException,ValueError):raise VenueError(f'{self.venue} request failed. No confirmed execution result.') from None
     def test_connection(self):return self.get_balance_positions()
     @abstractmethod
     def get_markets(self,category):pass

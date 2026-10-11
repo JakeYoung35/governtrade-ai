@@ -15,7 +15,7 @@ class Workspace:
             b=self.venue(a).get_balance_positions()
             if not all(math.isfinite(float(b[k])) and float(b[k])>=0 for k in ('cash','positionValue','exposure')):raise VenueError('Venue returned invalid balance values.')
             return b
-        except (ValueError,KeyError,ImportError):return None
+        except (ValueError,KeyError,TypeError,ImportError,OSError):return None
     def apply_balance(self,s,a,b):
         if b is None:a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.');return None
         equity=b['cash']+b.get('reserved',0)+b['positionValue'];day=now()[:10]
