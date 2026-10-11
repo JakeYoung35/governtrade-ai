@@ -1,4 +1,4 @@
-import copy,json,os,tempfile,unittest
+import copy,http.client,json,os,tempfile,unittest
 from unittest.mock import patch
 from pathlib import Path
 from engine import *
@@ -41,8 +41,9 @@ class FakeVault:
  def get(self,k):return {}
  def delete(self,k):pass
 class FakeVenue:
- def __init__(self):self.cash=1000;self.calls=0;self.fail=False;self.price=.5;self.exposure=0;self.category='crypto'
+ def __init__(self):self.cash=1000;self.calls=0;self.fail=False;self.fail_with=None;self.price=.5;self.exposure=0;self.category='crypto'
  def get_balance_positions(self):
+  if self.fail_with:raise self.fail_with
   if self.fail:raise VenueError('failure')
   return {'cash':self.cash,'positionValue':0,'exposure':self.exposure,'realizedPnl':0,'unrealizedPnl':0,'positions':[],'asOf':now(),'mock':False,'source':'test'}
  def get_quote(self,k,d):return {'id':k,'name':'BTC','agent':self.category,'venue':'kalshi','instrument':'prediction','price':self.price,'quoteAt':now(),'closeAt':'2099-01-01T00:00:00+00:00','open':True,'executionReady':True,'slippage':0}
@@ -84,6 +85,10 @@ class AdapterTests(unittest.TestCase):
   v=KalshiAdapter({});calls=[];v.request=lambda *a,**k:calls.append((a,k)) or {'fill_count':'0'}
   v.place_order({'id':'uuid','market':{'id':'BTC','price':.4,'feeMultiplier':1},'amount':10,'direction':'No'})
   payload=calls[0][0][2];self.assertEqual(payload['side'],'ask');self.assertEqual(payload['price'],'0.6');self.assertEqual(payload['time_in_force'],'immediate_or_cancel');self.assertLessEqual(int(payload['count'])*.43,10)
+ def test_network_failures_become_venue_errors(self):
+  for failure in [ConnectionResetError('reset'),http.client.RemoteDisconnected('closed'),http.client.IncompleteRead(b''),TimeoutError()]:
+   with self.subTest(failure=type(failure).__name__),patch('adapters.urlopen',side_effect=failure):
+    with self.assertRaises(VenueError):KalshiAdapter({}).request('GET','/markets',public=True)
  def test_crypto_keys_encrypted_and_redacted(self):
   try:from cryptography.fernet import Fernet
   except ImportError:self.skipTest('Install requirements.txt to test encrypted vault')
@@ -128,6 +133,29 @@ class FollowupTests(MainTests):
   self.w.action(self.s,{'action':'account-disconnect','id':'other'})
   public={a['id']:a for a in self.w.public(self.s)['accounts']}
   self.assertTrue(public['account']['hasCredentials']);self.assertFalse(public['other']['hasCredentials']);self.assertNotIn('credentialRef',public['account'])
+ def test_disconnected_account_requires_new_credentials(self):
+  self.w.action(self.s,{'action':'account-disconnect','id':'account'})
+  with self.assertRaisesRegex(ValueError,'Kalshi credentials are required'):self.w.action(self.s,{'action':'account-save','id':'account','connectionType':'kalshi-demo','name':'Kalshi'})
+  with self.assertRaisesRegex(ValueError,'no saved credentials'):self.w.action(self.s,{'action':'account-test','id':'account'})
+  self.assertEqual(self.g['status'],'paused')
+  with self.assertRaisesRegex(ValueError,'Reconnect'):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
+  self.assertEqual(self.g['status'],'paused')
+ def test_failed_connection_test_blocks_resume(self):
+  self.g['status']='paused';self.a['status']='error'
+  with self.assertRaisesRegex(ValueError,'Reconnect'):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
+  self.assertEqual(self.g['status'],'paused')
+  self.w.action(self.s,{'action':'agent-status','id':'agent','status':'paused'});self.assertEqual(self.g['status'],'paused')
+ def test_reconnected_account_allows_resume(self):
+  self.g['status']='paused';self.a['status']='error';self.v.fail=True;self.w.action(self.s,{'action':'account-test','id':'account'});self.assertEqual(self.a['status'],'error')
+  with self.assertRaises(ValueError):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
+  self.v.fail=False;self.w.action(self.s,{'action':'account-test','id':'account'});self.assertEqual(self.a['status'],'connected')
+  self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'});self.assertEqual(self.g['status'],'active')
+ def test_raw_connection_failure_marks_account_unusable(self):
+  self.g['status']='paused';self.assertEqual(self.a['status'],'connected');self.v.fail_with=ConnectionResetError('reset')
+  self.w.action(self.s,{'action':'account-test','id':'account'})
+  self.assertEqual(self.a['status'],'error');self.assertTrue(self.a['stale'])
+  with self.assertRaises(ValueError):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
+  self.assertEqual(self.g['status'],'paused')
 
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):

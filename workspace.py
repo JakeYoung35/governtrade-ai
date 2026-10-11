@@ -15,7 +15,7 @@ class Workspace:
             b=self.venue(a).get_balance_positions()
             if not all(math.isfinite(float(b[k])) and float(b[k])>=0 for k in ('cash','positionValue','exposure')):raise VenueError('Venue returned invalid balance values.')
             return b
-        except (ValueError,KeyError,ImportError):return None
+        except (ValueError,KeyError,TypeError,ImportError,OSError):return None
     def apply_balance(self,s,a,b):
         if b is None:a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.');return None
         equity=b['cash']+b.get('reserved',0)+b['positionValue'];day=now()[:10]
@@ -74,6 +74,7 @@ class Workspace:
             a=next((a for a in s['accounts'] if a['id']==b.get('id')),None);credentials=b.get('credentials')
             if a and (a['environment']!=environment or a.get('subaccount',0)!=subaccount):raise ValueError('Create a new connection to change Demo/Live or subaccount; audit history keeps its original account.')
             if not a and not credentials:raise ValueError('Kalshi credentials are required.')
+            if a and not credentials and not a.get('credentialRef'):raise ValueError('Kalshi credentials are required. Enter the API key ID and private key.')
             if credentials:
                 if set(credentials)!={'key_id','private_key'} or any(not isinstance(v,str) or not v.strip() for v in credentials.values()):raise ValueError('Enter the Kalshi key ID and PEM private key.')
                 for existing in s['accounts']:
@@ -86,7 +87,9 @@ class Workspace:
             if credentials:a['credentialMasks']=masks(credentials)
             a.pop('balance',None);event(s,'Kalshi connection saved.');return {'accountId':a['id']}
         elif action=='account-test':
-            a=next(x for x in s['accounts'] if x['id']==b['id']);self.refresh(s,a)
+            a=next(x for x in s['accounts'] if x['id']==b['id'])
+            if not a.get('credentialRef'):raise ValueError('This account has no saved credentials. Add keys under Settings / rotate keys.')
+            self.refresh(s,a)
         elif action=='account-disconnect':
             a=next(x for x in s['accounts'] if x['id']==b['id'])
             if any(o.get('committed') and o['accountId']==a['id'] and o['status'] in ('submitted','open','submission unknown') for o in s['orders']):raise ValueError('Reconcile outstanding submissions at the venue before disconnecting.')
@@ -120,6 +123,8 @@ class Workspace:
             if b['status'] not in ('active','paused'):raise ValueError('Invalid status.')
             if b['status']=='active' and (not agent.get('mandate') or not agent.get('modelValidated') or not s['permissions']['automation']):raise ValueError('Save a validated mandate and enable the account ceiling before resuming.')
             if agent['status']=='deleted':raise ValueError('Deleted agents cannot resume.')
+            account=next((a for a in s['accounts'] if a['id']==agent['accountId']),None)
+            if b['status']=='active' and (not account or not account.get('credentialRef') or account.get('status')!='connected'):raise ValueError("Reconnect and successfully test this agent's Kalshi account before resuming.")
             agent['status']=b['status']
         elif action=='agent-delete':
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted';self.vault.delete(agent['modelCredentialRef']);agent.pop('modelCredentialRef',None)
