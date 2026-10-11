@@ -123,7 +123,8 @@ class Workspace:
             if b['status'] not in ('active','paused'):raise ValueError('Invalid status.')
             if b['status']=='active' and (not agent.get('mandate') or not agent.get('modelValidated') or not s['permissions']['automation']):raise ValueError('Save a validated mandate and enable the account ceiling before resuming.')
             if agent['status']=='deleted':raise ValueError('Deleted agents cannot resume.')
-            if b['status']=='active' and not next(x for x in s['accounts'] if x['id']==agent['accountId']).get('credentialRef'):raise ValueError("Reconnect this agent's Kalshi account before resuming.")
+            account=next((a for a in s['accounts'] if a['id']==agent['accountId']),None)
+            if b['status']=='active' and (not account or not account.get('credentialRef') or account.get('status')!='connected'):raise ValueError("Reconnect and successfully test this agent's Kalshi account before resuming.")
             agent['status']=b['status']
         elif action=='agent-delete':
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted';self.vault.delete(agent['modelCredentialRef']);agent.pop('modelCredentialRef',None)

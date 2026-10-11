@@ -135,6 +135,16 @@ class FollowupTests(MainTests):
   self.assertEqual(self.g['status'],'paused')
   with self.assertRaisesRegex(ValueError,'Reconnect'):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
   self.assertEqual(self.g['status'],'paused')
+ def test_failed_connection_test_blocks_resume(self):
+  self.g['status']='paused';self.a['status']='error'
+  with self.assertRaisesRegex(ValueError,'Reconnect'):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
+  self.assertEqual(self.g['status'],'paused')
+  self.w.action(self.s,{'action':'agent-status','id':'agent','status':'paused'});self.assertEqual(self.g['status'],'paused')
+ def test_reconnected_account_allows_resume(self):
+  self.g['status']='paused';self.a['status']='error';self.v.fail=True;self.w.action(self.s,{'action':'account-test','id':'account'});self.assertEqual(self.a['status'],'error')
+  with self.assertRaises(ValueError):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
+  self.v.fail=False;self.w.action(self.s,{'action':'account-test','id':'account'});self.assertEqual(self.a['status'],'connected')
+  self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'});self.assertEqual(self.g['status'],'active')
 
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
