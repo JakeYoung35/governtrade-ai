@@ -7,7 +7,7 @@ from unittest.mock import patch
 import providers
 from agent_chat import AgentChat
 from agent_llm import ModelError, ModelTurn
-from test_agent_chat import ChatTest, ScriptedModel, calls, propose
+from tests.python.test_agent_chat import ChatTest, ScriptedModel, calls, propose
 from workspace import Workspace
 
 FREE_ENV = {'GOVERNTRADE_FREE_AGENT_GEMINI_KEY': 'server-gemini-key', 'GOVERNTRADE_FREE_AGENT_DAILY_MESSAGES': '3'}

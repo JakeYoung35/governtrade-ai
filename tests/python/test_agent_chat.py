@@ -14,7 +14,7 @@ from adapters import KalshiAdapter, VenueError
 from agent_chat import LEGACY_REPLY, MAX_PROPOSALS, AgentChat
 from agent_llm import ModelError, ModelTurn, ToolCall
 from governor_service import GovernorService
-from test_governor_service import MARKET, GovernedVenue, workspace_state
+from tests.python.test_governor_service import MARKET, GovernedVenue, workspace_state
 from workspace import Workspace
 
 

@@ -8,7 +8,7 @@ from engine import main_seed,migrate
 import trading_rules
 from workspace import Workspace
 from store import PostgresStore
-from test_engine import MANDATE,FakeVault,FakeVenue
+from tests.python.test_engine import MANDATE,FakeVault,FakeVenue
 
 URL=os.environ.get('TEST_DATABASE_URL')
 @unittest.skipUnless(URL,'Set TEST_DATABASE_URL to run Postgres store tests.')

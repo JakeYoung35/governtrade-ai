@@ -71,24 +71,6 @@ Trading rules and financial mandate limits use percentages of account value, con
 
 The **in-app DEMO** is a separate scripted simulation with no exchange connection. **Kalshi Demo** uses a connected demo-exchange account and virtual funds. **Kalshi Live** uses real funds and requires explicit confirmation.
 
-## Features and current status
-
-| Feature | Status |
-| --- | --- |
-| Browser dashboard and agent configuration | Implemented |
-| OpenAI, Anthropic, and Gemini model interfaces | Implemented |
-| Optional server-provided Gemini agent | Configurable |
-| Kalshi Demo and Kalshi Live adapters | Implemented |
-| Governed JSON proposal API for external workers | Implemented in supported deployment modes |
-| Agent mandates, account trading rules, and approval checks | Implemented |
-| Portfolio allocation and fractional Kelly sizing | Implemented |
-| Forecast reliability scoring and daily-loss circuit breaker | Implemented |
-| Audit records, persistence, and offline replay demo | Implemented |
-| Polymarket connectivity | Planned |
-| Scheduled and unattended multi-day trading | In development |
-| Comprehensive live-venue acceptance testing and uncertain-order reconciliation | In development |
-
-*Implemented means the functionality exists in this repository, not that every deployment or integration has been independently validated.*
 
 ## Integration: bring your own agent
 
@@ -142,7 +124,7 @@ The API exposes `GET /api/governor/schema` for its current schema and `GET /api/
 | `store.py`, `migrations/` | Persistence and database schema |
 | `static/` | Browser application and styling |
 | `replay/`, `scripts/replay_demo.py` | Offline paper-trading and reproducible governor scenarios |
-| `test_*.py` | Automated test modules |
+| `tests/python/`, `tests/javascript/` | Python and JavaScript automated tests |
 
 ## Run locally
 
@@ -194,7 +176,7 @@ The replay demo is offline and uses simulated fills and recorded order books. It
 - [Setup and operations](docs/setup-and-operations.md)
 - [Render hosting and custom domain](docs/render-hosting.md)
 - [Collaboration](COLLABORATION.md)
-- [Verification notes](VERIFICATION.md)
+- [Verification notes](docs/verification.md)
 
 ## Near-future innovations
 
