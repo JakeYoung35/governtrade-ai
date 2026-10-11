@@ -1,136 +1,218 @@
 # GovernTrade AI
 
-## Let AI agents trade for you. Stay in control.
+## AI prediction-market agents. Governed by you.
 
-GovernTrade AI is a platform for allowing AI agents to trade prediction markets on your behalf, with financial boundaries you set and independent checks before every trade.
+**Website:** [GovernTradeAI.us](https://governtradeai.us/)
 
-You choose your agent, give it instructions, and decide how much freedom it has. Before a proposed trade can execute, GovernTrade checks that it follows your agent’s mandate and your account’s safety controls.
+**Repository:** [github.com/JakeYoung35/governtrade-ai](https://github.com/JakeYoung35/governtrade-ai)
 
-**Our vision includes Polymarket. The current integration supports Kalshi Demo and Kalshi Live; Polymarket connectivity is planned.**
+GovernTrade AI is a platform for running AI trading agents on prediction markets without giving those agents unrestricted control of your money. Connect a supported trading account, configure an AI model or external agent, define its permissions, and let GovernTrade evaluate its proposals before execution.
 
-## Why GovernTrade?
+**Agents propose. The portfolio governor allocates. Your rules control execution.**
 
-Giving an AI agent trading instructions should not mean giving it unrestricted access to your money.
+> **Prototype status:** GovernTrade AI is under active development. It includes Kalshi Demo and Kalshi Live integration code, but is not a production-certified financial service. Trading involves risk, including loss of capital.
 
-GovernTrade separates an agent’s ability to propose trades from its permission to execute them. You can authorize smaller trades automatically, require approval for specific situations, and block trades that exceed your financial boundaries.
+## What makes GovernTrade different?
 
-**The agent proposes. Governance checks. You stay in charge.**
+An AI agent's trade recommendation is not the same thing as authorization to place an order. GovernTrade separates the two with a governance layer that:
+
+- **Coordinates multiple agents** proposing trades against connected accounts.
+- **Evaluates expected edge** using estimated probabilities, prices, liquidity, and fees.
+- **Allocates capital** with reliability-adjusted fractional Kelly sizing and portfolio exposure limits.
+- **Enforces user-defined mandates** such as automatic trade limits, daily spending caps, minimum cash reserves, and approval requirements.
+- **Provides oversight** through trade decisions, explanations, activity records, and a kill switch.
+- **Rejects or resizes trades** that do not satisfy current market conditions or the user's limits.
 
 ## How it works
 
-1. **Set your trading rules.** On first sign-in you review every risk limit on sliders, from the Kelly multiplier to the daily spending ceiling. Each starts at a suggested position and shows what it means for your account; nothing trades until you save them ([details](docs/trading-rules.md)).
-2. **Connect your account.** Use Kalshi Demo with virtual funds or connect Kalshi Live after explicitly confirming that real money will be used. Your funds remain at Kalshi.
-3. **Create your agent.** Name it, select an AI provider and model, and securely enter your provider API key.
-4. **Set its mandate.** Set the agent's own limits as shares of its account, starting from suggested positions. An agent cannot trade until its mandate is saved.
-5. **Give it instructions.** Describe the markets and trades you want it to consider.
-6. **Govern every proposal.** Each trade must satisfy both the agent’s mandate and the account’s safety controls. The activity history shows the outcome and explains the decision.
+```text
+User / Web Dashboard
+        |
+        v
+Configured AI Agent or External Worker
+        |
+        | Standardized trade proposal
+        v
+Portfolio Governor
+  - Validate proposal and forecast
+  - Read market liquidity and positions
+  - Check forecast reliability and expected edge
+  - Size positions and enforce portfolio caps
+        |
+        v
+Trade Execution and User Mandates
+  - Automatic execution / approval / block
+  - Recheck current limits and market data
+        |
+        v
+Kalshi Demo or Kalshi Live
+        |
+        v
+Activity History, Positions, and Audit Records
+```
 
-## Your agent’s mandate
+**Illustrative example:** An agent proposes a $20 trade. The governor reduces it to $8 to fit portfolio limits. Because your automatic trading limit currently works out to $5, the proposal waits for your approval. Before submitting the order, GovernTrade checks your current rules, balance, and price again. A hard limit can still block execution even after approval.
 
-Every agent has its own rules:
+The governor batches proposals separately for each connected account, ranks eligible proposals by reliability and estimated net edge, and sizes them against available cash, liquidity, fees, and exposure caps. Fractional Kelly sizing uses the agent's estimated probability and the contract's cost to calculate a stake, scaled by reliability and bounded by the user's budget and rules.
 
-- **Automatic trade limit:** how much it can spend on a trade without asking for approval.
-- **Daily spending cap:** how much it can spend each day.
-- **Minimum cash reserve:** how much cash it must leave available.
-- **New-market approval:** whether it needs permission before trading a market it has never traded before.
+Eligible orders use immediate-or-cancel limit orders: contracts may fill only at or below the governor's limit price, and orders can fill partially or go unfilled. When markets settle, the agent's first forecast per market is scored using a Brier score, which measures probability forecast accuracy. That updates its reliability for future sizing; it does not retrain the model.
 
-Only you can change these rules. An agent cannot expand its own permissions.
+### Start using the app
 
-## Account-wide protection
+1. Visit **[GovernTradeAI.us](https://governtradeai.us/)**.
+2. Sign in if authentication is enabled for the hosted deployment.
+3. Save your account-wide trading rules before enabling trading.
+4. Connect a Kalshi Demo account, or explicitly connect Kalshi Live for real-money trading.
+5. Create an agent with a supported AI model and your provider key, or choose the GovernTrade free agent when offered by the deployment.
+6. Set the agent's mandate and give it trading instructions with an explicit dollar budget. Chat proposals can execute automatically when your mandate permits them.
+7. Review its proposed, approved, blocked, and executed trades in the dashboard.
 
-Account controls protect your funds across all agents:
+Trading rules and financial mandate limits use percentages of account value, converted to dollars when checked. New agents cannot trade until their mandates are saved, and chat refuses proposals without an identifiable budget.
 
-- Total daily spending ceiling.
-- Maximum position exposure.
-- Maximum observed daily loss.
-- Protected cash balance.
-- Live trading on/off.
-- A kill switch that pauses every agent.
+The **in-app DEMO** is a separate scripted simulation with no exchange connection. **Kalshi Demo** uses a connected demo-exchange account and virtual funds. **Kalshi Live** uses real funds and requires explicit confirmation.
 
-These controls do **not** add approval requests to trades already permitted by an agent’s mandate. Instead, they act as hard boundaries: a trade that violates an account limit is blocked, with the reason displayed.
+## Features and current status
 
-Agent mandates can be stricter than account limits, but cannot override them.
+| Feature | Status |
+| --- | --- |
+| Browser dashboard and agent configuration | Implemented |
+| OpenAI, Anthropic, and Gemini model interfaces | Implemented |
+| Optional server-provided Gemini agent | Configurable |
+| Kalshi Demo and Kalshi Live adapters | Implemented |
+| Governed JSON proposal API for external workers | Implemented in supported deployment modes |
+| Agent mandates, account trading rules, and approval checks | Implemented |
+| Portfolio allocation and fractional Kelly sizing | Implemented |
+| Forecast reliability scoring and daily-loss circuit breaker | Implemented |
+| Audit records, persistence, and offline replay demo | Implemented |
+| Polymarket connectivity | Planned |
+| Scheduled and unattended multi-day trading | In development |
+| Comprehensive live-venue acceptance testing and uncertain-order reconciliation | In development |
 
-## Security and execution safeguards
+*Implemented means the functionality exists in this repository, not that every deployment or integration has been independently validated.*
 
-- Account and AI-provider credentials are encrypted in each workspace’s vault and displayed only as masks. Hosted credentials stay on persistent server storage; local credentials stay on your computer.
-- Agents trade through their saved account; they cannot select a different account or supply their own approvals, balances, or policy overrides.
-- Execution requires fresh account data and market quotes.
-- Approving a trade triggers another governance check.
-- Hard blocks cannot be approved away.
-- Uncertain submissions retain spending reservations to help prevent duplicate or excessive spending.
-- The app provides no deposit, withdrawal, or transfer tools.
+## Integration: bring your own agent
 
-These safeguards limit an agent’s authority. They do not guarantee profits or eliminate trading risk.
+External agents can submit a normalized trade proposal to the governor rather than receiving direct authority to place orders.
 
-## Try the demo
+**Deployment restriction:** The global worker token is disabled in personal hosted workspaces because it does not identify an individual user. External workers currently require a supported local or legacy shared-workspace configuration; user-scoped worker authentication is planned. In-app agent chat does not require an external worker.
 
-Select **DEMO** to explore a simulated workspace that is separate from your connected accounts.
+```http
+POST /api/governor/proposals
+Authorization: Bearer <worker-token>
+Content-Type: application/json
+```
 
-Choose one of four agents and see:
+```json
+{
+  "schemaVersion": 1,
+  "proposalId": "sample-agent:trade-001",
+  "agentId": "your-configured-agent-id",
+  "marketId": "VENUE-MARKET-TICKER",
+  "side": "yes",
+  "estimatedYesProbability": 0.65,
+  "maxBudgetUsd": 10,
+  "maxEntryPrice": 0.55,
+  "reasoning": "The model estimates a 65% probability of YES."
+}
+```
 
-1. A small trade execute automatically.
-2. A trade wait for your approval.
-3. A trade blocked for exceeding its daily spending cap.
-4. A new-market proposal that you review and deny.
+The server validates the proposal, queues it for governance, and returns a proposal identifier for status lookup. The governor may approve, reduce, or reject the request. Authorization does **not** guarantee a market fill.
 
-**Demo trades never use real funds.**
+The API exposes `GET /api/governor/schema` for its current schema and `GET /api/governor/proposals/{governorProposalId}` for request status. The external worker interface uses a trusted bearer token; it does not provide per-agent token isolation. See [Agent integration contract](docs/agent-config.md) for requirements and deployment restrictions.
 
-## Current development status
+## Technology and repository layout
 
-Implemented:
+**Backend:** Python 3.12+, built-in HTTP server, API and workspace services\
+**Frontend:** HTML, CSS, and JavaScript\
+**AI integrations:** OpenAI, Anthropic, Gemini\
+**Trading integration:** Kalshi Demo and Live APIs\
+**Persistence:** JSON workspace storage and encrypted credential vaults; optional Postgres in legacy shared-workspace mode\
+**Hosting configuration:** Render, with optional Auth0 or Google sign-in
 
-- Kalshi Demo and Live account connections.
-- Encrypted credential storage.
-- Agent configuration and provider-key validation.
-- Individual agent mandates.
-- Account-wide safety controls.
-- Governed trade-proposal and execution endpoints.
-- Agent chat: the agent's own model (OpenAI, Anthropic or Gemini) reads your message, finds the Kalshi market and proposes a trade. The portfolio governor sizes it, and your mandate decides what runs automatically.
-- Trade activity and decision history.
-- An isolated simulated demo.
-
-Still in development:
-
-- Polymarket connectivity.
-- Scheduled and multi-day trading.
-- Reliable reconciliation of uncertain order submissions.
-- Authenticated venue acceptance testing.
-
-**Chat calls the agent's model with its saved API key and can propose real trades on the agent's connected account.** It never places orders directly: every proposal goes through the portfolio governor, the agent mandate and the account ceiling, and trades above the automatic limit wait for your approval. A trusted external worker can also submit proposals through the governed API.
-
-This is a prototype, not a production-certified financial service. The Google sign-in implementation adds personal workspaces; its hosting configuration and end-to-end sign-in must be completed before opening public account connections.
+| Path | Role |
+| --- | --- |
+| `server.py` | HTTP service, API endpoints, and background governor coordination |
+| `agent_chat.py`, `agent_llm.py` | Agent conversations, model calls, and tool use |
+| `governor_service.py` | Submission queue, batch evaluation, execution, and scoring |
+| `governor/` | Validation, allocation, sizing, reliability, circuit breakers, and audit logic |
+| `engine.py`, `workspace.py` | Trading state, mandates, permissions, and execution workflow |
+| `adapters.py` | Kalshi integration and simulated venue adapter |
+| `trading_rules.py` | User-defined account-wide limits |
+| `authentication.py`, `tenancy.py`, `vault.py` | Authentication, workspace isolation, and encrypted credentials |
+| `store.py`, `migrations/` | Persistence and database schema |
+| `static/` | Browser application and styling |
+| `replay/`, `scripts/replay_demo.py` | Offline paper-trading and reproducible governor scenarios |
+| `test_*.py` | Automated test modules |
 
 ## Run locally
 
-Use Python 3.12 or later:
+Requires **Python 3.12 or later**.
 
-    python3 -m venv .venv
-    source .venv/bin/activate
-    python -m pip install -r requirements.txt
-    python server.py
+```bash
+git clone https://github.com/JakeYoung35/governtrade-ai.git
+cd governtrade-ai
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python server.py
+```
 
-Open http://localhost:3110/ and keep the terminal running.
+On macOS, the vault key is created in Keychain. On Windows, Linux, or systems without Keychain, configure `GOVERNTRADE_MASTER_KEY` before saving credentials. Follow [Setup and operations](docs/setup-and-operations.md) for encryption-key setup and Windows commands.
 
-If the port is already in use:
+Open [localhost:3110](http://localhost:3110/). If that port is unavailable, choose another:
 
-    PORT=3113 python server.py
+```bash
+PORT=3113 python server.py
+```
 
-Then open http://localhost:3113/.
+Local workspace access is not equivalent to production user authentication. Keep a local development server on localhost and do not publish it with trading credentials or private API keys.
 
-Keep the server on localhost. The welcome screen is local workspace entry, not hosted user authentication. Never commit credentials or share private keys in chat.
+### Test and replay
 
-## Personal accounts on the hosted app
+```bash
+python -m unittest discover -s . -p 'test_*.py' -v
+python scripts/replay_demo.py
+```
 
-When Google sign-in is configured, each person signs in with their own Google account. There is no shared website password. Each user gets separate connected accounts, encrypted credentials, agents, mandates, approvals, trade history and simulated demo state. Signing out revokes that session; sessions expire after eight hours.
+The replay demo is offline and uses simulated fills and recorded order books. It does not place live orders.
 
-The backend verifies Google's signed identity token and derives the workspace identity from Google's stable account ID. Email addresses and IDs submitted by the browser cannot select another person's workspace. Existing local or shared workspace data is not imported automatically.
+## Security and financial controls
 
-For Render deployment, see [Render hosting setup](docs/render-hosting.md). Personal workspaces require Auth0 or Google sign-in configuration, an email allowlist (`GOVERNTRADE_ALLOWED_EMAILS`), a persistent disk and a server encryption key. Legacy global worker tokens are disabled in personal-workspace mode until user-scoped worker authorization is implemented. Local development and password-protected private shared workspaces remain available when Google sign-in is not configured.
+- AI agents submit proposals rather than directly holding order-execution authority.
+- Saved account and provider secrets are encrypted in the workspace vault.
+- Trades are checked against the latest available rules, balances, and quotes.
+- Pending approvals undergo governance checks again before execution.
+- Duplicate proposals and uncertain execution states have safeguards; full reconciliation remains an active development area.
+- A global pause control and loss circuit breaker provide additional restrictions.
+- The platform does not offer deposits, withdrawals, or transfers.
 
 ## Documentation
 
+- [Agent integration and proposal API](docs/agent-config.md)
+- [Portfolio governor](docs/governor.md)
+- [Trading rules](docs/trading-rules.md)
 - [Setup and operations](docs/setup-and-operations.md)
-- [Agent integration contract](docs/agent-config.md)
+- [Render hosting and custom domain](docs/render-hosting.md)
+- [Collaboration](COLLABORATION.md)
+- [Verification notes](VERIFICATION.md)
 
-Observed daily loss starts at the first successful sync each UTC day. Known losses persist across reconnections within the same Demo or Live environment to prevent resetting the safety limit. This conservative protection can also constrain separate accounts.
+## Near-future innovations
+
+Our next step is to make GovernTrade a platform where developers bring agents, users evaluate their performance, and the governor coordinates capital and risk across markets and exchanges.
+
+1. **Bring Your Own Agent:** Expand the existing governed proposal API with secure user-scoped access, simpler onboarding, and integration tools for custom models and agent frameworks. Developers could connect their own agents while GovernTrade enforces the user's mandates, account limits, and approval requirements. The current worker API is available only in supported deployment modes; personal hosted workspaces still require user-scoped worker authentication.
+
+2. **Backtesting & Paper-Trading Auditions:** Evaluate agents against historical market data and trial them with virtual funds before granting real-money permissions. Users could compare forecast accuracy, drawdowns, and rule compliance under consistent evaluation conditions. Historical backtests, simulated trading, and live results would remain clearly separated; each provides different evidence, and none guarantees future performance.
+
+3. **Correlation-Aware Portfolio Allocation:** Build on existing event exposure caps to identify when different agents are effectively making the same underlying bet. For example, separate election contracts may depend on the same political outcome. The governor could account for those relationships when allocating capital, reducing concentrated exposure across an otherwise varied portfolio.
+
+4. **Cross-Platform Support:** Extend governed trading beyond Kalshi to Polymarket and future venues, with unified risk management across connected accounts. Venue integrations would account for differences in fees, liquidity, and settlement rules so that similar-looking contracts are not automatically treated as equivalent.
+
+5. **Agent Marketplace:** Let strategy developers publish agents and users discover, compare, and audition them using standardized performance records. Selected agents would operate under each user's own permissions. Built on agent integration and evaluation tools, the marketplace could attract more creators as users join, and offer users more strategies as creators contribute.
+
+These are roadmap directions and extensions to existing capabilities, not committed release dates. The current governed proposal API does not support adding to existing positions, selling, or leverage.
+
+---
+
+**Explore the project:** [GovernTradeAI.us](https://governtradeai.us/)\
+**Source code:** [JakeYoung35/governtrade-ai](https://github.com/JakeYoung35/governtrade-ai)
