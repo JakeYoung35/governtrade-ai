@@ -18,10 +18,10 @@ GovernTrade separates an agent’s ability to propose trades from its permission
 
 ## How it works
 
-1. **Set your trading rules.** On first sign-in you set every risk limit yourself, from the Kelly multiplier to the daily spending ceiling; each is explained with an example. There are no presets, and nothing trades until they are saved ([details](docs/trading-rules.md)).
+1. **Set your trading rules.** On first sign-in you review every risk limit on sliders, from the Kelly multiplier to the daily spending ceiling. Each starts at a suggested position and shows what it means for your account; nothing trades until you save them ([details](docs/trading-rules.md)).
 2. **Connect your account.** Use Kalshi Demo with virtual funds or connect Kalshi Live after explicitly confirming that real money will be used. Your funds remain at Kalshi.
 3. **Create your agent.** Name it, select an AI provider and model, and securely enter your provider API key.
-4. **Set its mandate.** Set the agent's own limits; there are no presets. An agent cannot trade until its mandate is saved.
+4. **Set its mandate.** Set the agent's own limits as shares of its account, starting from suggested positions. An agent cannot trade until its mandate is saved.
 5. **Give it instructions.** Describe the markets and trades you want it to consider.
 6. **Govern every proposal.** Each trade must satisfy both the agent’s mandate and the account’s safety controls. The activity history shows the outcome and explains the decision.
 

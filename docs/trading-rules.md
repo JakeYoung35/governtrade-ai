@@ -1,60 +1,70 @@
 # Trading rules
 
-Every risk limit in a workspace is set by its owner. There are no preset values: a new workspace cannot trade
-until its owner has saved every rule on the **Set your trading rules** screen, which appears right after sign-in
-and blocks the rest of the app until it is saved. Rules can be changed at any time under **Trading Rules**.
+Every risk limit in a workspace is set by its owner, on sliders. Every money rule is a percentage of the account's
+current value (cash, reserved cash and marked positions), and each slider shows live what it means for the user's
+own account ("At most $25.00 of your $500.00 account at risk in one market"). Each rule starts at a suggested
+position; a workspace still cannot trade until its owner has reviewed and saved them on the **Set your trading
+rules** screen, which appears right after sign-in. Rules can be changed at any time under **Trading Rules**.
 
-[`trading_rules.py`](../trading_rules.py) is the single source of truth. It holds each rule's name, unit, valid
-range, explanation and example; the setup screen, the Trading Rules page and the server-side validation all read
-it, so the explanation a user sees is always the rule that is enforced.
+[`trading_rules.py`](../trading_rules.py) is the single source of truth: each rule's name, unit, range, slider step
+and scale, starting position and explanation. The sliders, their previews and the server-side validation all read
+it. Each slider has a number box for exact values; ranges spanning orders of magnitude (proposal lifetime,
+approval window, how fast trust changes) slide on a log scale so small values stay easy to reach.
 
-## The rules
+## The rules (schema 2)
 
-| Group | Rule | Unit | Range | Used by |
-| --- | --- | --- | --- | --- |
-| Bet sizing | Kelly multiplier | % | 1–100 | Governor sizing (fraction of full Kelly) |
-| Exposure caps | Per-market cap | % of equity | 0–100 | Governor |
-| | Per-agent cap | % of equity | 0–100 | Governor |
-| | Per-event cap | % of equity | 0–100 | Governor |
-| | Total exposure cap | % of equity | 0–100 | Governor |
-| Dollar limits | Daily spending ceiling | $ | ≥ 0 | Order checks; caps every agent mandate |
-| | Per-market dollar limit | $ | ≥ 0 | Order checks |
-| | Open exposure dollar limit | $ | ≥ 0 | Order checks |
-| Loss protection | Daily loss dollar limit | $ | ≥ 0 | Order checks |
-| | Loss breaker | % below day open | 0.1–100 | Governor breaker (latches until reset) |
-| Timing | Price freshness | seconds | 1–600 | Governor order books and order-time quotes |
-| | Proposal lifetime | seconds | 1–3600 | Default proposal expiry |
-| | Approval window | seconds | 60–86400 | How long a governed order waits for approval |
-| Trust | Starting trust | % | 1–99 | Reliability prior for a new agent |
-| | How fast trust changes | forecasts | 1–1000 | Reliability prior weight |
+| Group | Rule | Unit | Range | Starts at | Used by |
+| --- | --- | --- | --- | --- | --- |
+| Bet sizing | Kelly multiplier | % | 1–100 | 25 | Governor sizing (fraction of full Kelly) |
+| Exposure caps | Per-market cap | % of account | 0–100 | 5 | Governor and order checks |
+| | Per-agent cap | % of account | 0–100 | 15 | Governor |
+| | Per-event cap | % of account | 0–100 | 10 | Governor |
+| | Total exposure cap | % of account | 0–100 | 30 | Governor and order checks |
+| Daily limits | Daily spending ceiling | % of account | 0–100 | 20 | Order checks; caps every agent mandate |
+| | Daily loss limit | % below day open | 0.1–100 | 3 | Governor breaker (latches until reset) and order checks |
+| Timing | Price freshness | seconds | 1–600 | 30 | Governor order books and order-time quotes |
+| | Proposal lifetime | seconds | 1–3600 | 60 | Default proposal expiry |
+| | Approval window | seconds | 60–86400 | 900 | How long a governed order waits for approval |
+| Trust | Starting trust | % | 1–99 | 50 | Reliability prior for a new agent |
+| | How fast trust changes | forecasts | 1–1000 | 20 | Reliability prior weight |
 
-A cap of 0% stops new risk of that kind. Each agent also has its own mandate (automatic trade limit, daily cap,
-minimum cash reserve, new-market approval), set when the agent is created, again with no presets. Mandates can
-only be saved once the workspace rules exist, and an agent's daily cap must fit the daily spending ceiling.
+Each agent's mandate uses the same sliders, as shares of its account's value: automatic trade limit (starts at
+2%), agent daily cap (10%), minimum cash reserve (20%) and new-market approval (off). The agent daily cap must fit
+the daily spending ceiling, and the automatic limit must fit the agent daily cap. A connected account can have a
+lower daily ceiling of its own, also a percentage.
 
 Always on, and not configurable because they protect data and order integrity: the market must be open, binary
 markets only, $1 minimum order, a fresh account balance, enough cash, and live-money confirmation.
 
 ## How the rules are applied
 
-- The governor builds its policy from the workspace's rules on every batch (`trading_rules.to_policy`), so a saved
-  change applies to the next batch. Each save increments the version, and every decision records the version it
-  used (`policyVersion`, e.g. `user-rules-v3`), so past decisions stay explainable.
-- Order checks (`engine.layered_checks`) read the dollar limits, the daily spending ceiling and price freshness
-  from the rules. Without rules, a "Trading rules set" check blocks every order.
-- Without rules, the governed API refuses proposals, a queued proposal is rejected with "Trading rules are not
-  set", the chat agent cannot propose, mandates cannot be saved and agents cannot be resumed.
+- Percentages become dollars at the moment of each check, from the account's current value. The order checks use
+  the balance read from Kalshi just before the order; the governor uses its batch's account value. The daily
+  loss limit is the exception by definition: it is a drop from the start-of-day value, or after a same-day breaker
+  reset from the lower of that and the value at reset, at both the governor and the order checks.
+- The governor builds its policy from the workspace's rules on every batch (`trading_rules.to_policy`). Each save
+  that changes a value increments the version, and every decision records it (`policyVersion`, e.g.
+  `user-rules-v3`). Saving unchanged values creates no version.
+- Without saved rules, a "Trading rules set" check blocks every order, the governed API refuses proposals, the chat
+  agent cannot propose, and mandates cannot be saved or agents resumed.
 - `GovernorService(policy=...)` still accepts a fixed policy for replays and tests.
 
-## Existing workspaces
+## Upgrades
 
-A workspace created before user-set rules has no rules after the upgrade, so its owner goes through the same setup
-screen. The old fixed values (the daily ceiling and the dollar limits, plus the previous governor defaults) are
-shown under each field as "Your previous value"; they are never applied automatically. In legacy Postgres mode
-the rules are stored in `workspace_settings.extra`; the `daily_cap`, `daily_loss_cap`, `market_cap`,
-`exposure_cap` and `slippage_max` columns are no longer read or written.
+- **Schema 1 (dollar rules, PR #36):** converted once to percentages from the account values when the workspace is
+  next loaded, then shown for review ("Review your trading rules"); nothing trades until the owner saves them. Where
+  a dollar limit and a percentage cap became one rule (per-market, total exposure, daily loss), the stricter of the
+  two is kept. Without a known account value, the dollar rules start at their suggested positions. The rules
+  version continues, so decision history stays in order.
+- **Dollar mandates and per-account ceilings** become the same share of their account's value. A ceiling that was
+  only the old workspace cap copied onto the account is dropped. A mandate whose account has no known value is
+  cleared, so its owner sets it again.
+- **Workspaces from before user-set rules** see the suggested positions.
+- **Legacy Postgres mode:** rules live in `workspace_settings.extra`, and percentage mandates in `agents.extra`
+  (their dollar columns are written as null). The `daily_cap`, `daily_loss_cap`, `market_cap`, `exposure_cap` and
+  `slippage_max` columns are no longer read or written.
 
-The presenter demo (**▶ DEMO**) is a scripted simulation and keeps its own fixed limits and agent presets.
+The presenter demo (**▶ DEMO**) is a scripted simulation and keeps its own fixed dollar limits and agent presets.
 
 ## Removed: the slippage limit
 
