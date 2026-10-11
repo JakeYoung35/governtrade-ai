@@ -31,9 +31,14 @@ at `GET /api/governor/schema`. This page covers how decisions are made and how t
 Only one proposal per market wins a batch: an opposite-side proposal is rejected as `conflict`, a same-side
 one as `redundantSignal`. A market with an open position is rejected as `positionAlreadyOpen`.
 
-## Policy defaults (`governor/policy.py`, version `governor-policy-v1`)
+## Policy (set by the user)
 
-| Setting | Default | Meaning |
+The governor's policy is the workspace owner's own trading rules ([trading-rules.md](trading-rules.md)), read on
+every batch and versioned as `user-rules-vN`. There are no defaults in the app: a workspace without rules cannot
+trade. The values below are the former built-in defaults (`governor/policy.py`, `governor-policy-v1`), which are
+now used only by tests and replays, and shown to existing users as hints.
+
+| Setting | Former default | Meaning |
 | --- | --- | --- |
 | Kelly fraction | 0.25 | Quarter Kelly before caps |
 | Market cap | 5% of equity | Loss-at-risk in one market |
@@ -50,7 +55,7 @@ account produces small stakes: at about $100 of equity the market cap is about $
 
 ## Daily loss breaker
 
-The breaker latches when equity falls 3% below the day's base, which is the account's first balance sync of
+The breaker latches when equity falls below the day's base by the user's loss breaker percentage, which is the account's first balance sync of
 the UTC day (unrealized losses count). While latched, every proposal is rejected as `lossBreakerLatched`.
 It stays latched through recoveries and into the next day; only an operator reset clears it:
 

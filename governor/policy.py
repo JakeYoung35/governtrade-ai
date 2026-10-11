@@ -8,8 +8,8 @@ from decimal import Decimal
 
 from .money import ONE, ZERO, to_decimal
 
-_FRACTIONS = ("kelly_fraction", "market_cap", "agent_cap", "event_group_cap", "total_cap",
-              "daily_loss_limit", "reliability_prior")
+_FRACTIONS = ("kelly_fraction", "daily_loss_limit", "reliability_prior")
+_CAPS = ("market_cap", "agent_cap", "event_group_cap", "total_cap")  # user-set; 0 means no new risk of that kind
 _POSITIVE_INTS = ("max_quote_age_seconds", "default_proposal_ttl_seconds", "reliability_prior_weight",
                   "approval_ttl_seconds")
 
@@ -44,6 +44,11 @@ class Policy:
             value = to_decimal(getattr(self, name), name)
             if not ZERO < value <= ONE:
                 raise ValueError(f"{name} must be in (0, 1].")
+            object.__setattr__(self, name, value)
+        for name in _CAPS:
+            value = to_decimal(getattr(self, name), name)
+            if not ZERO <= value <= ONE:
+                raise ValueError(f"{name} must be in [0, 1].")
             object.__setattr__(self, name, value)
         for name in _POSITIVE_INTS:
             value = getattr(self, name)

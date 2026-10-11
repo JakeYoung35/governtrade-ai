@@ -27,7 +27,7 @@ from governor.breaker import check, reset
 from governor.fees import taker_fee
 from governor.models import Exposure, Portfolio, Proposal
 from governor.money import CENT, ZERO, round_up, to_decimal
-from governor.policy import DEFAULT_POLICY
+import trading_rules
 from governor.snapshot import build_snapshot, order_book
 
 SCHEMA_PATH = "/api/governor/schema"
@@ -49,21 +49,33 @@ def _invalid(errors):
 
 
 class GovernorService:
-    def __init__(self, workspace, policy=DEFAULT_POLICY, clock=utc_now, new_id=lambda: str(uuid.uuid4()),
+    def __init__(self, workspace, policy=None, clock=utc_now, new_id=lambda: str(uuid.uuid4()),
                  find_request=None):
-        """find_request(agent_id, proposal_id) returns an older stored request (Postgres) or None."""
-        self.workspace, self.policy, self.clock, self.new_id = workspace, policy, clock, new_id
+        """find_request(agent_id, proposal_id) returns an older stored request (Postgres) or None.
+
+        policy: a fixed Policy for replays and tests. Otherwise each workspace's own trading rules (trading_rules.py)
+        are the policy, read on every call, and a workspace without rules cannot trade.
+        """
+        self.workspace, self.fixed_policy, self.clock, self.new_id = workspace, policy, clock, new_id
         self.find_request = find_request
 
-    def schema(self):
-        return api.describe(self.policy)
+    def policy_for(self, s):
+        """The policy for this workspace: its user-set trading rules, or None if they are not set yet."""
+        return self.fixed_policy or trading_rules.to_policy(s)
+
+    def schema(self, s=None):
+        return api.describe(self.policy_for(s) if s is not None else self.fixed_policy)
 
     # Submission and lookup.
 
     def submit(self, s, payload):
         """Validate and queue one proposal. Returns (http_status, body); 202 queued, 200 identical retry."""
         now = self.clock()
-        normalized, errors = api.parse_submission(payload, received_at=now, policy=self.policy)
+        policy = self.policy_for(s)
+        if policy is None:
+            return _invalid([{"field": "", "error": "this workspace has no trading rules yet; its owner must set them "
+                                                    "before agents can propose trades"}])
+        normalized, errors = api.parse_submission(payload, received_at=now, policy=policy)
         if errors:
             return _invalid(errors)
         agent = next((a for a in s["agentConfigs"] if a["id"] == normalized["agentId"]), None)
@@ -212,6 +224,10 @@ class GovernorService:
         items = [r for r in items if r["agentId"] in live]
         if not items:
             return {"accountId": account_id, "decided": 0, "note": "no live agents"}
+        policy = self.policy_for(s)
+        if policy is None:
+            self._reject_all(items, "Trading rules are not set for this workspace.")
+            return {"accountId": account_id, "decided": 0, "note": "no trading rules"}
         if fetched.get("error"):
             self._reject_all(items, fetched["error"])
             return {"accountId": account_id, "decided": 0, "note": fetched["error"]}
@@ -223,13 +239,13 @@ class GovernorService:
         snapshot_id = self.new_id()
         snapshot = build_snapshot(books, snapshot_id=snapshot_id, taken_at=started)
         now = self.clock()
-        portfolio = self._portfolio(s, account, balance, snapshot, now, in_flight)
+        portfolio = self._portfolio(s, account, balance, snapshot, now, policy, in_flight)
         proposals = [records.proposal_from_dict(r["proposal"]) for r in items]
-        reliability = records.reliability(s, self.policy)
-        decisions = decide(proposals, snapshot, portfolio, reliability, now, self.policy)
+        reliability = records.reliability(s, policy)
+        decisions = decide(proposals, snapshot, portfolio, reliability, now, policy)
         batch = records.batch_record(batch_id=self.new_id(), account_id=account_id, started_at=started, evaluated_at=now,
                                      snapshot_id=snapshot_id, books=books, proposals=proposals, portfolio=portfolio,
-                                     reliability=reliability, policy=self.policy)
+                                     reliability=reliability, policy=policy)
         records.record_batch(s, batch, decisions, now)
         by_id = {r["governorProposalId"]: r for r in items}
         # Record every outcome before sending any order: execution saves state (a crash-safe reservation),
@@ -239,7 +255,7 @@ class GovernorService:
                                         batchId=batch["id"], decision=d.outcome)
         for d in decisions:
             if d.outcome != "rejected":
-                self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id])
+                self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id], policy)
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
     def _newest_balance(self, s, account, fetched, started):
@@ -304,7 +320,7 @@ class GovernorService:
                 counted += filled
         return [o for o in candidates if o in counted]
 
-    def _portfolio(self, s, account, balance, snapshot, now, in_flight=()):
+    def _portfolio(self, s, account, balance, snapshot, now, policy, in_flight=()):
         state = records.breaker_state(s, account["id"])
         paused = s["permissions"].get("automation") is False
         if balance is None:
@@ -312,7 +328,7 @@ class GovernorService:
         equity = _equity(balance)
         baseline = account.get("baseline") or {}
         day_open = baseline.get("equity") if baseline.get("day") == now.date().isoformat() else None
-        result = check(state, equity=equity, day_open_equity=day_open, now=now, policy=self.policy)
+        result = check(state, equity=equity, day_open_equity=day_open, now=now, policy=policy)
         if result.tripped:
             records.save_breaker(s, account["id"], result.state)
             records.record_breaker_event(s, account["id"], {
@@ -372,7 +388,12 @@ class GovernorService:
         the crash is returned rather than placed again. Expired proposals are skipped, never executed late.
         Each request's failure is contained to that request.
         """
-        for request in [r for r in s.get("governorRequests", []) if r["status"] == "approved"]:
+        approved = [r for r in s.get("governorRequests", []) if r["status"] == "approved"]
+        policy = self.policy_for(s) if approved else None
+        for request in approved:
+            if policy is None:
+                request.update(status="executionFailed", note="Trading rules are not set for this workspace.")
+                continue
             decision = next((d for d in s.get("governorDecisions", []) if d["proposalId"] == request["governorProposalId"]), None)
             account = next((a for a in s["accounts"] if a["id"] == request["accountId"]), None)
             if decision is None or account is None:
@@ -391,12 +412,12 @@ class GovernorService:
                 proposal_id=decision["proposalId"], agent_id=decision["agentId"], market_id=decision["marketId"],
                 side=decision["side"], approved_budget=to_decimal(decision["approvedBudgetUsd"], "approvedBudgetUsd"),
                 contracts=to_decimal(decision["contracts"], "contracts"),
-                limit_price=to_decimal(decision["limitPrice"], "limitPrice")), venue, book)
+                limit_price=to_decimal(decision["limitPrice"], "limitPrice")), venue, book, policy)
 
-    def _execute_safely(self, s, request, decision, venue, book):
+    def _execute_safely(self, s, request, decision, venue, book, policy):
         """_execute with any unexpected failure contained to this request, linking an order if one exists."""
         try:
-            self._execute(s, request, decision, venue, book)
+            self._execute(s, request, decision, venue, book, policy)
         except Exception as exc:  # noqa: BLE001 - never let one order stop the batch or wedge later passes
             order_id = s["keys"].get(f"{request['agentId']}:governor:{request['governorProposalId']}")
             request.update(status="executionFailed",
@@ -404,7 +425,7 @@ class GovernorService:
             if order_id:
                 request["orderId"] = order_id
 
-    def _execute(self, s, request, decision, venue, book):
+    def _execute(self, s, request, decision, venue, book, policy):
         # The app authorizes whole cents, so round the approval up (by under a cent). The order itself buys exactly
         # the approved contracts as an immediate-or-cancel at the governor's limit price, so spending never exceeds
         # the approval and a market that moved above the limit simply leaves the order unfilled.
@@ -417,7 +438,7 @@ class GovernorService:
             request.update(status="executionFailed", note="The approved contracts do not fit the authorized amount.")
             return  # cannot happen for allocator decisions, which are sized at or below this cost
         direction = "Yes" if decision.side == "yes" else "No"
-        approve_by = (self.clock() + dt.timedelta(seconds=self.policy.approval_ttl_seconds)).isoformat()
+        approve_by = (self.clock() + dt.timedelta(seconds=policy.approval_ttl_seconds)).isoformat()
         try:
             order = self.workspace.proposal(s, {
                 "agentId": decision.agent_id, "marketId": decision.market_id, "direction": direction,
@@ -512,14 +533,15 @@ class GovernorService:
 
     def summary(self, s):
         """Read model for the dashboard: small, with no batch inputs or decision traces."""
+        policy = self.policy_for(s)
         return {
-            "policy": self.policy.to_dict(),
+            "policy": policy.to_dict() if policy else None,
             "queued": sum(r["status"] == "queued" for r in s.get("governorRequests", [])),
             "breakers": {a["id"]: {**records.breaker_state(s, a["id"]).to_dict(), "accountName": a.get("name")}
                          for a in s["accounts"]},
             "breakerEvents": s.get("governorBreakerEvents", [])[:20],
             "reliability": {agent: {"score": str(r.score), "resolvedCount": r.resolved_count}
-                            for agent, r in records.reliability(s, self.policy).items()},
+                            for agent, r in (records.reliability(s, policy).items() if policy else ())},
             "recentDecisions": [{k: v for k, v in d.items() if k != "trace"} for d in s.get("governorDecisions", [])[:50]],
             "recentRequests": self.views(s, s.get("governorRequests", [])[:50]),
         }

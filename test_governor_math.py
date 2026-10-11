@@ -95,10 +95,12 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(DEFAULT_POLICY.to_dict()["marketCap"], "0.05")
 
     def test_rejects_out_of_range(self):
-        for overrides in (dict(market_cap=0), dict(total_cap="1.5"), dict(max_quote_age_seconds=0),
-                          dict(max_quote_age_seconds=True), dict(version=" "), dict(kelly_fraction=float("nan"))):
+        for overrides in (dict(market_cap="-0.01"), dict(total_cap="1.5"), dict(kelly_fraction=0),
+                          dict(max_quote_age_seconds=0), dict(max_quote_age_seconds=True), dict(version=" "),
+                          dict(kelly_fraction=float("nan"))):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 Policy(**overrides)
+        self.assertEqual(Policy(market_cap=0).market_cap, D(0))  # a user may set a 0% cap: no new risk there
 
 
 class SizingTests(unittest.TestCase):

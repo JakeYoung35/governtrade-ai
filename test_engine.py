@@ -5,6 +5,7 @@ from engine import *
 from adapters import KalshiAdapter,VenueError,now
 from workspace import Workspace
 from vault import Vault
+import trading_rules
 class GovernanceTests(unittest.TestCase):
  def trade(self,s,n=10,key=None,agent='demo-conservative'):return propose(s,agent,next(m for m in s['markets'] if m['agent']==next(a['demoMarket'] for a in s['demoAgents'] if a['id']==agent)),n,'Yes','Test',key or uid())
  def test_fill_account(self):
@@ -50,7 +51,7 @@ class FakeVenue:
  def place_order(self,o):self.calls+=1;return {'order_id':'venue-1','fill_count':'1','average_fill_price':'.5','average_fee_paid':'.01'}
 class MainTests(unittest.TestCase):
  def setUp(self):
-  self.s=main_seed();self.a={'id':'account','name':'Kalshi','venue':'kalshi','environment':'sandbox','status':'connected','credentialRef':'SECRET_REF','ceiling':{}};self.g={'id':'agent','name':'Agent','accountId':'account','status':'active','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate']),'modelValidated':True,'modelCredentialRef':'MODEL_REF'};self.s['accounts']=[self.a];self.s['agentConfigs']=[self.g];self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
+  self.s=trading_rules.fixture(main_seed());self.a={'id':'account','name':'Kalshi','venue':'kalshi','environment':'sandbox','status':'connected','credentialRef':'SECRET_REF','ceiling':{}};self.g={'id':'agent','name':'Agent','accountId':'account','status':'active','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate']),'modelValidated':True,'modelCredentialRef':'MODEL_REF'};self.s['accounts']=[self.a];self.s['agentConfigs']=[self.g];self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def proposal(self,n=10,key='one'):return self.w.proposal(self.s,{'agentId':'agent','marketId':'BTC','direction':'Yes','amount':n,'reasoning':'Test reasoning','idempotencyKey':key})
  def test_main_fresh_balance_and_once(self):
   o=self.proposal();self.assertEqual(o['status'],'filled');self.proposal();self.assertEqual(self.v.calls,1);self.assertEqual(o['amount'],10)
@@ -67,7 +68,7 @@ class MainTests(unittest.TestCase):
  def test_agent_specific_cap(self):
   self.g['mandate']['dailyCap']=5;self.assertEqual(self.proposal()['decision'],'BLOCK')
  def test_shared_budget_across_agents(self):
-  self.s['permissions']['dailyCap']=15;self.proposal();g={**self.g,'id':'second'};self.s['agentConfigs'].append(g);o=self.w.proposal(self.s,{'agentId':'second','marketId':'BTC','direction':'Yes','amount':10,'reasoning':'Test','idempotencyKey':'two'});self.assertEqual(o['decision'],'BLOCK')
+  trading_rules.fixture(self.s,{'dailySpendingCeiling':15});self.proposal();g={**self.g,'id':'second'};self.s['agentConfigs'].append(g);o=self.w.proposal(self.s,{'agentId':'second','marketId':'BTC','direction':'Yes','amount':10,'reasoning':'Test','idempotencyKey':'two'});self.assertEqual(o['decision'],'BLOCK')
  def test_submission_unknown_keeps_reserve(self):
   self.v.place_order=lambda o:(_ for _ in ()).throw(VenueError('timeout'));o=self.proposal();self.assertEqual(o['status'],'submission unknown');self.assertEqual(usage(self.s,'account')['held'],10);self.proposal();self.assertEqual(len(self.s['orders']),1)
  def test_no_category_filter(self):

@@ -18,6 +18,7 @@ from governor import api, records, rules
 from governor_service import GovernorService, utc_now
 from test_engine import FakeVault, FakeVenue
 from workspace import Workspace
+import trading_rules
 
 MARKET, OTHER = "KXNFLGAME-26OCT18BALCLE-CLE", "KXNFLGAME-26OCT18BALCLE-BAL"
 
@@ -61,7 +62,7 @@ class GovernedVenue(FakeVenue):
 
 
 def workspace_state():
-    s = main_seed()
+    s = trading_rules.fixture(main_seed())  # the user's rules, as the app's old values
     s["accounts"] = [{"id": "account", "name": "Kalshi Demo", "venue": "kalshi", "environment": "sandbox",
                       "status": "connected", "credentialRef": "REF", "ceiling": {}}]
     s["agentConfigs"] = [{"id": agent, "name": agent, "accountId": "account", "status": "active", "personality": "Moderate",

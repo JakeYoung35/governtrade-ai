@@ -64,8 +64,12 @@ EXAMPLE = {
 }
 
 
-def describe(policy=DEFAULT_POLICY):
-    """Everything a worker or model needs to submit well-formed proposals."""
+def describe(policy=None):
+    """Everything a worker or model needs to submit well-formed proposals. policy: the workspace's own rules, or
+    None when its owner has not set them yet (proposals are then refused)."""
+    lifetime = (f"Proposals expire after {policy.default_proposal_ttl_seconds} seconds unless expiresAt says otherwise."
+                if policy else "This workspace has no trading rules yet, so proposals are refused until its owner "
+                               "sets them.")
     return {
         "schemaVersion": SCHEMA_VERSION,
         "submit": "POST /api/governor/proposals with Authorization: Bearer <worker token> and one JSON object.",
@@ -84,7 +88,7 @@ def describe(policy=DEFAULT_POLICY):
             "Proposals are decided in batches every few seconds, together with other agents' proposals.",
             "The governor may approve, resize or reject. Approved stakes still pass your mandate and account "
             "ceiling, which can require the user's approval.",
-            f"Proposals expire after {policy.default_proposal_ttl_seconds} seconds unless expiresAt says otherwise.",
+            lifetime,
         ],
     }
 

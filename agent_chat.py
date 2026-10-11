@@ -20,6 +20,7 @@ from agent_llm import TIMEOUT_SECONDS, ModelError, connect, post_json
 from engine import event
 from governor import api
 from governor_service import utc_now
+import trading_rules
 
 HISTORY_MESSAGES = 20  # earlier chat messages sent as context
 MAX_MESSAGE_CHARS = 2000
@@ -177,8 +178,8 @@ class AgentChat:
             raise
         return {"agentId": agent["id"], "turn": turn, "messageIndex": len(chat) - 1, "text": text.strip(),
                 "history": history, "amounts": amounts,
-                "agent": {k: agent.get(k) for k in ("name", "provider", "model", "personality", "mandate")},
-                "account": dict(account), "key": key, "blocked": self._trading_blocked(s, agent, account)}
+                "agent": {k: agent.get(k) for k in ("name", "provider", "model", "mandate")},
+                "account": dict(account), "key": key, "blocked": self._trading_blocked(s, agent, account), "policy": self.governor.policy_for(s)}
 
     def release(self, agent_id, turn):
         """Free the agent for its next message, only if `turn` still holds it (safe to call more than once)."""
@@ -188,8 +189,10 @@ class AgentChat:
 
     def _trading_blocked(self, s, agent, account):
         """Why this agent cannot propose trades right now, or None."""
+        if not trading_rules.ready(s):
+            return "the account owner has not set their trading rules yet"
         if not s["permissions"].get("automation"):
-            return "all-agent trading is switched off in Trading Permissions"
+            return "all-agent trading is switched off in Trading Rules"
         if not agent.get("mandate"):
             return "the agent has no saved mandate"
         if agent.get("status") != "active":
@@ -247,7 +250,7 @@ class AgentChat:
         lines = [
             f"You are {agent['name']}, a trading agent for the user's Kalshi "
             f"{'Live (real money)' if account.get('environment') == 'live' else 'Demo'} account. "
-            f"Your personality is {agent.get('personality') or 'not set'}. The time is {self.clock().isoformat()} (UTC).",
+            f"The time is {self.clock().isoformat()} (UTC).",
             "Kalshi markets are yes/no contracts that pay $1 if they win; prices are dollars per contract.",
             "Find markets with find_series and list_markets, and check one with get_market before proposing it. "
             "Never guess a ticker.",
@@ -325,7 +328,7 @@ class AgentChat:
                    "maxBudgetUsd": args.get("maxBudgetUsd"), "reasoning": args.get("reasoning")}
         if args.get("maxEntryPrice") is not None:
             payload["maxEntryPrice"] = args["maxEntryPrice"]
-        normalized, errors = api.parse_submission(payload, received_at=self.clock(), policy=self.governor.policy)
+        normalized, errors = api.parse_submission(payload, received_at=self.clock(), policy=job["policy"])
         if errors:
             return {"accepted": False, "errors": errors}
         # The prompt asks for the user's amount; this enforces it, whatever the model or market text says.
