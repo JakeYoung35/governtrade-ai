@@ -1,4 +1,5 @@
 import copy, datetime as dt, uuid, re
+import hosting
 from adapters import BROKER, MARKET_DATA
 import trading_rules
 AGENTS=[('crypto','Crypto Markets Agent','BTC & ETH · 15-minute contracts · Spot crypto'),('sports','Sports Markets Agent','Game winners · Tournaments · Season outcomes'),('politics','Politics & Elections Agent','Elections · Political events'),('economics','Economics & Finance Agent','Inflation · Rates · Economic releases'),('culture','Culture & Entertainment Agent','Awards · Releases · Cultural events')]
@@ -104,7 +105,7 @@ def workspace_ceiling(s):
  # (0 until trading rules are set). The demo keeps its scripted dollar ceiling.
  if s.get('mode')!='main':return s['permissions']['dailyCap']
  if not trading_rules.ready(s):return 0
- total=sum(v for v in (trading_rules.account_value(a) for a in s['accounts'] if a.get('status') not in ('removed','disconnected')) if v)  # a disconnected account's balance is stale
+ total=sum(v for v in (trading_rules.account_value(a) for a in s['accounts'] if a.get('status')=='connected' and not a.get('stale')) if v)  # only fresh balances: an errored or disconnected account's is stale
  return trading_rules.dollars(trading_rules.values(s)['dailySpendingPercent'],total)
 def ceiling(s,account):
  # One account's daily ceiling: the workspace share, or the account's own lower share, of its current value.
@@ -159,7 +160,7 @@ def layered_checks(s,o,approved=False):
  if not demo and reset.get('rebaseDay')==s['clock'][:10] and reset.get('rebaseEquity') is not None:
   loss_base=min(x for x in (loss_base,float(reset['rebaseEquity'])) if x is not None)
   loss_now=max(0,loss_base-(value or 0))
- safety=s.get('safety',SAFETY) if demo else {'marketCap':pct('marketCapPercent'),'exposureCap':pct('totalCapPercent'),'dailyLossCap':pct('dailyLossPercent',loss_base)}
+ safety=s.get('safety',SAFETY) if demo else {'marketCap':pct('marketCapPercent'),'exposureCap':pct('totalCapPercent'),'dailyLossCap':pct('dailyLossPercent',max([x for x in (loss_base,value) if x is not None],default=0))}
  if demo:p=policy or {'autoLimit':0,'dailyCap':0,'minimum':0,'newMarketApproval':True}
  else:
   m_=policy or {};p={'autoLimit':trading_rules.dollars(m_.get('autoLimitPercent',0),value),'dailyCap':trading_rules.dollars(m_.get('dailyCapPercent',0),value),'minimum':trading_rules.dollars(m_.get('minimumPercent',0),value),'newMarketApproval':m_.get('newMarketApproval',True)}
@@ -185,13 +186,15 @@ def layered_checks(s,o,approved=False):
  c('Automatic authorization',approved or amount<=p['autoLimit'],f"Above ${p['autoLimit']:.2f} requires approval.",'agent_mandate',True)
  c('New market authorization',approved or not p['newMarketApproval'] or m['id'] in used_markets,'This agent must receive approval for a market it has not traded before.','agent_mandate',True)
  # Retain existing execution guardrails; approvals cannot remove any hard restriction.
- mu=sum(x['amount'] for x in s['orders'] if (x.get('committed') or x.get('filled')) and x['market']['id']==m['id'] and x['market']['venue']==m['venue'])
+ mu=sum(x['amount'] for x in s['orders'] if (x.get('committed') or x.get('filled')) and x['market']['id']==m['id'] and x['market']['venue']==m['venue']
+        and x.get('accountId')==account['id'] and s['clock']<(x['market'].get('closeAt') or '9999'))  # settled markets no longer hold risk
  c('Cumulative market budget',mu+amount<=safety['marketCap'],f"Your per-market cap is ${safety['marketCap']:.2f} of this account.")
  c('Open exposure',b is not None and b['exposure']+held+amount<=safety['exposureCap'],f"Open exposure and unresolved submissions must fit your ${safety['exposureCap']:.2f} total exposure cap.")
  c('Daily loss',b is not None and loss_now<safety['dailyLossCap'],f"Trading stops once today's loss reaches your ${safety['dailyLossCap']:.2f} daily loss limit.")
  age=(dt.datetime.fromisoformat(s['clock'])-dt.datetime.fromisoformat(m['quoteAt'])).total_seconds()
  c('Fresh quote',0<=age<=quote_age,f"Prices older than {quote_age} seconds cannot execute.")
  c('Market open',m.get('open',True) and s['clock']<m['closeAt'],'Market must still be open.')
+ c('Durable storage for live trading',demo or account.get('environment')!='live' or not hosting.ephemeral_workspaces(),'Kalshi Live needs persistent storage: on temporary storage a restart would erase the loss and spending limits.','account_ceiling')
  c('Valid order',amount>=1 and o['direction'] in ('Yes','No'),'Opening prediction orders require at least $1 and Yes/No.')
  c('Execution capability',demo or m.get('executionReady',False),m.get('executionNote','Demo simulated execution.'))
  c('Live confirmation',account['environment']=='sandbox' or account.get('liveEnabled',False),'Live accounts require explicit real-money confirmation.')

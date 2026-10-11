@@ -1,5 +1,5 @@
 """User management and the narrow, governed agent integration boundary."""
-import copy, datetime, math, uuid
+import copy, datetime, hosting, math, uuid
 from adapters import adapter,ADAPTERS,VenueError,now
 from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling
 import trading_rules
@@ -61,6 +61,17 @@ class Workspace:
         if type(amount) not in (int,float) or not math.isfinite(amount) or not 1<=amount<=1000000:raise ValueError('Use a finite all-in USD budget between $1 and $1,000,000.')
         if not isinstance(b.get('marketId'),str) or not isinstance(b.get('reasoning'),str) or len(b['reasoning'])>8000:raise ValueError('marketId and agent reasoning are required.')
         a=next(x for x in s['accounts'] if x['id']==agent['accountId']);v=self.venue(a);m=v.get_quote(b['marketId'],b['direction']);o={'id':str(uuid.uuid4()),'agent':agent['id'],'accountId':a['id'],'market':m,'amount':round(amount,2),'direction':b['direction'],'request':b['reasoning'],'time':now(),'evaluations':[],'filled':False,**({'governedTerms':dict(governed)} if governed else {})};s['orders'].insert(0,o);s['keys'][scoped]=o['id'];return self.evaluate(s,o)
+    def fit_mandates(self,s):
+        """Lower any agent's daily cap (and automatic limit) that a lowered daily spending ceiling no longer covers."""
+        if not trading_rules.ready(s):return
+        fitted=[]
+        for agent in s['agentConfigs']:
+            m=agent.get('mandate');a=next((x for x in s['accounts'] if x['id']==agent.get('accountId')),None)
+            if agent.get('status')=='deleted' or not m or a is None:continue
+            top=ceiling(s,a)['dailyPercent']
+            if m.get('dailyCapPercent',0)>top:
+                m['dailyCapPercent']=top;m['autoLimitPercent']=min(m.get('autoLimitPercent',0),top);fitted.append(agent['name'])
+        if fitted:event(s,f"Agent daily caps lowered to fit the new spending ceiling: {', '.join(fitted)}.",'RULES')
     def action(self,s,b):
         action=b['action'];s['clock']=now()
         if action=='refresh':
@@ -69,6 +80,7 @@ class Workspace:
         elif action=='account-save':
             kind=b.get('connectionType');environment={'kalshi-demo':'sandbox','kalshi-live':'live'}.get(kind)
             if not environment:raise ValueError('Choose Kalshi Demo or Kalshi Live.')
+            if environment=='live' and hosting.ephemeral_workspaces():raise ValueError('Kalshi Live is not available on this server: it uses temporary storage, and a restart would erase the loss and spending limits that protect real money. Use Kalshi Demo here.')
             if environment=='live' and b.get('confirmLive') is not True:raise ValueError('Confirm that Kalshi Live uses real money before connecting.')
             subaccount=b.get('subaccount',0)
             if type(subaccount)!=int or not 0<=subaccount<=63:raise ValueError('Subaccount must be an integer from 0 to 63.')
@@ -167,10 +179,10 @@ class Workspace:
             if s['permissions']['automation'] is False:
                 for agent in s['agentConfigs']:
                     if agent['status']=='active':agent['status']='paused'
-            event(s,'Account safety ceiling saved. Every proposal is rechecked against it.')
+            self.fit_mandates(s);event(s,'Account safety ceiling saved. Every proposal is rechecked against it.')
         elif action=='rules-save':
             # The user's own trading rules: every rule, no presets. Each save is a new version the governor records.
-            changed=trading_rules.save(s,b.get('values'),now())
+            changed=trading_rules.save(s,b.get('values'),now());self.fit_mandates(s)
             if s['rules']['version']==1:event(s,'Trading rules set. Agents can trade within them.','RULES')
             elif changed:event(s,f"Trading rules updated (version {s['rules']['version']}): {', '.join(changed)}.",'RULES')
             return {'version':s['rules']['version']}

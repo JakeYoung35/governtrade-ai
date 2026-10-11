@@ -15,6 +15,14 @@ def hosted():
     return os.environ.get('RENDER') == 'true' or bind_host() not in ('127.0.0.1', 'localhost', '::1')
 
 
+def ephemeral_workspaces():
+    """Hosted personal workspaces on temporary storage (GOVERNTRADE_ALLOW_EPHEMERAL_WORKSPACES without a persistent
+    disk). A restart erases the loss breaker, the day's opening value, today's spending and unconfirmed orders, which
+    the safety limits depend on, so real-money (Kalshi Live) trading is refused in this mode."""
+    return (hosted() and os.environ.get('GOVERNTRADE_ALLOW_EPHEMERAL_WORKSPACES') == 'true'
+            and os.environ.get('GOVERNTRADE_PERSISTENT_STORAGE') != 'true')
+
+
 def https():
     """Served over HTTPS: secure cookies and https:// origins. True on Render, or with GOVERNTRADE_HTTPS=true behind
     another TLS proxy. Binding to 0.0.0.0 alone (a LAN or Docker over plain http) keeps http:// so writes still work."""
