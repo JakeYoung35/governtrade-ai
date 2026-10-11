@@ -12,6 +12,9 @@ def markets(clock):
 DEFAULT={'autoLimit':25,'dailyCap':100,'dailyLossCap':50,'marketCap':50,'exposureCap':500,'minimum':100,'slippage':1,'automation':True,'alwaysApprove':False,'newMarketApproval':False,'notifications':True,'agents':[a[0] for a in AGENTS],'categories':[a[0] for a in AGENTS],'venues':['Demo Exchange'],'approvedMarkets':[]}
 def seed():
     clock='2026-10-09T09:00:00';return {'mode':'demo','demoAgents':demo_agents(),'clock':clock,'cash':1000.,'deposits':1000.,'reserved':0.,'realized':0.,'permissions':{'dailyCap':500,'automation':True},'safety':copy.deepcopy(SAFETY),'disabled':[],'orders':[],'positions':[],'chats':{a[0]:[] for a in AGENTS},'events':[],'keys':{},'markets':markets(clock)}
+def demo_walkthrough_seed():
+    # The presenter has one scenario; retain the other policy fixtures for governance regression tests.
+    s=seed();s['demoAgents']=[a for a in s['demoAgents'] if a['id']=='demo-conservative'];return s
 def event(s,text,kind='UPDATED',trade=None):s['events'].insert(0,{'id':uid(),'time':stamp(s),'text':text,'kind':kind,'trade':trade})
 def exposure(s):return round(sum(p['cost'] for p in s['positions'] if p['status']=='open'),2)
 def checks(s,o,approved=False):return layered_checks(s,o,approved)

@@ -2,7 +2,7 @@ import contextlib,json,os,secrets,threading,hmac,time
 from pathlib import Path
 from urllib.parse import urlsplit
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
-from engine import seed,main_seed,action,AGENTS,migrate
+from engine import seed,demo_walkthrough_seed,main_seed,action,AGENTS,migrate
 from workspace import Workspace
 from vault import Vault
 from store import PostgresStore
@@ -42,11 +42,11 @@ def locked(env):
         with LOCK,(STORE.session() if STORE and env=='main' else contextlib.nullcontext()):yield
 def read(env):
     if env=='main' and active_store():return migrate(active_store().load())
-    p=data_dir()/(env+'.json');s=json.loads(p.read_text()) if p.exists() else (seed() if env=='demo' else main_seed())
+    p=data_dir()/(env+'.json');s=json.loads(p.read_text()) if p.exists() else (demo_walkthrough_seed() if env=='demo' else main_seed())
     if env=='main' and s.get('schemaVersion') not in (2,3):
         if p.exists() and not (data_dir()/'legacy-simulation.json').exists():p.rename(data_dir()/'legacy-simulation.json')
         s=main_seed()
-    return migrate(s) if env=='main' else (s if s.get('demoAgents') else seed())
+    return migrate(s) if env=='main' else (s if s.get('demoAgents') else demo_walkthrough_seed())
 def save(env,s):
     if env=='main' and active_store():return active_store().save(s)
     if env=='main':s=compact_for_json(s)  # no database in JSON mode, so bound the governor history kept on disk
@@ -210,7 +210,7 @@ class Handler(SimpleHTTPRequestHandler):
                 s=read(env)
                 if proposal:result=workspace().proposal(s,b)
                 elif env=='main':result=governor().action(s,b) if str(b.get('action','')).startswith('governor-') else workspace().action(s,b)
-                elif b['action']=='reset':s=seed();result=None
+                elif b['action']=='reset':s=demo_walkthrough_seed();result=None
                 else:result=action(s,b)
                 save(env,s)
                 if proposal:self.json(200,{'order':result})

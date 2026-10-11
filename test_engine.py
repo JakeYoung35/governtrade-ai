@@ -5,6 +5,14 @@ from engine import *
 from adapters import KalshiAdapter,VenueError,now
 from workspace import Workspace
 from vault import Vault
+class SingleWalkthroughTests(unittest.TestCase):
+ def test_only_one_agent_and_no_hidden_prior_spending(self):
+  s=demo_walkthrough_seed();self.assertEqual([a['id'] for a in s['demoAgents']],['demo-conservative'])
+  g=s['demoAgents'][0];m=next(m for m in s['markets'] if m['agent']==g['demoMarket'])
+  o=propose(s,g['id'],m,5,'Yes','Demo trade','single-demo-trade')
+  self.assertEqual(o['status'],'filled');self.assertEqual(s['cash'],995)
+  spending=next(c for c in o['evaluations'][0]['checks'] if c['name']=='Total daily spending')
+  self.assertIn('$0.00 used',spending['reason'])
 class GovernanceTests(unittest.TestCase):
  def trade(self,s,n=10,key=None,agent='demo-conservative'):return propose(s,agent,next(m for m in s['markets'] if m['agent']==next(a['demoMarket'] for a in s['demoAgents'] if a['id']==agent)),n,'Yes','Test',key or uid())
  def test_fill_account(self):

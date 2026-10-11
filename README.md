@@ -66,12 +66,14 @@ These safeguards limit an agent’s authority. They do not guarantee profits or 
 
 Select **DEMO** to explore a simulated workspace that is separate from your connected accounts.
 
-Choose one of four agents and see:
+Follow one continuous walkthrough:
 
-1. A small trade execute automatically.
-2. A trade wait for your approval.
-3. A trade blocked for exceeding its daily spending cap.
-4. A new-market proposal that you review and deny.
+1. Watch the animated cursor enter a Kalshi Demo account name and sample API credentials.
+2. Watch it create Economics Scout with OpenAI, GPT-5 and a sample provider API key.
+3. Review the conservative agent’s mandate.
+4. Watch the $5 economics trade request get typed, proposed, independently checked and filled in the simulated ledger.
+
+The connection and agent setup are presentation-only. Sample keys are never saved or sent to Kalshi or OpenAI. Use Back or Restart to replay the walkthrough; leaving the demo cancels its animations.
 
 **Demo trades never use real funds.**
 
