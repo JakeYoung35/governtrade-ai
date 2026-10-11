@@ -187,7 +187,8 @@ class GovernorService:
         return fetched
 
     def _read_book(self, venue, market_id):
-        """(raw book, None), or (None, {"reason", "transient"}). A read the venue did not answer is retried once."""
+        """(raw book, None), or (None, {"reason", "transient"}). A fast transient failure is retried once; a timeout
+        is not, since it already used the time a retry would need."""
         for attempt in range(2):
             try:
                 raw = venue.get_orderbook(market_id)
@@ -195,9 +196,10 @@ class GovernorService:
                 return raw, None
             except VenueError as exc:
                 problem = {"reason": str(exc) or "The venue did not return the order book.", "transient": exc.transient}
+                timed_out = exc.timed_out
             except ValueError as exc:
                 return None, {"reason": f"The venue returned an unusable order book ({exc}).", "transient": False}
-            if not problem["transient"]:
+            if not problem["transient"] or timed_out:
                 return None, problem
             if attempt == 0:
                 time.sleep(VENUE_RETRY_SECONDS)

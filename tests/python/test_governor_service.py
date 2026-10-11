@@ -248,6 +248,19 @@ class VenueOutageTests(ServiceTest):
         self.venue.get_orderbook = read
         return calls
 
+    def test_timed_out_book_read_is_deferred_without_a_retry(self):
+        calls = []
+
+        def hang(market_id):
+            calls.append(market_id)
+            raise VenueError("kalshi request failed.", transient=True, timed_out=True)
+        self.venue.get_orderbook = hang
+        code, body = self.submit()
+        self.service.run_batch(self.s)
+        view = self.service.lookup(self.s, body["governorProposalId"])
+        self.assertEqual((len(calls), view["status"]), (1, "queued"))
+        self.assertIn("trying again in the next batch", view["note"])
+
     def test_one_unanswered_book_read_is_retried_within_the_pass(self):
         calls = self.flaky_books(1)
         code, body = self.submit()

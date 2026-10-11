@@ -6,7 +6,7 @@ import trading_rules
 from vault import masks
 from providers import validate_model_key,validate_free_agent,catalog,FREE_PROVIDER
 
-MAX_TRANSIENT_SYNC_FAILURES=3  # consecutive unanswered balance reads before a connected account shows an error
+TRANSIENT_SYNC_GRACE_SECONDS=120  # how long a connected account rides out unanswered balance reads before showing an error
 BALANCE_RETRY_SECONDS=0.5
 
 class Workspace:
@@ -17,8 +17,9 @@ class Workspace:
         b,failure=self.read_balance(a);return self.apply_balance(s,a,b,'refused' if test else failure)
     def read_balance(self,a):
         # Venue read only, no state changes, so the governor can fetch outside the workspace lock.
-        # Returns (balance, None), or (None, failure) where failure is 'transient' (no answer, HTTP 429 or 5xx;
-        # retried once here) or 'refused' (credentials, permissions or an invalid balance).
+        # Returns (balance, None), or (None, failure) where failure is 'transient' (no answer, HTTP 429 or 5xx)
+        # or 'refused' (credentials, permissions or an invalid balance). A fast transient failure is retried once;
+        # a timeout is not, because callers hold the workspace lock and a retry would double the wait.
         for attempt in range(2):
             try:
                 b=self.venue(a).get_balance_positions()
@@ -26,23 +27,27 @@ class Workspace:
                 return b,None
             except VenueError as e:
                 if not e.transient:return None,'refused'
+                if e.timed_out:return None,'transient'
                 if attempt==0:time.sleep(BALANCE_RETRY_SECONDS)
+            except TimeoutError:return None,'transient'
             except OSError:
                 if attempt==0:time.sleep(BALANCE_RETRY_SECONDS)
             except (ValueError,KeyError,TypeError,ImportError):return None,'refused'
         return None,'transient'
     def apply_balance(self,s,a,b,failure='refused'):
         if b is None:
-            # A connected account rides out a few transient failures: it stays connected, so agents can still
-            # propose, but the balance is marked stale, so every order and governor batch waits for a fresh one.
-            failures=a.get('syncFailures',0)+1;a['syncFailures']=failures
-            if failure=='transient' and a.get('status')=='connected' and failures<MAX_TRANSIENT_SYNC_FAILURES:
+            # A connected account rides out transient failures for a short grace period, however many reads fail
+            # in it: it stays connected, so agents can still propose, but the balance is marked stale, so every
+            # order and governor batch waits for a fresh one.
+            since=a.setdefault('syncFailingSince',now())
+            failing=(datetime.datetime.fromisoformat(now())-datetime.datetime.fromisoformat(since)).total_seconds()
+            if failure=='transient' and a.get('status')=='connected' and failing<TRANSIENT_SYNC_GRACE_SECONDS:
                 a.update(stale=True,error='Kalshi did not answer the last balance check. Trades wait until a fresh balance arrives.')
             else:a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.')
             return None
         equity=b['cash']+b.get('reserved',0)+b['positionValue'];day=now()[:10]
         if a.get('baseline',{}).get('day')!=day:a['baseline']={'day':day,'equity':equity}
-        b['dailyLoss']=max(0,a['baseline']['equity']-equity);a.pop('syncFailures',None);a.update(balance=b,status='connected',stale=False,error=None);return b
+        b['dailyLoss']=max(0,a['baseline']['equity']-equity);a.pop('syncFailingSince',None);a.update(balance=b,status='connected',stale=False,error=None);return b
     def evaluate(self,s,o,approved=False):
         a=next(x for x in s['accounts'] if x['id']==o['accountId']);v=self.venue(a);s['clock']=now();b=self.refresh(s,a)
         try:m=v.get_quote(o['market']['id'],o['direction'])

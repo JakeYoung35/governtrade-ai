@@ -23,7 +23,8 @@ from urllib.error import HTTPError, URLError
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
 class VenueError(ValueError):
     # transient: the venue or network may answer next time (no response, HTTP 429 or 5xx), unlike a refusal.
-    def __init__(self,message='',transient=False):super().__init__(message);self.transient=transient
+    # timed_out: the request used its whole timeout, so retrying at once would only double the wait.
+    def __init__(self,message='',transient=False,timed_out=False):super().__init__(message);self.transient=transient;self.timed_out=timed_out
 class VenueAdapter(ABC):
     def __init__(self, credentials, environment='sandbox'):
         if environment not in ('sandbox','live'):raise VenueError('Invalid environment.')
@@ -39,7 +40,9 @@ class VenueAdapter(ABC):
         try:
             with urlopen(Request(url,data=raw,method=method,headers=headers),timeout=timeout) as r:return json.load(r)
         except HTTPError as e:raise VenueError(f'{self.venue} returned HTTP {e.code}. Check credentials, environment and permissions.',transient=e.code==429 or e.code>=500) from None
-        except (OSError,http.client.HTTPException,ValueError):raise VenueError(f'{self.venue} request failed. No confirmed execution result.',transient=True) from None
+        except (OSError,http.client.HTTPException,ValueError) as e:
+            timed_out=isinstance(e,TimeoutError) or isinstance(getattr(e,'reason',None),TimeoutError)
+            raise VenueError(f'{self.venue} request failed. No confirmed execution result.',transient=True,timed_out=timed_out) from None
     def test_connection(self):return self.get_balance_positions()
     @abstractmethod
     def get_markets(self,category):pass

@@ -93,6 +93,12 @@ class AdapterTests(unittest.TestCase):
    with self.subTest(failure=type(failure).__name__),patch('adapters.urlopen',side_effect=failure):
     with self.assertRaises(VenueError) as e:KalshiAdapter({}).request('GET','/markets',public=True)
     self.assertTrue(e.exception.transient)
+    self.assertEqual(e.exception.timed_out,isinstance(failure,TimeoutError))
+ def test_connect_timeout_is_marked_timed_out(self):
+  from urllib.error import URLError
+  with patch('adapters.urlopen',side_effect=URLError(TimeoutError('timed out'))):
+   with self.assertRaises(VenueError) as e:KalshiAdapter({}).request('GET','/markets',public=True)
+  self.assertTrue(e.exception.transient);self.assertTrue(e.exception.timed_out)
  def test_http_errors_are_transient_only_when_retrying_can_help(self):
   from urllib.error import HTTPError
   for code,transient in [(429,True),(500,True),(503,True),(400,False),(401,False),(403,False),(404,False)]:
@@ -174,12 +180,34 @@ class FollowupTests(MainTests):
   self.assertEqual(self.a['status'],'connected');self.assertTrue(self.a['stale']);self.assertIn('did not answer',self.a['error'])
   self.assertEqual(self.proposal()['decision'],'BLOCK');self.assertEqual(self.v.calls,0)
   self.v.fail_with=None;self.w.action(self.s,{'action':'refresh'})
-  self.assertEqual(self.a['status'],'connected');self.assertFalse(self.a['stale']);self.assertIsNone(self.a['error']);self.assertNotIn('syncFailures',self.a)
+  self.assertEqual(self.a['status'],'connected');self.assertFalse(self.a['stale']);self.assertIsNone(self.a['error']);self.assertNotIn('syncFailingSince',self.a)
  @patch('workspace.BALANCE_RETRY_SECONDS',0)
- def test_repeated_transient_failures_mark_account_errored(self):
+ def test_transient_failures_mark_account_errored_only_after_the_grace_period(self):
+  # Many callers can read the balance during one short blip; the grace is time, not a count of reads.
   self.w.refresh(self.s,self.a);self.v.fail_with=ConnectionResetError('reset')
-  for _ in range(2):self.w.action(self.s,{'action':'refresh'});self.assertEqual(self.a['status'],'connected')
-  self.w.action(self.s,{'action':'refresh'});self.assertEqual(self.a['status'],'error');self.assertIn('Balance sync failed',self.a['error'])
+  with patch('workspace.now',return_value='2026-10-11T12:00:00+00:00'):
+   for _ in range(10):self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'connected')
+  with patch('workspace.now',return_value='2026-10-11T12:01:59+00:00'):self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'connected')
+  with patch('workspace.now',return_value='2026-10-11T12:02:00+00:00'):self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'error');self.assertIn('Balance sync failed',self.a['error'])
+ @patch('workspace.BALANCE_RETRY_SECONDS',0)
+ def test_grace_period_restarts_after_a_good_balance(self):
+  self.w.refresh(self.s,self.a);self.v.fail_with=ConnectionResetError('reset')
+  with patch('workspace.now',return_value='2026-10-11T12:00:00+00:00'):self.w.action(self.s,{'action':'refresh'})
+  self.v.fail_with=None;self.w.action(self.s,{'action':'refresh'});self.assertNotIn('syncFailingSince',self.a)
+  self.v.fail_with=ConnectionResetError('reset')
+  with patch('workspace.now',return_value='2026-10-11T12:05:00+00:00'):self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'connected');self.assertTrue(self.a['stale'])
+ def test_timed_out_balance_read_is_not_retried(self):
+  # Balance reads run under the workspace lock, so a second full timeout would stall every user.
+  for failure in [VenueError('kalshi request failed.',transient=True,timed_out=True),TimeoutError()]:
+   with self.subTest(failure=type(failure).__name__):
+    reads=[]
+    def hang():reads.append(1);raise failure
+    self.v.get_balance_positions=hang
+    self.assertEqual(self.w.read_balance(self.a),(None,'transient'));self.assertEqual(len(reads),1)
  @patch('workspace.BALANCE_RETRY_SECONDS',0)
  def test_balance_read_retries_once(self):
   reads=[];real=self.v.get_balance_positions
