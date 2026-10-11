@@ -49,9 +49,11 @@ class FakeVenue:
   return {'cash':self.cash,'positionValue':0,'exposure':self.exposure,'realizedPnl':0,'unrealizedPnl':0,'positions':[],'asOf':now(),'mock':False,'source':'test'}
  def get_quote(self,k,d):return {'id':k,'name':'BTC','agent':self.category,'venue':'kalshi','instrument':'prediction','price':self.price,'quoteAt':now(),'closeAt':'2099-01-01T00:00:00+00:00','open':True,'executionReady':True,'slippage':0}
  def place_order(self,o):self.calls+=1;return {'order_id':'venue-1','fill_count':'1','average_fill_price':'.5','average_fee_paid':'.01'}
+# The old Moderate preset ($25 automatic, $100 daily, $100 reserve) as shares of the tests' $1,000 account.
+MANDATE={'autoLimitPercent':2.5,'dailyCapPercent':10,'minimumPercent':10,'newMarketApproval':False}
 class MainTests(unittest.TestCase):
  def setUp(self):
-  self.s=trading_rules.fixture(main_seed());self.a={'id':'account','name':'Kalshi','venue':'kalshi','environment':'sandbox','status':'connected','credentialRef':'SECRET_REF','ceiling':{}};self.g={'id':'agent','name':'Agent','accountId':'account','status':'active','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate']),'modelValidated':True,'modelCredentialRef':'MODEL_REF'};self.s['accounts']=[self.a];self.s['agentConfigs']=[self.g];self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
+  self.s=trading_rules.fixture(main_seed());self.a={'id':'account','name':'Kalshi','venue':'kalshi','environment':'sandbox','status':'connected','credentialRef':'SECRET_REF','ceiling':{}};self.g={'id':'agent','name':'Agent','accountId':'account','status':'active','personality':None,'mandate':copy.deepcopy(MANDATE),'modelValidated':True,'modelCredentialRef':'MODEL_REF'};self.s['accounts']=[self.a];self.s['agentConfigs']=[self.g];self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def proposal(self,n=10,key='one'):return self.w.proposal(self.s,{'agentId':'agent','marketId':'BTC','direction':'Yes','amount':n,'reasoning':'Test reasoning','idempotencyKey':key})
  def test_main_fresh_balance_and_once(self):
   o=self.proposal();self.assertEqual(o['status'],'filled');self.proposal();self.assertEqual(self.v.calls,1);self.assertEqual(o['amount'],10)
@@ -66,9 +68,9 @@ class MainTests(unittest.TestCase):
  def test_observed_daily_loss_blocks(self):
   self.w.refresh(self.s,self.a);self.v.cash=920;self.assertEqual(self.proposal()['decision'],'BLOCK')
  def test_agent_specific_cap(self):
-  self.g['mandate']['dailyCap']=5;self.assertEqual(self.proposal()['decision'],'BLOCK')
+  self.g['mandate']['dailyCapPercent']=0.5;self.assertEqual(self.proposal()['decision'],'BLOCK')  # $5 of $1,000
  def test_shared_budget_across_agents(self):
-  trading_rules.fixture(self.s,{'dailySpendingCeiling':15});self.proposal();g={**self.g,'id':'second'};self.s['agentConfigs'].append(g);o=self.w.proposal(self.s,{'agentId':'second','marketId':'BTC','direction':'Yes','amount':10,'reasoning':'Test','idempotencyKey':'two'});self.assertEqual(o['decision'],'BLOCK')
+  trading_rules.fixture(self.s,{'dailySpendingPercent':1.5});self.proposal();g={**self.g,'id':'second'};self.s['agentConfigs'].append(g);o=self.w.proposal(self.s,{'agentId':'second','marketId':'BTC','direction':'Yes','amount':10,'reasoning':'Test','idempotencyKey':'two'});self.assertEqual(o['decision'],'BLOCK')
  def test_submission_unknown_keeps_reserve(self):
   self.v.place_order=lambda o:(_ for _ in ()).throw(VenueError('timeout'));o=self.proposal();self.assertEqual(o['status'],'submission unknown');self.assertEqual(usage(self.s,'account')['held'],10);self.proposal();self.assertEqual(len(self.s['orders']),1)
  def test_no_category_filter(self):
@@ -122,7 +124,7 @@ class FollowupTests(MainTests):
    result=self.w.action(self.s,{'action':'agent-save','name':'New','provider':'openai','model':'gpt-4.1','modelKey':'secret','accountId':'account'})
    validate.assert_called_once_with('openai','gpt-4.1','secret')
   a=self.s['agentConfigs'][-1];self.assertEqual(a['status'],'draft');self.assertIsNone(a['mandate'])
-  self.w.action(self.s,{'action':'mandate-save','id':result['agentId'],'personality':'Moderate','mandate':PERSONALITIES['Moderate']});self.assertEqual(a['status'],'active')
+  self.w.action(self.s,{'action':'mandate-save','id':result['agentId'],'mandate':dict(MANDATE)});self.assertEqual(a['status'],'active')
  def test_validation_failure_does_not_save(self):
   with patch('workspace.validate_model_key',side_effect=ValueError('Invalid')):
    with self.assertRaises(ValueError):self.w.action(self.s,{'action':'agent-save','name':'New','provider':'openai','model':'gpt-4.1','modelKey':'secret','accountId':'account'})

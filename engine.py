@@ -100,12 +100,20 @@ def migrate(s):
  return trading_rules.migrate(s)  # a workspace from before user-set rules must set them before trading
 
 def workspace_ceiling(s):
- # The user's daily spending ceiling; 0 until trading rules are set. The demo keeps its scripted ceiling.
+ # Dollars all agents may spend today: the user's daily spending share of every connected account's current value
+ # (0 until trading rules are set). The demo keeps its scripted dollar ceiling.
  if s.get('mode')!='main':return s['permissions']['dailyCap']
- return trading_rules.values(s)['dailySpendingCeiling'] if trading_rules.ready(s) else 0
+ if not trading_rules.ready(s):return 0
+ total=sum(v for v in (trading_rules.account_value(a) for a in s['accounts'] if a.get('status')!='removed') if v)
+ return trading_rules.dollars(trading_rules.values(s)['dailySpendingPercent'],total)
 def ceiling(s,account):
- top=workspace_ceiling(s)
- return {'dailyCap':min(top,account.get('ceiling',{}).get('dailyCap',top)),'automation':s['permissions']['automation']}
+ # One account's daily ceiling: the workspace share, or the account's own lower share, of its current value.
+ if s.get('mode')!='main':
+  top=workspace_ceiling(s);return {'dailyCap':min(top,account.get('ceiling',{}).get('dailyCap',top)),'automation':s['permissions']['automation']}
+ percent=trading_rules.values(s)['dailySpendingPercent'] if trading_rules.ready(s) else 0
+ own=(account.get('ceiling') or {}).get('dailyPercent')
+ if own is not None:percent=min(percent,own)
+ return {'dailyCap':trading_rules.dollars(percent,trading_rules.account_value(account)),'dailyPercent':percent,'automation':s['permissions']['automation']}
 def rules(s,agent):return copy.deepcopy(agent.get('mandate') or {})
 def usage(s,account_id,agent_id=None,market_id=None):
  orders=[o for o in s['orders'] if o.get('accountId')==account_id and (not agent_id or o['agent']==agent_id) and (o.get('committed') or o.get('filled'))]
@@ -139,10 +147,22 @@ def layered_checks(s,o,approved=False):
  demo=s.get('mode')!='main';agents=s.get('demoAgents',[]) if demo else s['agentConfigs'];agent=next(x for x in agents if x['id']==o['agent']);m=o['market'];amount=o['amount'];rows=[]
  account={'id':'demo-account','venue':'Demo Exchange','environment':'sandbox','status':'connected'} if demo else next(x for x in s['accounts'] if x['id']==agent['accountId'])
  b={'cash':s['cash']-s['reserved'],'reserved':s['reserved'],'exposure':exposure(s),'dailyLoss':max(0,-s['realized'])} if demo else o.get('_balance')
- policy=agent.get('mandate');p=policy or {'autoLimit':0,'dailyCap':0,'minimum':0,'newMarketApproval':True};cap=ceiling(s,account)
- # The user's dollar limits and price freshness (the demo keeps its scripted limits). No rules, no trading.
+ policy=agent.get('mandate');cap=ceiling(s,account)
+ # The user's rules and mandate are shares of the account's current value (from the fresh balance read just before
+ # this check), turned into dollars here. The demo keeps its scripted dollar limits. No rules, no trading.
  ready=demo or trading_rules.ready(s);v=trading_rules.values(s) if not demo and ready else {}
- safety=s.get('safety',SAFETY) if demo else {'marketCap':v.get('marketDollarLimit',0),'exposureCap':v.get('exposureDollarLimit',0),'dailyLossCap':v.get('dailyLossDollarLimit',0)}
+ value=trading_rules.account_value(b) if not demo else None;pct=lambda key,base=value:trading_rules.dollars(v.get(key,0),base)
+ # Today's loss is measured from the same base as the governor's loss breaker: the day-open value, or after a
+ # same-day reset the lower of that and the value at reset, so a reset resumes trading at both stages.
+ loss_base=(account.get('baseline') or {}).get('equity');loss_now=(b or {}).get('dailyLoss',0)
+ reset=(s.get('governor') or {}).get('breakers',{}).get(account['id']) or {}
+ if not demo and reset.get('rebaseDay')==s['clock'][:10] and reset.get('rebaseEquity') is not None:
+  loss_base=min(x for x in (loss_base,float(reset['rebaseEquity'])) if x is not None)
+  loss_now=max(0,loss_base-(value or 0))
+ safety=s.get('safety',SAFETY) if demo else {'marketCap':pct('marketCapPercent'),'exposureCap':pct('totalCapPercent'),'dailyLossCap':pct('dailyLossPercent',loss_base)}
+ if demo:p=policy or {'autoLimit':0,'dailyCap':0,'minimum':0,'newMarketApproval':True}
+ else:
+  m_=policy or {};p={'autoLimit':trading_rules.dollars(m_.get('autoLimitPercent',0),value),'dailyCap':trading_rules.dollars(m_.get('dailyCapPercent',0),value),'minimum':trading_rules.dollars(m_.get('minimumPercent',0),value),'newMarketApproval':m_.get('newMarketApproval',True)}
  quote_age=300 if demo else v.get('quoteMaxAgeSeconds',0)
  def c(name,ok,reason,layer='execution',approval=False):rows.append({'name':name,'outcome':'ALLOW' if ok else 'REQUIRE_APPROVAL' if approval else 'BLOCK','reason':reason,'layer':layer})
  c('Trading rules set',ready,'The account owner must set every trading rule before any agent trades.','account_ceiling')
@@ -166,9 +186,9 @@ def layered_checks(s,o,approved=False):
  c('New market authorization',approved or not p['newMarketApproval'] or m['id'] in used_markets,'This agent must receive approval for a market it has not traded before.','agent_mandate',True)
  # Retain existing execution guardrails; approvals cannot remove any hard restriction.
  mu=sum(x['amount'] for x in s['orders'] if (x.get('committed') or x.get('filled')) and x['market']['id']==m['id'] and x['market']['venue']==m['venue'])
- c('Cumulative market budget',mu+amount<=safety['marketCap'],f"Your per-market dollar limit is ${safety['marketCap']:.2f}.")
- c('Open exposure',b is not None and b['exposure']+held+amount<=safety['exposureCap'],f"Open exposure and unresolved submissions must fit your ${safety['exposureCap']:.2f} limit.")
- c('Daily loss',b is not None and b['dailyLoss']<safety['dailyLossCap'],f"Trading stops once today's loss reaches your ${safety['dailyLossCap']:.2f} limit.")
+ c('Cumulative market budget',mu+amount<=safety['marketCap'],f"Your per-market cap is ${safety['marketCap']:.2f} of this account.")
+ c('Open exposure',b is not None and b['exposure']+held+amount<=safety['exposureCap'],f"Open exposure and unresolved submissions must fit your ${safety['exposureCap']:.2f} total exposure cap.")
+ c('Daily loss',b is not None and loss_now<safety['dailyLossCap'],f"Trading stops once today's loss reaches your ${safety['dailyLossCap']:.2f} daily loss limit.")
  age=(dt.datetime.fromisoformat(s['clock'])-dt.datetime.fromisoformat(m['quoteAt'])).total_seconds()
  c('Fresh quote',0<=age<=quote_age,f"Prices older than {quote_age} seconds cannot execute.")
  c('Market open',m.get('open',True) and s['clock']<m['closeAt'],'Market must still be open.')

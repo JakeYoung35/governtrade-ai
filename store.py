@@ -99,7 +99,9 @@ class PostgresStore:
                 s['accounts'].append(a)
             for r in q('SELECT * FROM agents ORDER BY created_at,id'):
                 g={**r['extra'],**present(r,{'id':'id','accountId':'account_id','name':'name','provider':'provider','model':'model','modelValidated':'model_validated','modelCredentialRef':'model_credential_ref','modelKeyMask':'model_key_mask','status':'status'}),'personality':r['personality']}
-                g['mandate']=None if r['auto_limit'] is None else {'autoLimit':r['auto_limit'],'dailyCap':r['daily_cap'],'minimum':r['minimum_reserve'],'newMarketApproval':r['new_market_approval']}
+                # Percentage mandates (trading rules schema 2) live in extra; the dollar columns hold older mandates,
+                # which trading_rules.migrate() converts once.
+                g['mandate']=r['extra'].get('mandate') or (None if r['auto_limit'] is None else {'autoLimit':r['auto_limit'],'dailyCap':r['daily_cap'],'minimum':r['minimum_reserve'],'newMarketApproval':r['new_market_approval']})
                 s['agentConfigs'].append(g);s['chats'][g['id']]=[]
             evaluations={}
             for r in q('SELECT * FROM order_evaluations ORDER BY order_id,seq'):
@@ -181,7 +183,8 @@ class PostgresStore:
                 (a.get('ceiling') or {}).get('dailyCap'),(a.get('baseline') or {}).get('day'),(a.get('baseline') or {}).get('equity'),j(a.get('balance')),Jsonb({k:v for k,v in a.items() if k not in ACCOUNT_FIELDS}))
                 for a in s['accounts'] if changed('account',a)])
             run(AGENT_UPSERT,[(g['id'],g['accountId'],g['name'],g['provider'],g['model'],g.get('modelValidated',False),g.get('modelCredentialRef'),g.get('modelKeyMask'),g['status'],g.get('personality'),
-                *((g['mandate'][k] for k in ('autoLimit','dailyCap','minimum','newMarketApproval')) if g.get('mandate') else (None,)*4),Jsonb({k:v for k,v in g.items() if k not in AGENT_FIELDS}))
+                *((g['mandate'][k] for k in ('autoLimit','dailyCap','minimum','newMarketApproval')) if g.get('mandate') and 'autoLimit' in g['mandate'] else (None,)*4),
+                Jsonb({**{k:v for k,v in g.items() if k not in AGENT_FIELDS},**({'mandate':g['mandate']} if g.get('mandate') and 'autoLimit' not in g['mandate'] else {})}))
                 for g in s['agentConfigs'] if changed('agent',g)])
             run(ORDER_UPSERT,[(o['id'],o['agent'],o['accountId'],o['market']['id'],Jsonb(o['market']),o['direction'],o['amount'],o.get('request'),o['status'],o.get('decision'),o.get('committed'),o.get('filled',False),
                 o.get('automatic'),o.get('venueOrderId'),o.get('quantity'),o.get('actualCost'),Jsonb({k:v for k,v in o.items() if k not in ORDER_FIELDS}),o['time'])

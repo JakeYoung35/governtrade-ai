@@ -30,7 +30,8 @@ CLE, PHI, HOU, PIT = ("KXNFLGAME-26OCT18BALCLE-CLE", "KXNFLGAME-26OCT18CARPHI-PH
                       "KXNFLGAME-26OCT18HOUJAC-HOU", "KXNFLGAME-26OCT18PITTB-PIT")
 ACCOUNT = "paper-account"
 AGENTS = {"reference": "Reference Agent", "momentum": "Momentum Agent", "aggressive": "Aggressive Agent"}
-MANDATE = {"autoLimit": 60, "dailyCap": 300, "minimum": 100, "newMarketApproval": False}
+# $60 automatic, $300 daily and $100 reserve on the $1,000 paper account, as the shares the app stores.
+MANDATE = {"autoLimitPercent": 6, "dailyCapPercent": 30, "minimumPercent": 10, "newMarketApproval": False}
 
 
 class _NoCredentials:
@@ -50,8 +51,9 @@ def build():
     clock = Clock()
     venue = PaperVenue(clock.now)
     s = main_seed()
-    # This scripted demo sets its own rules. The daily loss dollar limit is above the 3% breaker so the breaker shows.
-    trading_rules.fixture(s, {"dailySpendingCeiling": 500, "dailyLossDollarLimit": 150})
+    # This scripted demo saves the starting rules with a wider daily spending ceiling; its 3% daily loss limit is the
+    # breaker the demo shows latching.
+    trading_rules.fixture(s, {"dailySpendingPercent": 50})
     s["accounts"] = [{"id": ACCOUNT, "name": "Paper replay account", "venue": "kalshi", "environment": "sandbox",
                       "status": "connected", "credentialRef": "paper", "ceiling": {"dailyCap": 500}}]
     s["agentConfigs"] = [{"id": agent, "name": name, "accountId": ACCOUNT, "status": "active", "personality": None,
