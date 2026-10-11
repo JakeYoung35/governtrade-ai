@@ -1,27 +1,53 @@
 """User management and the narrow, governed agent integration boundary."""
-import copy, datetime, math, uuid
+import copy, datetime, math, time, uuid
 from adapters import adapter,ADAPTERS,VenueError,now
 from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling
 import trading_rules
 from vault import masks
 from providers import validate_model_key,validate_free_agent,catalog,FREE_PROVIDER
 
+TRANSIENT_SYNC_GRACE_SECONDS=120  # how long a connected account rides out unanswered balance reads before showing an error
+BALANCE_RETRY_SECONDS=0.5
+
 class Workspace:
     def __init__(self,vault,persist=lambda s:None):self.vault=vault;self.persist=persist
     def venue(self,a):return adapter(a['venue'],self.vault.get(a['credentialRef']),a['environment'],a.get('subaccount',0))
-    def refresh(self,s,a):return self.apply_balance(s,a,self.fetch_balance(a))
-    def fetch_balance(self,a):
-        # Venue read only, no state changes, so the governor can fetch outside the workspace lock. None on failure.
-        try:
-            b=self.venue(a).get_balance_positions()
-            if not all(math.isfinite(float(b[k])) and float(b[k])>=0 for k in ('cash','positionValue','exposure')):raise VenueError('Venue returned invalid balance values.')
-            return b
-        except (ValueError,KeyError,TypeError,ImportError,OSError):return None
-    def apply_balance(self,s,a,b):
-        if b is None:a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.');return None
+    def refresh(self,s,a,test=False):
+        # test: the user's "Test connection" reports every failure as an error instead of riding out a transient one.
+        b,failure=self.read_balance(a);return self.apply_balance(s,a,b,'refused' if test else failure)
+    def read_balance(self,a):
+        # Venue read only, no state changes, so the governor can fetch outside the workspace lock.
+        # Returns (balance, None), or (None, failure) where failure is 'transient' (no answer, HTTP 429 or 5xx)
+        # or 'refused' (credentials, permissions or an invalid balance). A fast transient failure is retried once;
+        # a timeout is not, because callers hold the workspace lock and a retry would double the wait.
+        for attempt in range(2):
+            try:
+                b=self.venue(a).get_balance_positions()
+                if not all(math.isfinite(float(b[k])) and float(b[k])>=0 for k in ('cash','positionValue','exposure')):raise VenueError('Venue returned invalid balance values.')
+                return b,None
+            except VenueError as e:
+                if not e.transient:return None,'refused'
+                if e.timed_out:return None,'transient'
+                if attempt==0:time.sleep(BALANCE_RETRY_SECONDS)
+            except TimeoutError:return None,'transient'
+            except OSError:
+                if attempt==0:time.sleep(BALANCE_RETRY_SECONDS)
+            except (ValueError,KeyError,TypeError,ImportError):return None,'refused'
+        return None,'transient'
+    def apply_balance(self,s,a,b,failure='refused'):
+        if b is None:
+            # A connected account rides out transient failures for a short grace period, however many reads fail
+            # in it: it stays connected, so agents can still propose, but the balance is marked stale, so every
+            # order and governor batch waits for a fresh one.
+            since=a.setdefault('syncFailingSince',now())
+            failing=(datetime.datetime.fromisoformat(now())-datetime.datetime.fromisoformat(since)).total_seconds()
+            if failure=='transient' and a.get('status')=='connected' and failing<TRANSIENT_SYNC_GRACE_SECONDS:
+                a.update(stale=True,error='Kalshi did not answer the last balance check. Trades wait until a fresh balance arrives.')
+            else:a.update(status='error',stale=True,error='Balance sync failed. Check credentials, environment, permissions and network.')
+            return None
         equity=b['cash']+b.get('reserved',0)+b['positionValue'];day=now()[:10]
         if a.get('baseline',{}).get('day')!=day:a['baseline']={'day':day,'equity':equity}
-        b['dailyLoss']=max(0,a['baseline']['equity']-equity);a.update(balance=b,status='connected',stale=False,error=None);return b
+        b['dailyLoss']=max(0,a['baseline']['equity']-equity);a.pop('syncFailingSince',None);a.update(balance=b,status='connected',stale=False,error=None);return b
     def evaluate(self,s,o,approved=False):
         a=next(x for x in s['accounts'] if x['id']==o['accountId']);v=self.venue(a);s['clock']=now();b=self.refresh(s,a)
         try:m=v.get_quote(o['market']['id'],o['direction'])
@@ -92,7 +118,7 @@ class Workspace:
             a=next(x for x in s['accounts'] if x['id']==b['id'])
             if a.get('status')=='removed':raise ValueError('This Kalshi connection was removed.')
             if not a.get('credentialRef'):raise ValueError('This account has no saved credentials. Add keys under Settings / rotate keys.')
-            self.refresh(s,a)
+            self.refresh(s,a,test=True)
         elif action=='account-disconnect':
             a=next(x for x in s['accounts'] if x['id']==b['id'])
             if a.get('status')=='removed':raise ValueError('This Kalshi connection was removed.')

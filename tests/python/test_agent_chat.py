@@ -392,6 +392,23 @@ class LimitTests(ChatTest):
                          "I had already sent 1 proposal to the governor; see below.")
         self.assertEqual(self.s["governorRequests"][0]["proposalId"], "chat-0-0")
 
+    def test_retries_stop_when_the_turn_is_nearly_over(self):
+        clock, sent = [0.0], []
+
+        def post_json(url, headers, body, timeout):
+            sent.append(timeout)
+            clock[0] = 110  # the first call used most of the turn
+            raise ModelError("The model provider is overloaded right now (HTTP 503). Try again in a minute.", retryable=True)
+
+        def connect(provider, model, key, system, tools, history, post):
+            with patch("agent_chat.post_json", post_json), self.assertRaisesRegex(ModelError, "overloaded"):
+                post("https://api.example", {}, {})
+            raise ModelError("stop here")
+
+        with patch("agent_chat.time.monotonic", lambda: clock[0]), patch("agent_chat.time.sleep") as sleep:
+            self.chat(connect)
+        self.assertEqual((len(sent), sleep.call_count), (1, 0))  # 10 s left is too little to wait and retry
+
     def test_each_model_call_gets_only_the_time_left(self):
         clock, seen = [0.0], []
 
@@ -608,6 +625,33 @@ class ProviderTests(unittest.TestCase):
                     agent_llm.post_json("https://api.example", {"x-api-key": "sk-secret"}, {})
                 self.assertIn(expected, str(caught.exception))
                 self.assertNotIn("sk-secret", str(caught.exception))
+
+    def test_outages_are_retryable_with_a_clear_message_and_refusals_are_not(self):
+        import io
+        from urllib.error import URLError
+        for error, expected, retryable in [
+            (HTTPError("https://api.example", 503, "x", {}, None), "is overloaded right now (HTTP 503). Try again in a minute.", True),
+            (HTTPError("https://api.example", 500, "x", {}, None), "had a temporary problem (HTTP 500). Try again in a minute.", True),
+            (HTTPError("https://api.example", 429, "x", {}, io.BytesIO(b'{"error":{"message":"slow down"}}')), "rate limiting", True),
+            (HTTPError("https://api.example", 429, "x", {}, io.BytesIO(b'{"error":{"code":"insufficient_quota"}}')), "spending limit", False),
+            (HTTPError("https://api.example", 401, "x", {}, None), "rejected the API key", False),
+            (URLError(ConnectionRefusedError()), "could not be reached", True),
+            (URLError(TimeoutError()), "could not be reached", False),
+            (TimeoutError(), "could not be reached", False),
+        ]:
+            with self.subTest(error=error), patch("agent_llm.urlopen", side_effect=error):
+                with self.assertRaises(ModelError) as caught:
+                    agent_llm.post_json("https://api.example/v1/models/m?key=sk-secret", {}, {})
+                self.assertIn(expected, str(caught.exception))
+                self.assertEqual(caught.exception.retryable, retryable)
+
+    def test_provider_statuses_are_logged_without_the_url_path_or_key(self):
+        import contextlib, io
+        out = io.StringIO()
+        with patch("agent_llm.urlopen", side_effect=HTTPError("u", 503, "x", {}, None)), contextlib.redirect_stdout(out):
+            with self.assertRaises(ModelError):
+                agent_llm.post_json("https://generativelanguage.googleapis.com/v1beta/models/m:generateContent?key=sk-secret", {}, {})
+        self.assertEqual(out.getvalue(), "Model provider generativelanguage.googleapis.com returned HTTP 503.\n")
 
     def test_unreadable_error_bodies_keep_status_fallback(self):
         import io
