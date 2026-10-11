@@ -139,8 +139,9 @@ def _number(value):
 
 
 def account_value(record):
-    """An account's current value in dollars (cash + reserved cash + marked positions), or None if unknown.
-    record: an account (its last synced balance) or a balance read."""
+    """An account's current value in dollars (cash + reserved cash + marked positions). 0 for a synced account that
+    is empty; None only when no usable balance is known. record: an account (its last synced balance) or a balance
+    read. Either way every percentage of it is $0, so an empty or unknown account cannot trade."""
     if not isinstance(record, dict):
         return None
     balance = record if "cash" in record else record.get("balance")
@@ -149,8 +150,7 @@ def account_value(record):
     parts = [_number(balance.get("cash")), _number(balance.get("reserved", 0)), _number(balance.get("positionValue", 0))]
     if any(p is None for p in parts):
         return None
-    total = sum(parts)
-    return total if total > 0 else None
+    return sum(parts)
 
 
 def dollars(percent, value):
@@ -199,7 +199,7 @@ def migrate(s):
         mandate = agent.get("mandate")
         if mandate and "autoLimit" in mandate:
             account = next((a for a in s.get("accounts", []) if a["id"] == agent.get("accountId")), None)
-            value = account_value(account)
+            value = account_value(account)  # unknown or $0: there is nothing to convert against
             agent["mandate"] = None if not value else {
                 "autoLimitPercent": _percent(mandate.get("autoLimit"), value) or 0,
                 "dailyCapPercent": _percent(mandate.get("dailyCap"), value) or 0,

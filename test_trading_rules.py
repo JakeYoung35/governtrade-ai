@@ -90,8 +90,10 @@ class CatalogTests(unittest.TestCase):
     def test_account_value_and_dollars(self):
         self.assertEqual(trading_rules.account_value({"balance": {"cash": 400, "reserved": 50, "positionValue": 50}}), 500)
         self.assertEqual(trading_rules.account_value({"cash": D("12.5")}), 12.5)
-        self.assertIsNone(trading_rules.account_value({"status": "connected"}))
-        self.assertIsNone(trading_rules.account_value({"balance": {"cash": 0}}))
+        self.assertIsNone(trading_rules.account_value({"status": "connected"}))  # never synced: unknown
+        self.assertIsNone(trading_rules.account_value({"balance": {"cash": "abc"}}))  # unusable: unknown
+        self.assertIsNone(trading_rules.account_value(None))
+        self.assertEqual(trading_rules.account_value({"balance": {"cash": 0, "reserved": 0, "positionValue": 0}}), 0)  # empty
         self.assertEqual((trading_rules.dollars(5, 500), trading_rules.dollars(5, None)), (25, 0))
 
 
@@ -138,6 +140,11 @@ class MigrationTests(unittest.TestCase):
         self.assertNotIn("safety", s)
         self.assertEqual(s["permissions"], {"automation": True})
         self.assertEqual(migrate(copy.deepcopy(s)), s)  # running it again changes nothing
+
+    def test_an_empty_account_converts_like_an_unknown_one(self):
+        s = migrate(v1_workspace(balance=0.0))  # synced, but $0: nothing to convert dollars against
+        self.assertEqual(s["rules"]["previous"]["dailySpendingPercent"], trading_rules.DEFAULTS["dailySpendingPercent"])
+        self.assertIsNone(s["agentConfigs"][0]["mandate"])
 
     def test_postgres_decimals_convert(self):
         s = v1_workspace(balance=None)
@@ -230,6 +237,15 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.propose(amount=10, key="two")["decision"], "BLOCK")
         self.v.cash = 2000  # the same 0.8% of a $2,000 account is $16
         self.assertEqual(self.propose(amount=10, key="three")["decision"], "ALLOW")
+
+    def test_an_empty_account_has_every_limit_at_zero(self):
+        trading_rules.fixture(self.s)
+        self.v.cash = 0
+        order = self.propose(amount=5)
+        self.assertEqual(order["decision"], "BLOCK")
+        self.assertEqual(self.check(order, "Cumulative market budget")["reason"], "Your per-market cap is $0.00 of this account.")
+        self.assertEqual(self.check(order, "Total daily spending")["outcome"], "BLOCK")
+        self.assertEqual(self.w.public(self.s)["accounts"][0]["effectiveCeiling"]["dailyCap"], 0)
 
     def test_the_mandate_scales_with_the_account(self):
         trading_rules.fixture(self.s)
