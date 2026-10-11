@@ -4,11 +4,11 @@ Each run migrates a throwaway schema and drops it afterwards, so real tables are
 """
 import copy,os,unittest,uuid
 from unittest.mock import patch
-from engine import main_seed,migrate,PERSONALITIES
+from engine import main_seed,migrate
 import trading_rules
 from workspace import Workspace
 from store import PostgresStore
-from test_engine import FakeVault,FakeVenue
+from test_engine import MANDATE,FakeVault,FakeVenue
 
 URL=os.environ.get('TEST_DATABASE_URL')
 @unittest.skipUnless(URL,'Set TEST_DATABASE_URL to run Postgres store tests.')
@@ -25,8 +25,8 @@ class StoreTests(unittest.TestCase):
   with self.store.connect() as c:c.execute('TRUNCATE governor_requests,governor_breaker_events,governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
   self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def workspace(self):
-  s=trading_rules.fixture(main_seed());a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{'dailyCap':100}}
-  g={'id':str(uuid.uuid4()),'name':'Agent','accountId':a['id'],'provider':'openai','model':'gpt-4.1','modelValidated':True,'modelCredentialRef':'MODEL_REF','modelKeyMask':'••••abcd','status':'active','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate'])}
+  s=trading_rules.fixture(main_seed());a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{}}
+  g={'id':str(uuid.uuid4()),'name':'Agent','accountId':a['id'],'provider':'openai','model':'gpt-4.1','modelValidated':True,'modelCredentialRef':'MODEL_REF','modelKeyMask':'••••abcd','status':'active','personality':None,'mandate':copy.deepcopy(MANDATE)}
   s['accounts']=[a];s['agentConfigs']=[g];s['chats'][g['id']]=[];return s
  def proposal(self,s,n,key):return self.w.proposal(s,{'agentId':s['agentConfigs'][0]['id'],'marketId':'BTC','direction':'Yes','amount':n,'reasoning':'Test','idempotencyKey':key})
  def reload(self):
@@ -37,17 +37,22 @@ class StoreTests(unittest.TestCase):
  def test_fresh_database_matches_seed(self):
   s=self.reload();seed=main_seed()
   self.assertEqual({k:v for k,v in s.items() if k!='clock'},{k:v for k,v in seed.items() if k!='clock'})
- def test_a_pre_rules_workspace_gets_hints_and_loses_copied_ceilings(self):
+ def test_a_pre_rules_workspace_reviews_rules_and_converts_its_dollar_mandate(self):
+  # A workspace saved before user-set rules: a dollar mandate and a dollar ceiling copied from the workspace cap.
   s=self.workspace();s['accounts'][0]['ceiling']={'dailyCap':100}
+  s['accounts'][0]['balance']={'cash':500.0,'reserved':0,'positionValue':0}
+  s['agentConfigs'][0]['mandate']={'autoLimit':25,'dailyCap':100,'minimum':100,'newMarketApproval':False}
   with self.store.session():self.store.save(s)
-  # Make it a workspace saved before user-set rules: no rules in extra, the old fixed limits in their columns.
   with self.store.connect() as c:c.execute("UPDATE workspace_settings SET extra=extra-'rules',daily_cap=100,market_cap=40")
-  loaded=migrate(self.reload());previous=loaded['rules']['previous']
-  self.assertIsNone(loaded['rules']['values']);self.assertNotIn('safety',loaded);self.assertEqual(loaded['permissions'],{'automation':True})
-  self.assertEqual((previous['dailySpendingCeiling'],previous['marketDollarLimit'],type(previous['marketDollarLimit'])),(100,40,int))
+  loaded=migrate(self.reload())
+  self.assertEqual(loaded['rules'],trading_rules.unset())  # the owner reviews the suggested positions
+  self.assertNotIn('safety',loaded);self.assertEqual(loaded['permissions'],{'automation':True})
   self.assertEqual(loaded['accounts'][0]['ceiling'],{})  # copied from the old workspace cap, not chosen by the user
+  self.assertEqual(loaded['agentConfigs'][0]['mandate'],{'autoLimitPercent':5,'dailyCapPercent':20,'minimumPercent':20,'newMarketApproval':False})
   with self.store.session():self.store.save(loaded)
-  self.assertEqual(migrate(self.reload())['rules']['previous'],previous)  # the hints survive a save (JSON-safe)
+  again=migrate(self.reload())  # the converted state survives a save and reload unchanged
+  self.assertEqual((again['rules'],again['accounts'][0]['ceiling'],again['agentConfigs'][0]['mandate']),
+                   (loaded['rules'],loaded['accounts'][0]['ceiling'],loaded['agentConfigs'][0]['mandate']))
  def test_percentage_account_ceilings_and_mandates_survive_a_reload(self):
   s=self.workspace();s['accounts'][0]['ceiling']={'dailyPercent':7.5}
   s['agentConfigs'][0]['mandate']={'autoLimitPercent':2,'dailyCapPercent':5,'minimumPercent':20,'newMarketApproval':True}
