@@ -156,6 +156,25 @@ class FollowupTests(MainTests):
   self.assertEqual(self.a['status'],'error');self.assertTrue(self.a['stale'])
   with self.assertRaises(ValueError):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
   self.assertEqual(self.g['status'],'paused')
+ def test_remove_connected_account_refused(self):
+  with self.assertRaisesRegex(ValueError,'Disconnect this account'):self.w.action(self.s,{'action':'account-remove','id':'account'})
+  self.assertEqual(self.a['status'],'connected')
+ def test_remove_account_with_agent_refused(self):
+  self.w.action(self.s,{'action':'account-disconnect','id':'account'})
+  with self.assertRaisesRegex(ValueError,'Delete the agents'):self.w.action(self.s,{'action':'account-remove','id':'account'})
+  self.assertEqual(self.a['status'],'disconnected')
+ def remove_account(self):
+  self.w.action(self.s,{'action':'account-disconnect','id':'account'});self.w.action(self.s,{'action':'agent-delete','id':'agent'});self.w.action(self.s,{'action':'account-remove','id':'account'})
+ def test_remove_disconnected_account_keeps_history(self):
+  self.remove_account()
+  self.assertNotIn('account',[a['id'] for a in self.w.public(self.s)['accounts']])
+  self.assertIn(self.a,self.s['accounts']);self.assertEqual(self.a['status'],'removed')
+ def test_refresh_skips_removed_account(self):
+  self.remove_account();self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'removed');self.assertNotIn('account',[a['id'] for a in self.w.public(self.s)['accounts']])
+ def test_removed_account_refuses_actions(self):
+  self.remove_account()
+  with self.assertRaisesRegex(ValueError,'was removed'):self.w.action(self.s,{'action':'account-test','id':'account'})
 
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
