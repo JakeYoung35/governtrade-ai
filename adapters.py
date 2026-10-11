@@ -124,6 +124,8 @@ class KalshiAdapter(VenueAdapter):
         multiplier=float(series['fee_multiplier'] if multiplier is None else multiplier)
         supported=m.get('market_type')=='binary' and float(m.get('notional_value_dollars',1))==1 and fee_type.startswith('quadratic') and math.isfinite(multiplier) and 0<=multiplier<=100
         return m,category,multiplier,supported
+    # 'slippage' is informational: nothing checks it since trading rules became user-set (docs/trading-rules.md).
+    # Orders are immediate-or-cancel limit orders, so the limit price bounds the fill; a venue without that needs a rule.
     def get_quote(self,market_id,direction):
         m,category,multiplier,supported=self._market(market_id)
         price=float(m.get('yes_ask_dollars' if direction=='Yes' else 'no_ask_dollars',0))

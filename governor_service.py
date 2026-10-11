@@ -255,7 +255,7 @@ class GovernorService:
                                         batchId=batch["id"], decision=d.outcome)
         for d in decisions:
             if d.outcome != "rejected":
-                self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id])
+                self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id], policy)
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
     def _newest_balance(self, s, account, fetched, started):
@@ -388,7 +388,12 @@ class GovernorService:
         the crash is returned rather than placed again. Expired proposals are skipped, never executed late.
         Each request's failure is contained to that request.
         """
-        for request in [r for r in s.get("governorRequests", []) if r["status"] == "approved"]:
+        approved = [r for r in s.get("governorRequests", []) if r["status"] == "approved"]
+        policy = self.policy_for(s) if approved else None
+        for request in approved:
+            if policy is None:
+                request.update(status="executionFailed", note="Trading rules are not set for this workspace.")
+                continue
             decision = next((d for d in s.get("governorDecisions", []) if d["proposalId"] == request["governorProposalId"]), None)
             account = next((a for a in s["accounts"] if a["id"] == request["accountId"]), None)
             if decision is None or account is None:
@@ -407,12 +412,12 @@ class GovernorService:
                 proposal_id=decision["proposalId"], agent_id=decision["agentId"], market_id=decision["marketId"],
                 side=decision["side"], approved_budget=to_decimal(decision["approvedBudgetUsd"], "approvedBudgetUsd"),
                 contracts=to_decimal(decision["contracts"], "contracts"),
-                limit_price=to_decimal(decision["limitPrice"], "limitPrice")), venue, book)
+                limit_price=to_decimal(decision["limitPrice"], "limitPrice")), venue, book, policy)
 
-    def _execute_safely(self, s, request, decision, venue, book):
+    def _execute_safely(self, s, request, decision, venue, book, policy):
         """_execute with any unexpected failure contained to this request, linking an order if one exists."""
         try:
-            self._execute(s, request, decision, venue, book)
+            self._execute(s, request, decision, venue, book, policy)
         except Exception as exc:  # noqa: BLE001 - never let one order stop the batch or wedge later passes
             order_id = s["keys"].get(f"{request['agentId']}:governor:{request['governorProposalId']}")
             request.update(status="executionFailed",
@@ -420,7 +425,7 @@ class GovernorService:
             if order_id:
                 request["orderId"] = order_id
 
-    def _execute(self, s, request, decision, venue, book):
+    def _execute(self, s, request, decision, venue, book, policy):
         # The app authorizes whole cents, so round the approval up (by under a cent). The order itself buys exactly
         # the approved contracts as an immediate-or-cancel at the governor's limit price, so spending never exceeds
         # the approval and a market that moved above the limit simply leaves the order unfilled.
@@ -433,9 +438,6 @@ class GovernorService:
             request.update(status="executionFailed", note="The approved contracts do not fit the authorized amount.")
             return  # cannot happen for allocator decisions, which are sized at or below this cost
         direction = "Yes" if decision.side == "yes" else "No"
-        policy = self.policy_for(s)
-        if policy is None:
-            raise ValueError("Trading rules are not set for this workspace.")
         approve_by = (self.clock() + dt.timedelta(seconds=policy.approval_ttl_seconds)).isoformat()
         try:
             order = self.workspace.proposal(s, {

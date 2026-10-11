@@ -168,7 +168,7 @@ def layered_checks(s,o,approved=False):
  mu=sum(x['amount'] for x in s['orders'] if (x.get('committed') or x.get('filled')) and x['market']['id']==m['id'] and x['market']['venue']==m['venue'])
  c('Cumulative market budget',mu+amount<=safety['marketCap'],f"Your per-market dollar limit is ${safety['marketCap']:.2f}.")
  c('Open exposure',b is not None and b['exposure']+held+amount<=safety['exposureCap'],f"Open exposure and unresolved submissions must fit your ${safety['exposureCap']:.2f} limit.")
- c('Daily loss',b is not None and b['dailyLoss']<=safety['dailyLossCap'],f"Trading stops once today's loss reaches your ${safety['dailyLossCap']:.2f} limit.")
+ c('Daily loss',b is not None and b['dailyLoss']<safety['dailyLossCap'],f"Trading stops once today's loss reaches your ${safety['dailyLossCap']:.2f} limit.")
  age=(dt.datetime.fromisoformat(s['clock'])-dt.datetime.fromisoformat(m['quoteAt'])).total_seconds()
  c('Fresh quote',0<=age<=quote_age,f"Prices older than {quote_age} seconds cannot execute.")
  c('Market open',m.get('open',True) and s['clock']<m['closeAt'],'Market must still be open.')

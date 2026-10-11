@@ -92,12 +92,6 @@ class PostgresStore:
             settings=q('SELECT * FROM workspace_settings')[0]
             s.update(settings['extra']);s['schemaVersion']=settings['schema_version']
             s['permissions']={'automation':settings['automation']}
-            if 'rules' not in settings['extra']:
-                # Saved before user-set trading rules: expose the old fixed limits once, so migrate() can offer them
-                # as hints. The rules themselves live in extra; daily_cap and the safety columns are no longer used.
-                s.pop('rules',None)  # main_seed's empty record would hide the old values from migrate()
-                s['permissions']['dailyCap']=settings['daily_cap']
-                s['safety']={key:settings[column] for key,column in SAFETY_COLUMNS.items()}
             for r in q('SELECT * FROM accounts ORDER BY created_at,id'):
                 a={**r['extra'],**present(r,{'id':'id','name':'name','venue':'venue','environment':'environment','subaccount':'subaccount','liveEnabled':'live_enabled','credentialRef':'credential_ref','credentialMasks':'credential_masks','status':'status','stale':'stale','balance':'balance'}),'error':r['error']}
                 a['ceiling']={} if r['ceiling_daily_cap'] is None else {'dailyCap':r['ceiling_daily_cap']}
@@ -131,6 +125,13 @@ class PostgresStore:
                 ORDER BY received_at DESC,governor_proposal_id COLLATE "C" DESC''',(REQUEST_WINDOW,))]
             s['governorBreakerEvents']=[{**r['payload'],'id':r['id'],'accountId':r['account_id']}
                 for r in conn.execute('SELECT id,account_id,payload FROM governor_breaker_events ORDER BY at DESC,id COLLATE "C" DESC LIMIT %s',(BREAKER_EVENT_WINDOW,))]
+            if 'rules' not in settings['extra'] and (settings['extra'] or s['accounts'] or s['agentConfigs'] or s['orders']):
+                # A workspace used before user-set trading rules: expose its old fixed limits once, so migrate() can
+                # offer them as hints. A fresh database (migration 001's seeded row, no data) keeps main_seed's empty
+                # rules record instead. The rules live in extra; daily_cap and the safety columns are no longer used.
+                s.pop('rules',None)  # main_seed's empty record would hide the old values from migrate()
+                s['permissions']['dailyCap']=settings['daily_cap']
+                s['safety']={key:settings[column] for key,column in SAFETY_COLUMNS.items()}
         seen.update(self.signatures(s));seen['loaded']=True;self.local.seen=seen
         return s
 

@@ -10,6 +10,7 @@ by to_policy(). Each save increments the rules version; every governor decision 
 """
 from decimal import Decimal
 import math
+import numbers
 
 from governor.policy import Policy
 
@@ -64,8 +65,9 @@ RULES = [
      "example": "At $500 with $480 at risk, a $30 trade is blocked."},
     {"key": "dailyLossDollarLimit", "group": "loss", "label": "Daily loss dollar limit", "unit": "dollars", "min": 0,
      "max": 1000000000,
-     "explanation": "New trades are blocked once today's loss in an account reaches this many dollars.",
-     "example": "At $50, if the account is down $50 since the start of the day, no new trades until tomorrow."},
+     "explanation": "New trades are blocked once today's loss in an account reaches this many dollars. $0 allows no "
+                    "new trades at all.",
+     "example": "At $50, once the account is down $50 since the start of the day, no new trades until tomorrow."},
     {"key": "lossBreakerPercent", "group": "loss", "label": "Loss breaker", "unit": "percent", "min": 0.1, "max": 100,
      "explanation": "If your account value falls this far below its value at the start of the day, the governor "
                     "stops all new trades and stays stopped until you reset it.",
@@ -74,7 +76,10 @@ RULES = [
      "max": 600, "integer": True,
      "explanation": "The oldest a market price or order book can be when a trade is decided or placed. Older prices "
                     "are refused, so trades never use stale data.",
-     "example": "At 30 seconds, a price read 45 seconds ago is refused and the proposal is rejected."},
+     "example": "At 30 seconds, a price read 45 seconds ago is refused and the proposal is rejected.",
+     "legacyNote": "Before, the governor allowed order books up to 30 seconds old and orders allowed prices up to 60 "
+                   "seconds old. Orders fetch a fresh price just before they are placed, so 30 seconds rarely refuses "
+                   "one."},
     {"key": "proposalLifetimeSeconds", "group": "timing", "label": "Proposal lifetime", "unit": "seconds", "min": 1,
      "max": 3600, "integer": True,
      "explanation": "How long an agent's proposal stays valid when the agent does not set its own expiry. Proposals "
@@ -134,6 +139,14 @@ def unset(previous=None):
     return {"version": 0, "setAt": None, "values": None, "previous": previous}
 
 
+def _number(value):
+    """A stored number as int or float (Postgres numeric columns load as Decimal), or None."""
+    if isinstance(value, bool) or not isinstance(value, numbers.Number):
+        return None
+    value = float(value)
+    return int(value) if value.is_integer() else value
+
+
 def migrate(s):
     """Give a workspace its rules record. One created before user-set rules gets none, so its owner must set them
     before trading; its old values are kept only as hints. The old fixed limits are dropped."""
@@ -142,9 +155,17 @@ def migrate(s):
         if "safety" in s:
             previous = dict(LEGACY_VALUES)
             for key, (section, name) in _LEGACY_STATE.items():
-                old = (s.get(section) or {}).get(name)
-                if isinstance(old, (int, float)) and not isinstance(old, bool):
+                old = _number((s.get(section) or {}).get(name))
+                if old is not None:
                     previous[key] = old
+            # New accounts used to copy the workspace cap as their own ceiling. Such a copy is not a lower ceiling the
+            # user chose, and kept it would silently cap the new daily spending ceiling; a lower one stays.
+            old_cap = _number((s.get("permissions") or {}).get("dailyCap"))
+            for account in s.get("accounts", []):
+                ceiling = account.get("ceiling") or {}
+                copied = _number(ceiling.get("dailyCap"))
+                if old_cap is not None and copied is not None and copied >= old_cap:
+                    ceiling.pop("dailyCap")
         s["rules"] = unset(previous)
     s.pop("safety", None)
     (s.get("permissions") or {}).pop("dailyCap", None)
@@ -186,10 +207,13 @@ def validate(raw):
 
 
 def save(s, raw, now):
-    """Validate and store a new rules version. Returns the labels of the rules that changed."""
+    """Validate and store a new rules version. Returns the labels of the rules that changed; saving the same values
+    again changes nothing, so versions only mark real changes."""
     clean = validate(raw)
     old = (s.get("rules") or {}).get("values") or {}
     changed = [BY_KEY[k]["label"] for k in KEYS if old.get(k) != clean[k]]
+    if old and not changed:
+        return []
     s["rules"] = {"version": (s.get("rules") or {}).get("version", 0) + 1, "setAt": now, "values": clean,
                   "previous": None}
     return changed

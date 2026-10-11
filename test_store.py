@@ -4,7 +4,7 @@ Each run migrates a throwaway schema and drops it afterwards, so real tables are
 """
 import copy,os,unittest,uuid
 from unittest.mock import patch
-from engine import main_seed,PERSONALITIES
+from engine import main_seed,migrate,PERSONALITIES
 import trading_rules
 from workspace import Workspace
 from store import PostgresStore
@@ -37,6 +37,17 @@ class StoreTests(unittest.TestCase):
  def test_fresh_database_matches_seed(self):
   s=self.reload();seed=main_seed()
   self.assertEqual({k:v for k,v in s.items() if k!='clock'},{k:v for k,v in seed.items() if k!='clock'})
+ def test_a_pre_rules_workspace_gets_hints_and_loses_copied_ceilings(self):
+  s=self.workspace();s['accounts'][0]['ceiling']={'dailyCap':100}
+  with self.store.session():self.store.save(s)
+  # Make it a workspace saved before user-set rules: no rules in extra, the old fixed limits in their columns.
+  with self.store.connect() as c:c.execute("UPDATE workspace_settings SET extra=extra-'rules',daily_cap=100,market_cap=40")
+  loaded=migrate(self.reload());previous=loaded['rules']['previous']
+  self.assertIsNone(loaded['rules']['values']);self.assertNotIn('safety',loaded);self.assertEqual(loaded['permissions'],{'automation':True})
+  self.assertEqual((previous['dailySpendingCeiling'],previous['marketDollarLimit'],type(previous['marketDollarLimit'])),(100,40,int))
+  self.assertEqual(loaded['accounts'][0]['ceiling'],{})  # copied from the old workspace cap, not chosen by the user
+  with self.store.session():self.store.save(loaded)
+  self.assertEqual(migrate(self.reload())['rules']['previous'],previous)  # the hints survive a save (JSON-safe)
  def test_round_trip_is_lossless(self):
   s=self.workspace()
   s['chatAllowances']={s['agentConfigs'][0]['id']:{'replyIndex':1,'amounts':['20']}}

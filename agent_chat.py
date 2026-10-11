@@ -178,7 +178,7 @@ class AgentChat:
             raise
         return {"agentId": agent["id"], "turn": turn, "messageIndex": len(chat) - 1, "text": text.strip(),
                 "history": history, "amounts": amounts,
-                "agent": {k: agent.get(k) for k in ("name", "provider", "model", "personality", "mandate")},
+                "agent": {k: agent.get(k) for k in ("name", "provider", "model", "mandate")},
                 "account": dict(account), "key": key, "blocked": self._trading_blocked(s, agent, account), "policy": self.governor.policy_for(s)}
 
     def release(self, agent_id, turn):
@@ -250,7 +250,7 @@ class AgentChat:
         lines = [
             f"You are {agent['name']}, a trading agent for the user's Kalshi "
             f"{'Live (real money)' if account.get('environment') == 'live' else 'Demo'} account. "
-            f"Your personality is {agent.get('personality') or 'not set'}. The time is {self.clock().isoformat()} (UTC).",
+            f"The time is {self.clock().isoformat()} (UTC).",
             "Kalshi markets are yes/no contracts that pay $1 if they win; prices are dollars per contract.",
             "Find markets with find_series and list_markets, and check one with get_market before proposing it. "
             "Never guess a ticker.",

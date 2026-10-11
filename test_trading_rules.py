@@ -76,6 +76,19 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(s["permissions"], {"automation": True})
         self.assertEqual(migrate(copy.deepcopy(s)), s)  # running it again changes nothing
 
+    def test_ceilings_copied_from_the_old_workspace_cap_are_cleared_and_chosen_ones_kept(self):
+        old = main_seed()
+        del old["rules"]
+        old["permissions"] = {"dailyCap": D("100"), "automation": True}  # Postgres numeric columns load as Decimal
+        old["safety"] = {"dailyLossCap": D("50"), "marketCap": D("40.50"), "exposureCap": D("500"), "slippage": D("1")}
+        old["accounts"] = [{"id": "copied", "ceiling": {"dailyCap": D("100")}}, {"id": "chosen", "ceiling": {"dailyCap": 30}},
+                           {"id": "none", "ceiling": {}}]
+        s = migrate(old)
+        self.assertEqual([a["ceiling"] for a in s["accounts"]], [{}, {"dailyCap": 30}, {}])
+        self.assertEqual((s["rules"]["previous"]["dailySpendingCeiling"], s["rules"]["previous"]["marketDollarLimit"]), (100, 40.5))
+        self.assertEqual((type(s["rules"]["previous"]["dailySpendingCeiling"]), type(s["rules"]["previous"]["marketDollarLimit"])),
+                         (int, float))  # JSON-safe, unlike Decimal
+
     def test_the_presenter_demo_keeps_its_scripted_limits(self):
         demo = seed()
         self.assertEqual(demo["safety"]["marketCap"], 50)
@@ -120,6 +133,9 @@ class GateTests(unittest.TestCase):
         changed = {**trading_rules.LEGACY_VALUES, "kellyMultiplier": 10, "marketDollarLimit": 20}
         self.assertEqual(self.w.action(self.s, {"action": "rules-save", "values": changed})["version"], 2)
         self.assertEqual(self.s["events"][0]["text"], "Trading rules updated (version 2): Kelly multiplier, Per-market dollar limit.")
+        events = len(self.s["events"])
+        self.assertEqual(self.w.action(self.s, {"action": "rules-save", "values": changed})["version"], 2)  # unchanged
+        self.assertEqual(len(self.s["events"]), events)  # and not logged as a change
         with self.assertRaisesRegex(ValueError, "Kelly multiplier is required"):
             self.w.action(self.s, {"action": "rules-save", "values": {}})
         self.assertEqual(self.s["rules"]["version"], 2)  # a refused save changes nothing
@@ -151,6 +167,20 @@ class GateTests(unittest.TestCase):
         self.assertEqual(self.propose(amount=10, key="two")["decision"], "BLOCK")
         names = {c["name"] for c in self.propose(amount=5, key="three")["evaluations"][-1]["checks"]}
         self.assertNotIn("Slippage", names)
+
+    def test_trading_stops_when_the_daily_loss_reaches_the_limit(self):
+        def loss_check(key):
+            order = self.propose(amount=5, key=key)
+            return next(c["outcome"] for c in order["evaluations"][-1]["checks"] if c["name"] == "Daily loss")
+        trading_rules.fixture(self.s, {"dailyLossDollarLimit": 50})
+        self.w.refresh(self.s, self.a)  # the day opens at $1,000
+        self.v.cash = 951
+        self.assertEqual(loss_check("down-49"), "ALLOW")
+        self.v.cash = 950
+        self.assertEqual(loss_check("down-50"), "BLOCK")  # reaching the limit stops trading
+        self.v.cash = 1000
+        trading_rules.fixture(self.s, {"dailyLossDollarLimit": 0})
+        self.assertEqual(loss_check("limit-0"), "BLOCK")  # $0 allows no new trades
 
     def test_price_freshness_is_the_users_rule(self):
         trading_rules.fixture(self.s, {"quoteMaxAgeSeconds": 5})
