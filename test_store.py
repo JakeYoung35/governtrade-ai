@@ -5,6 +5,7 @@ Each run migrates a throwaway schema and drops it afterwards, so real tables are
 import copy,os,unittest,uuid
 from unittest.mock import patch
 from engine import main_seed,PERSONALITIES
+import trading_rules
 from workspace import Workspace
 from store import PostgresStore
 from test_engine import FakeVault,FakeVenue
@@ -24,7 +25,7 @@ class StoreTests(unittest.TestCase):
   with self.store.connect() as c:c.execute('TRUNCATE governor_requests,governor_breaker_events,governor_decisions,governor_forecasts,governor_batches,events,balance_snapshots,chat_messages,idempotency_keys,order_evaluations,orders,agents,accounts');c.execute("UPDATE workspace_settings SET daily_cap=100,automation=true,extra='{}'")
   self.v=FakeVenue();self.w=Workspace(FakeVault());self.w.venue=lambda a:self.v
  def workspace(self):
-  s=main_seed();a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{'dailyCap':100}}
+  s=trading_rules.fixture(main_seed());a={'id':str(uuid.uuid4()),'name':'Kalshi Demo','venue':'kalshi','environment':'sandbox','connectionType':'kalshi-demo','subaccount':0,'liveEnabled':False,'credentialRef':'REF','credentialMasks':{'key_id':'••••1234'},'status':'connected','stale':False,'error':None,'ceiling':{'dailyCap':100}}
   g={'id':str(uuid.uuid4()),'name':'Agent','accountId':a['id'],'provider':'openai','model':'gpt-4.1','modelValidated':True,'modelCredentialRef':'MODEL_REF','modelKeyMask':'••••abcd','status':'active','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate'])}
   s['accounts']=[a];s['agentConfigs']=[g];s['chats'][g['id']]=[];return s
  def proposal(self,s,n,key):return self.w.proposal(s,{'agentId':s['agentConfigs'][0]['id'],'marketId':'BTC','direction':'Yes','amount':n,'reasoning':'Test','idempotencyKey':key})

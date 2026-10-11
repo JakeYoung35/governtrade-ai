@@ -1,7 +1,8 @@
 """User management and the narrow, governed agent integration boundary."""
 import copy, datetime, math, uuid
 from adapters import adapter,ADAPTERS,VenueError,now
-from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling,PERSONALITIES
+from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling
+import trading_rules
 from vault import masks
 from providers import validate_model_key,catalog
 
@@ -83,7 +84,7 @@ class Workspace:
                 test=adapter('kalshi',credentials,environment,subaccount);test.headers('GET',test.base+'/portfolio/balance')
             if a and any(o.get('committed') and o['accountId']==a['id'] and o['status'] in ('submitted','open','submission unknown') for o in s['orders']):raise ValueError('Reconcile outstanding submissions before rotating keys.')
             reference=self.vault.put(credentials,a.get('credentialRef') if a else None) if credentials else a['credentialRef']
-            if not a:a={'id':str(uuid.uuid4()),'ceiling':{'dailyCap':s['permissions']['dailyCap']}};s['accounts'].append(a)
+            if not a:a={'id':str(uuid.uuid4()),'ceiling':{}};s['accounts'].append(a)  # the workspace ceiling applies until the user sets a lower one
             a.update(name=str(b.get('name',kind))[:100],venue='kalshi',environment=environment,connectionType=kind,subaccount=subaccount,liveEnabled=environment=='live',credentialRef=reference,status='disconnected',stale=True,error=None)
             if credentials:a['credentialMasks']=masks(credentials)
             a.pop('balance',None);event(s,'Kalshi connection saved.');return {'accountId':a['id']}
@@ -124,9 +125,9 @@ class Workspace:
         elif action=='mandate-save':
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
             if agent['status']=='deleted' or not agent.get('modelValidated'):raise ValueError('Validate this agent’s provider key before mandate setup.')
-            if b.get('personality') not in PERSONALITIES:raise ValueError('Choose Conservative, Moderate or Aggressive.')
-            a=next(x for x in s['accounts'] if x['id']==agent['accountId']);values=validate_mandate(b['mandate'],ceiling(s,a)['dailyCap'])
-            agent.update(personality=b['personality'],mandate=values)
+            if not trading_rules.ready(s):raise ValueError('Set your trading rules before an agent mandate.')
+            a=next(x for x in s['accounts'] if x['id']==agent['accountId']);values=validate_mandate(b.get('mandate'),ceiling(s,a)['dailyCap'])
+            agent.update(personality=None,mandate=values)  # no presets: the user sets every mandate value
             if agent['status']=='draft':agent['status']='active' if s['permissions']['automation'] else 'paused'
             event(s,'User saved the agent mandate; future proposals use the current mandate.');return {'agentId':agent['id']}
         elif action=='agent-status':
@@ -134,6 +135,7 @@ class Workspace:
             if b['status'] not in ('active','paused'):raise ValueError('Invalid status.')
             if b['status']=='active' and (not agent.get('mandate') or not agent.get('modelValidated') or not s['permissions']['automation']):raise ValueError('Save a validated mandate and enable the account ceiling before resuming.')
             if agent['status']=='deleted':raise ValueError('Deleted agents cannot resume.')
+            if b['status']=='active' and not trading_rules.ready(s):raise ValueError('Set your trading rules before resuming an agent.')
             account=next((a for a in s['accounts'] if a['id']==agent['accountId']),None)
             if b['status']=='active' and (not account or not account.get('credentialRef') or account.get('status')!='connected'):raise ValueError("Reconnect and successfully test this agent's Kalshi account before resuming.")
             agent['status']=b['status']
@@ -141,7 +143,9 @@ class Workspace:
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id']);agent['status']='deleted';self.vault.delete(agent['modelCredentialRef']);agent.pop('modelCredentialRef',None)
         elif action=='permissions':
             values=validate_permissions(b['values']);scope=b.get('scope','defaults')
-            if scope=='defaults':s['permissions'].update(values)
+            if scope=='defaults':
+                if 'dailyCap' in values:raise ValueError('Set the daily spending ceiling under Trading Rules.')
+                s['permissions'].update(values)
             else:
                 a=next(x for x in s['accounts'] if x['id']==scope)
                 if 'automation' in values:raise ValueError('The kill switch applies to every agent, not an individual connection.')
@@ -150,6 +154,12 @@ class Workspace:
                 for agent in s['agentConfigs']:
                     if agent['status']=='active':agent['status']='paused'
             event(s,'Account safety ceiling saved. Every proposal is rechecked against it.')
+        elif action=='rules-save':
+            # The user's own trading rules: every rule, no presets. Each save is a new version the governor records.
+            changed=trading_rules.save(s,b.get('values'),now())
+            if s['rules']['version']==1:event(s,'Trading rules set. Agents can trade within them.','RULES')
+            elif changed:event(s,f"Trading rules updated (version {s['rules']['version']}): {', '.join(changed)}.",'RULES')
+            return {'version':s['rules']['version']}
         elif action=='decision':
             o=next(x for x in s['orders'] if x['id']==b['id'])
             if o['status']!='awaiting approval':return o
@@ -168,7 +178,7 @@ class Workspace:
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'
         for a in public['agentConfigs']:
             a.pop('modelCredentialRef',None);a['usage']=__import__('engine').usage(s,a['accountId'],a['id'])
-        public['providers']=catalog();public['personalities']=copy.deepcopy(PERSONALITIES)
+        public['providers']=catalog();public['rulesCatalog']=trading_rules.catalog()
         public['accounts']=[a for a in public['accounts'] if a['venue']=='kalshi' and a.get('status')!='removed']
         visible={a['id'] for a in public['accounts']}
         public['agentConfigs']=[a for a in public['agentConfigs'] if a['accountId'] in visible]
