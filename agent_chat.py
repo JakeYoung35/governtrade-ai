@@ -16,6 +16,7 @@ import time
 import uuid
 
 from adapters import KalshiAdapter, VenueError, adapter
+from providers import FREE_PROVIDER, free_agent_daily_messages, free_agent_key
 from agent_llm import TIMEOUT_SECONDS, ModelError, connect, post_json
 from engine import event
 from governor import api
@@ -151,8 +152,11 @@ class AgentChat:
         agent = next((a for a in s["agentConfigs"] if a["id"] == b.get("agent") and a.get("status") != "deleted"), None)
         if agent is None:
             raise ValueError("Choose an agent.")
-        if not agent.get("modelValidated") or not agent.get("modelCredentialRef"):
+        free = agent.get("provider") == FREE_PROVIDER
+        if not agent.get("modelValidated") or not (free or agent.get("modelCredentialRef")):
             raise ValueError("Validate this agent's model key before chatting.")
+        if free and not free_agent_key():
+            raise ValueError("The free agent is not available on this server right now. Edit the agent to use your own API key.")
         account = next(a for a in s["accounts"] if a["id"] == agent["accountId"])
         turn = str(uuid.uuid4())
         with self._lock:
@@ -160,7 +164,9 @@ class AgentChat:
                 raise ValueError("Your agent is still working on your last message.")
             self._busy[agent["id"]] = turn
         try:
-            key = self.workspace.vault.get(agent["modelCredentialRef"])["api_key"]
+            key = free_agent_key() if free else self.workspace.vault.get(agent["modelCredentialRef"])["api_key"]
+            if free:
+                self._use_free_message(s)
             chat = s["chats"].setdefault(agent["id"], [])
             history = [("user" if m["role"] == "customer" else "assistant", m["text"]) for m in chat[-HISTORY_MESSAGES:]
                        if not (m["role"] == "agent" and m["text"].startswith(LEGACY_REPLY))]
@@ -178,8 +184,21 @@ class AgentChat:
             raise
         return {"agentId": agent["id"], "turn": turn, "messageIndex": len(chat) - 1, "text": text.strip(),
                 "history": history, "amounts": amounts,
-                "agent": {k: agent.get(k) for k in ("name", "provider", "model", "mandate")},
+                "agent": {**{k: agent.get(k) for k in ("name", "provider", "model", "mandate")},
+                          **({"provider": "google"} if free else {})},  # the free agent talks to Gemini
                 "account": dict(account), "key": key, "blocked": self._trading_blocked(s, agent, account), "policy": self.governor.policy_for(s)}
+
+    def _use_free_message(self, s):
+        """Count one free-agent message for this workspace today (UTC), or refuse once the daily limit is used.
+        Counted when the turn starts, under the workspace lock, so a crash or retry cannot refund it."""
+        day = self.clock().date().isoformat()
+        usage = s.get("freeAgentUsage") or {}
+        used = usage.get("messages", 0) if usage.get("day") == day else 0
+        limit = free_agent_daily_messages()
+        if used >= limit:
+            raise ValueError(f"The free agent's {limit} messages for today are used up. They reset at midnight UTC, "
+                             "or edit the agent to use your own API key.")
+        s["freeAgentUsage"] = {"day": day, "messages": used + 1}
 
     def release(self, agent_id, turn):
         """Free the agent for its next message, only if `turn` still holds it (safe to call more than once)."""
