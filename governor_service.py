@@ -17,9 +17,11 @@ it meets the venue, the clock and the app state.
 """
 import copy
 import datetime as dt
+import time
 from types import SimpleNamespace
 import uuid
 
+from adapters import VenueError
 from engine import event
 from governor import api, records
 from governor.allocator import decide
@@ -32,6 +34,7 @@ from governor.snapshot import build_snapshot, order_book
 
 SCHEMA_PATH = "/api/governor/schema"
 MAX_EVALUATION_ATTEMPTS = 3  # passes a request may fail to be evaluated before it is rejected
+VENUE_RETRY_SECONDS = 0.5  # pause before the one retry of an order book read the venue did not answer
 
 
 def utc_now():
@@ -169,17 +172,36 @@ class GovernorService:
                 fetched[account_id] = {**item, "error": "The venue account's credentials are unavailable."}
                 continue
             started = self.clock()
-            balance = self.workspace.fetch_balance(item["account"])
-            books = []
+            balance, balance_failure = self.workspace.read_balance(item["account"])
+            books, unavailable = [], {}
             for market_id in item["markets"]:
-                try:
-                    raw = venue.get_orderbook(market_id)
-                    order_book(raw)  # validate now; an unusable book leaves the market out (marketNotInSnapshot)
-                except ValueError:
+                raw, problem = self._read_book(venue, market_id)
+                if raw is None:  # left out of the snapshot: retried next pass if transient, else marketNotInSnapshot
+                    unavailable[market_id] = problem
+                    print(f"Governor: order book for {market_id} unavailable "
+                          f"({'transient' if problem['transient'] else 'refused'}): {problem['reason']}", flush=True)
                     continue
                 books.append(raw)
-            fetched[account_id] = {**item, "startedAt": started, "balance": balance, "books": books}
+            fetched[account_id] = {**item, "startedAt": started, "balance": balance, "balanceFailure": balance_failure,
+                                   "books": books, "unavailable": unavailable}
         return fetched
+
+    def _read_book(self, venue, market_id):
+        """(raw book, None), or (None, {"reason", "transient"}). A read the venue did not answer is retried once."""
+        for attempt in range(2):
+            try:
+                raw = venue.get_orderbook(market_id)
+                order_book(raw)  # validate now, so an unusable book is reported rather than failing the batch
+                return raw, None
+            except VenueError as exc:
+                problem = {"reason": str(exc) or "The venue did not return the order book.", "transient": exc.transient}
+            except ValueError as exc:
+                return None, {"reason": f"The venue returned an unusable order book ({exc}).", "transient": False}
+            if not problem["transient"]:
+                return None, problem
+            if attempt == 0:
+                time.sleep(VENUE_RETRY_SECONDS)
+        return None, problem
 
     def run_batch(self, s, fetched=None):
         """Decide the planned queued requests, one batch per account. Returns a summary per account.
@@ -212,6 +234,15 @@ class GovernorService:
                 results.append({"accountId": account_id, "decided": 0, "error": type(exc).__name__})
         return results
 
+    def _defer(self, items, why):
+        """Leave requests queued for the next pass, counting an attempt; reject after MAX_EVALUATION_ATTEMPTS."""
+        for r in items:
+            r["attempts"] = r.get("attempts", 0) + 1
+            if r["attempts"] >= MAX_EVALUATION_ATTEMPTS:
+                r.update(status="rejected", note=f"{why} after {r['attempts']} attempts.")
+            else:
+                r["note"] = f"{why}; trying again in the next batch."
+
     def _reject_all(self, items, note):
         for r in items:
             r.update(status="rejected", note=note)
@@ -233,7 +264,19 @@ class GovernorService:
             return {"accountId": account_id, "decided": 0, "note": fetched["error"]}
         venue = self.workspace.venue(account)
         started = fetched["startedAt"]
-        balance, refreshed = self._newest_balance(s, account, fetched["balance"], started)
+        balance, refreshed = self._newest_balance(s, account, fetched["balance"], started,
+                                                  fetched.get("balanceFailure") or "refused")
+        # A venue that did not answer is asked again next pass rather than turned into a rejection.
+        if balance is None and fetched.get("balanceFailure") == "transient":
+            self._defer(items, "Kalshi did not answer the balance check")
+            return {"accountId": account_id, "decided": 0, "note": "balance read deferred"}
+        unavailable = fetched.get("unavailable") or {}
+        waiting = [r for r in items if (unavailable.get(r["proposal"]["marketId"]) or {}).get("transient")]
+        if waiting:
+            self._defer(waiting, "Kalshi did not answer the order book read")
+            items = [r for r in items if r not in waiting]
+            if not items:
+                return {"accountId": account_id, "decided": 0, "note": "order book reads deferred"}
         in_flight = self._in_flight(s, account, started, balance if refreshed else None, fetched["balance"])
         books = fetched["books"]
         snapshot_id = self.new_id()
@@ -251,20 +294,22 @@ class GovernorService:
         # Record every outcome before sending any order: execution saves state (a crash-safe reservation),
         # and a request must never be saved as queued once its decision is recorded.
         for d in decisions:
+            problem = unavailable.get(d.market_id)
             by_id[d.proposal_id].update(status="rejected" if d.outcome == "rejected" else "approved",
-                                        batchId=batch["id"], decision=d.outcome)
+                                        batchId=batch["id"], decision=d.outcome,
+                                        note=f"Market data unavailable: {problem['reason']}" if problem else None)
         for d in decisions:
             if d.outcome != "rejected":
                 self._execute_safely(s, by_id[d.proposal_id], d, venue, snapshot.books[d.market_id], policy)
         return {"accountId": account_id, "batchId": batch["id"], "decided": len(decisions)}
 
-    def _newest_balance(self, s, account, fetched, started):
+    def _newest_balance(self, s, account, fetched, started, failure="refused"):
         """The balance to decide on, and whether it is a refresh newer than the governor's own read.
 
         Normally the fetched read, which started at `started` with the lock released. If the account was refreshed
         under the lock after that (e.g. Workspace.evaluate's refresh after a fill), that newer balance is used
         instead, including when the unlocked read failed: applying the older read, or marking the account errored,
-        would roll back a fresh balance.
+        would roll back a fresh balance. `failure` says why the fetched read failed (Workspace.read_balance).
         """
         current = account.get("balance")
         if current and not account.get("stale"):
@@ -275,7 +320,7 @@ class GovernorService:
                 newer = False  # an unreadable timestamp: fall back to the fetched read
             if newer:
                 return current, True
-        return self.workspace.apply_balance(s, account, fetched), False
+        return self.workspace.apply_balance(s, account, fetched, failure), False
 
     def _in_flight(self, s, account, started, refreshed, fetched):
         """Orders the venue answered while the lock was released whose fill the chosen positions may not show.

@@ -29,6 +29,7 @@ MAX_REPLY_CHARS = 6000  # chat_messages.text allows 8,000; leaves room for the g
 MAX_STEPS = 10  # model calls per chat turn
 TURN_SECONDS = 120  # shared deadline for model calls, tools and individual venue requests
 MAX_PROPOSALS = 5  # proposals per chat turn
+MODEL_RETRY_WAITS = (1, 3)  # seconds before each retry of a model call that may succeed if sent again
 # Dollar amounts the user typed: "$25", "$1,000.50", "$5k", "$2 million", "25 dollars", "25 usd", "25 bucks".
 AMOUNT = re.compile(r"\$\s?(?P<a>\d{1,3}(?:,\d{3})+|\d+)(?P<ac>\.\d{1,2})?(?:\s?(?P<as>k|m|thousand|million)\b)?"
                     r"|\b(?P<b>\d+)(?P<bc>\.\d{1,2})?\s*(?P<bs>k|thousand|million)?\s*(?:dollars|usd|bucks)\b", re.IGNORECASE)
@@ -165,8 +166,7 @@ class AgentChat:
             self._busy[agent["id"]] = turn
         try:
             key = free_agent_key() if free else self.workspace.vault.get(agent["modelCredentialRef"])["api_key"]
-            if free:
-                self._use_free_message(s)
+            free_day = self._use_free_message(s) if free else None
             chat = s["chats"].setdefault(agent["id"], [])
             history = [("user" if m["role"] == "customer" else "assistant", m["text"]) for m in chat[-HISTORY_MESSAGES:]
                        if not (m["role"] == "agent" and m["text"].startswith(LEGACY_REPLY))]
@@ -182,7 +182,7 @@ class AgentChat:
         except Exception:
             self.release(agent["id"], turn)
             raise
-        return {"agentId": agent["id"], "turn": turn, "messageIndex": len(chat) - 1, "text": text.strip(),
+        return {"agentId": agent["id"], "turn": turn, "messageIndex": len(chat) - 1, "text": text.strip(), "freeDay": free_day,
                 "history": history, "amounts": amounts,
                 "agent": {**{k: agent.get(k) for k in ("name", "provider", "model", "mandate")},
                           **({"provider": "google"} if free else {})},  # the free agent talks to Gemini
@@ -190,7 +190,8 @@ class AgentChat:
 
     def _use_free_message(self, s):
         """Count one free-agent message for this workspace today (UTC), or refuse once the daily limit is used.
-        Counted when the turn starts, under the workspace lock, so a crash or retry cannot refund it."""
+        Counted when the turn starts, under the workspace lock, so a crash or retry cannot refund it; only a turn
+        the model provider never answered gives it back (finish). Returns the day it was counted on."""
         day = self.clock().date().isoformat()
         usage = s.get("freeAgentUsage") or {}
         used = usage.get("messages", 0) if usage.get("day") == day else 0
@@ -199,6 +200,13 @@ class AgentChat:
             raise ValueError(f"The free agent's {limit} messages for today are used up. They reset at midnight UTC, "
                              "or edit the agent to use your own API key.")
         s["freeAgentUsage"] = {"day": day, "messages": used + 1}
+        return day
+
+    def _refund_free_message(self, s, day):
+        """Give back a free message whose turn the model provider never answered (an outage, not the user's use)."""
+        usage = s.get("freeAgentUsage") or {}
+        if usage.get("day") == day and usage.get("messages", 0) > 0:
+            s["freeAgentUsage"] = {"day": day, "messages": usage["messages"] - 1}
 
     def release(self, agent_id, turn):
         """Free the agent for its next message, only if `turn` still holds it (safe to call more than once)."""
@@ -224,16 +232,28 @@ class AgentChat:
 
     def run(self, job):
         """Talk to the model until it answers, within MAX_STEPS calls and TURN_SECONDS. Returns
-        {reply, proposals, error}; never raises. Proposals the model made before an early stop are kept: each was
+        {reply, proposals, error, answered}; never raises. Proposals the model made before an early stop are kept: each was
         validated and is within the amounts the user typed."""
         proposals = []
+        answered = []  # model calls the provider answered; none means the provider never took part in the turn
         deadline = time.monotonic() + TURN_SECONDS
 
-        def post(url, headers, body):  # each model call gets at most the time left in the turn
-            remaining = deadline - time.monotonic()
-            if remaining <= 1:
-                raise ModelError("The agent took too long and stopped.")
-            return post_json(url, headers, body, timeout=min(TIMEOUT_SECONDS, remaining))
+        def post(url, headers, body):
+            # Each model call gets at most the time left in the turn. A call the provider may answer if asked again
+            # (overloaded, server error, connection refused) is retried while enough of the turn remains.
+            for wait in (*MODEL_RETRY_WAITS, None):
+                remaining = deadline - time.monotonic()
+                if remaining <= 1:
+                    raise ModelError("The agent took too long and stopped.")
+                try:
+                    response = post_json(url, headers, body, timeout=min(TIMEOUT_SECONDS, remaining))
+                except ModelError as e:
+                    if not e.retryable or wait is None or deadline - time.monotonic() < wait + 10:
+                        raise
+                    time.sleep(wait)
+                    continue
+                answered.append(True)
+                return response
 
         try:
             venue = self.market_data(job["account"])
@@ -250,17 +270,17 @@ class AgentChat:
                 if time.monotonic() >= deadline:
                     raise ModelError("The agent took too long and stopped.")
                 if not turn.tool_calls:
-                    return {"reply": turn.text, "proposals": proposals, "error": None}
+                    return {"reply": turn.text, "proposals": proposals, "error": None, "answered": bool(answered)}
                 conversation.add_tool_results([(call, self._tool(job, call, venue, markets, proposals, deadline))
                                                for call in turn.tool_calls])
             return {"reply": "I couldn't finish within my step limit. Try a more specific request.",
-                    "proposals": proposals, "error": None}
+                    "proposals": proposals, "error": None, "answered": bool(answered)}
         except ModelError as e:
-            return {"reply": "", "proposals": proposals, "error": str(e)}
+            return {"reply": "", "proposals": proposals, "error": str(e), "answered": bool(answered)}
         except VenueError:  # only creating the market-data adapter; tool calls report venue errors to the model
-            return {"reply": "", "proposals": proposals, "error": "The agent could not reach Kalshi."}
+            return {"reply": "", "proposals": proposals, "error": "The agent could not reach Kalshi.", "answered": bool(answered)}
         except Exception as e:  # never let a provider or tool fault escape the request
-            return {"reply": "", "proposals": proposals, "error": f"The agent hit an unexpected error ({type(e).__name__})."}
+            return {"reply": "", "proposals": proposals, "error": f"The agent hit an unexpected error ({type(e).__name__}).", "answered": bool(answered)}
 
     def _system_prompt(self, job):
         agent, account = job["agent"], job["account"]
@@ -405,6 +425,8 @@ class AgentChat:
                 reply = (reply[:room - 1].rstrip() + "…") if room else ""
             reply = "\n\n".join(part for part in (reply, note_text) if part)
             s["chats"].setdefault(job["agentId"], []).append({"role": "agent", "text": reply})
+            if job.get("freeDay") and result["error"] and not result.get("answered"):
+                self._refund_free_message(s, job["freeDay"])
             if not result["proposals"] and not result["error"] and not blocked and job["amounts"]:
                 s.setdefault("chatAllowances", {})[job["agentId"]] = {
                     "replyIndex": len(s["chats"][job["agentId"]]) - 1,

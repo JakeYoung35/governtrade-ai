@@ -91,7 +91,14 @@ class AdapterTests(unittest.TestCase):
  def test_network_failures_become_venue_errors(self):
   for failure in [ConnectionResetError('reset'),http.client.RemoteDisconnected('closed'),http.client.IncompleteRead(b''),TimeoutError()]:
    with self.subTest(failure=type(failure).__name__),patch('adapters.urlopen',side_effect=failure):
-    with self.assertRaises(VenueError):KalshiAdapter({}).request('GET','/markets',public=True)
+    with self.assertRaises(VenueError) as e:KalshiAdapter({}).request('GET','/markets',public=True)
+    self.assertTrue(e.exception.transient)
+ def test_http_errors_are_transient_only_when_retrying_can_help(self):
+  from urllib.error import HTTPError
+  for code,transient in [(429,True),(500,True),(503,True),(400,False),(401,False),(403,False),(404,False)]:
+   with self.subTest(code=code),patch('adapters.urlopen',side_effect=HTTPError('u',code,'x',{},None)):
+    with self.assertRaises(VenueError) as e:KalshiAdapter({}).request('GET','/markets',public=True)
+    self.assertEqual(e.exception.transient,transient)
  def test_crypto_keys_encrypted_and_redacted(self):
   try:from cryptography.fernet import Fernet
   except ImportError:self.skipTest('Install requirements.txt to test encrypted vault')
@@ -159,6 +166,36 @@ class FollowupTests(MainTests):
   self.assertEqual(self.a['status'],'error');self.assertTrue(self.a['stale'])
   with self.assertRaises(ValueError):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
   self.assertEqual(self.g['status'],'paused')
+ @patch('workspace.BALANCE_RETRY_SECONDS',0)
+ def test_transient_balance_failure_keeps_account_connected(self):
+  # One unanswered balance read (e.g. on page load) must not cut the agents off; orders still wait for a fresh balance.
+  self.w.refresh(self.s,self.a);self.v.fail_with=VenueError('kalshi request failed.',transient=True)
+  self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'connected');self.assertTrue(self.a['stale']);self.assertIn('did not answer',self.a['error'])
+  self.assertEqual(self.proposal()['decision'],'BLOCK');self.assertEqual(self.v.calls,0)
+  self.v.fail_with=None;self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'connected');self.assertFalse(self.a['stale']);self.assertIsNone(self.a['error']);self.assertNotIn('syncFailures',self.a)
+ @patch('workspace.BALANCE_RETRY_SECONDS',0)
+ def test_repeated_transient_failures_mark_account_errored(self):
+  self.w.refresh(self.s,self.a);self.v.fail_with=ConnectionResetError('reset')
+  for _ in range(2):self.w.action(self.s,{'action':'refresh'});self.assertEqual(self.a['status'],'connected')
+  self.w.action(self.s,{'action':'refresh'});self.assertEqual(self.a['status'],'error');self.assertIn('Balance sync failed',self.a['error'])
+ @patch('workspace.BALANCE_RETRY_SECONDS',0)
+ def test_balance_read_retries_once(self):
+  reads=[];real=self.v.get_balance_positions
+  def flaky():
+   reads.append(1)
+   if len(reads)==1:raise VenueError('kalshi returned HTTP 503.',transient=True)
+   return real()
+  self.v.get_balance_positions=flaky;b=self.w.refresh(self.s,self.a)
+  self.assertEqual(len(reads),2);self.assertEqual(b['cash'],1000);self.assertFalse(self.a['stale'])
+ def test_refused_balance_read_marks_account_errored_at_once(self):
+  self.w.refresh(self.s,self.a);self.v.fail_with=VenueError('kalshi returned HTTP 401.')
+  self.w.action(self.s,{'action':'refresh'});self.assertEqual(self.a['status'],'error')
+ def test_transient_failure_does_not_reconnect_an_errored_account(self):
+  self.a['status']='error';self.v.fail_with=VenueError('kalshi request failed.',transient=True)
+  with patch('workspace.BALANCE_RETRY_SECONDS',0):self.w.action(self.s,{'action':'refresh'})
+  self.assertEqual(self.a['status'],'error')
  def test_remove_connected_account_refused(self):
   with self.assertRaisesRegex(ValueError,'Disconnect this account'):self.w.action(self.s,{'action':'account-remove','id':'account'})
   self.assertEqual(self.a['status'],'connected')

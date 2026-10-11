@@ -7,6 +7,7 @@ response body. Standard library only, like providers.py.
 import json
 from dataclasses import dataclass, field
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 TIMEOUT_SECONDS = 60  # per model call; agent_chat.py also bounds the whole turn
@@ -17,7 +18,12 @@ MAX_OUTPUT_TOKENS_WITH_REASONING = 8192
 
 
 class ModelError(Exception):
-    """A provider call failed. The message is safe to show the user."""
+    """A provider call failed. The message is safe to show the user. retryable: the same call may succeed if sent
+    again shortly (the provider was overloaded, had a server error, or could not be reached)."""
+
+    def __init__(self, message, retryable=False):
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -41,8 +47,13 @@ def post_json(url, headers, body, timeout=TIMEOUT_SECONDS):
         with urlopen(request, timeout=timeout) as response:
             return json.load(response)
     except HTTPError as e:
+        # The status alone, never the URL path, headers or body, so server logs show provider outages safely.
+        print(f"Model provider {urlsplit(url).hostname} returned HTTP {e.code}.", flush=True)
+        retryable = e.code in (429, 500, 502, 503, 504)
         reason = {400: "rejected the request", 401: "rejected the API key", 403: "denied access to this model",
-                  404: "does not offer this model", 429: "is rate limiting or out of credit"}.get(e.code, f"returned HTTP {e.code}")
+                  404: "does not offer this model", 429: "is rate limiting or out of credit",
+                  503: "is overloaded right now (HTTP 503). Try again in a minute"}.get(
+            e.code, f"had a temporary problem (HTTP {e.code}). Try again in a minute" if retryable else f"returned HTTP {e.code}")
         if e.code in (400, 429):
             # Classify billing failures without echoing arbitrary provider text into saved chats.
             try:
@@ -52,14 +63,17 @@ def post_json(url, headers, body, timeout=TIMEOUT_SECONDS):
                 code = error.get("code") if isinstance(error, dict) else None
                 if code == "insufficient_quota" or any(phrase in message for phrase in (
                         "credit balance is too low", "insufficient credit", "out of credit", "exhausted your credits")):
-                    reason = "is out of API credit or has reached its spending limit; check your provider billing settings"
+                    reason, retryable = "is out of API credit or has reached its spending limit; check your provider billing settings", False
                 elif "billing" in message:
-                    reason = "reported a billing issue; check your provider billing settings"
+                    reason, retryable = "reported a billing issue; check your provider billing settings", False
             except (OSError, ValueError, TypeError):
                 pass  # Empty, malformed or unreadable error bodies retain the HTTP-status fallback.
-        raise ModelError(f"The model provider {reason}.") from None
-    except (URLError, TimeoutError, OSError, ValueError):
-        raise ModelError("The model provider could not be reached or sent an unreadable response.") from None
+        raise ModelError(f"The model provider {reason}.", retryable=retryable) from None
+    except (URLError, TimeoutError, OSError, ValueError) as e:
+        # A refused or reset connection is worth one more try; a timeout already used the time a retry would need.
+        timed_out = isinstance(e, TimeoutError) or isinstance(getattr(e, "reason", None), TimeoutError)
+        raise ModelError("The model provider could not be reached or sent an unreadable response.",
+                         retryable=isinstance(e, OSError) and not timed_out) from None
 
 
 def _arguments(raw):

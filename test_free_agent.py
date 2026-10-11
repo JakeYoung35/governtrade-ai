@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import providers
 from agent_chat import AgentChat
-from agent_llm import ModelTurn
+from agent_llm import ModelError, ModelTurn
 from test_agent_chat import ChatTest, ScriptedModel, calls, propose
 from workspace import Workspace
 
@@ -97,6 +97,45 @@ class FreeAgentTests(ChatTest):
         job = service.begin(self.s, {'agent': 'agent', 'text': 'New day'})
         service.finish(self.s, job, service.run(job))
         self.assertEqual(self.s['freeAgentUsage'], {'day': '2026-10-12', 'messages': 1})
+
+    def provider_turn(self, *responses):
+        """A free-agent turn whose model calls go through the real retrying post(); responses are returned or raised."""
+        self.save_free('agent')
+        sent = []
+
+        def post_json(url, headers, body, timeout):
+            sent.append(url)
+            response = responses[min(len(sent), len(responses)) - 1]
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        class Conversation:
+            def __init__(self, post):self.post = post
+            def step(self):
+                self.post('https://generativelanguage.example', {}, {})
+                return ModelTurn('Here are some markets.')
+
+        with patch('agent_chat.post_json', post_json), patch('agent_chat.MODEL_RETRY_WAITS', (0, 0)):
+            self.chat(lambda *a, post: Conversation(post), text='What can I bet on?')
+        return sent
+
+    def test_a_turn_the_provider_never_answered_gives_the_free_message_back(self):
+        sent = self.provider_turn(ModelError('The model provider is overloaded right now (HTTP 503). Try again in a minute.', retryable=True))
+        self.assertEqual(len(sent), 3)  # the first call and two retries
+        self.assertEqual(self.s['freeAgentUsage']['messages'], 0)
+        self.assertIn('overloaded right now', self.s['chats']['agent'][-1]['text'])
+
+    def test_a_retry_that_succeeds_answers_and_counts_the_message(self):
+        sent = self.provider_turn(ModelError('overloaded', retryable=True), {'ok': True})
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(self.s['chats']['agent'][-1]['text'], 'Here are some markets.')
+        self.assertEqual(self.s['freeAgentUsage']['messages'], 1)
+
+    def test_a_refusal_is_not_retried(self):
+        sent = self.provider_turn(ModelError('The model provider rejected the request.'))
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(self.s['freeAgentUsage']['messages'], 0)  # no model answer, so the message is given back
 
     def test_agents_with_their_own_key_are_not_limited(self):
         with patch.dict(os.environ, {'GOVERNTRADE_FREE_AGENT_DAILY_MESSAGES': '0'}):

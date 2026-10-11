@@ -232,6 +232,76 @@ class BatchTests(ServiceTest):
         self.assertNotIn("inputs", json.dumps(summary))
 
 
+@patch("governor_service.VENUE_RETRY_SECONDS", 0)
+@patch("workspace.BALANCE_RETRY_SECONDS", 0)
+class VenueOutageTests(ServiceTest):
+    """A venue read that gets no answer is retried, then deferred to the next pass, never a silent rejection."""
+
+    def flaky_books(self, failures):
+        real, calls = self.venue.get_orderbook, []
+
+        def read(market_id):
+            calls.append(market_id)
+            if len(calls) <= failures:
+                raise VenueError("kalshi returned HTTP 503.", transient=True)
+            return real(market_id)
+        self.venue.get_orderbook = read
+        return calls
+
+    def test_one_unanswered_book_read_is_retried_within_the_pass(self):
+        calls = self.flaky_books(1)
+        code, body = self.submit()
+        self.service.run_batch(self.s)
+        view = self.service.lookup(self.s, body["governorProposalId"])
+        self.assertEqual((len(calls), view["status"], view["note"]), (2, "submitted", None))
+
+    def test_an_unanswered_book_defers_the_request_to_the_next_pass(self):
+        self.flaky_books(2)
+        code, body = self.submit()
+        self.service.run_batch(self.s)
+        view = self.service.lookup(self.s, body["governorProposalId"])
+        self.assertEqual((view["status"], view["decision"]), ("queued", None))
+        self.assertIn("trying again", view["note"])
+        self.service.run_batch(self.s)
+        view = self.service.lookup(self.s, body["governorProposalId"])
+        self.assertEqual((view["status"], view["note"]), ("submitted", None))
+
+    def test_deferral_is_bounded(self):
+        self.flaky_books(10 ** 6)
+        code, body = self.submit()
+        for _ in range(3):
+            self.service.run_batch(self.s)
+        view = self.service.lookup(self.s, body["governorProposalId"])
+        self.assertEqual(view["status"], "rejected")
+        self.assertIn("after 3 attempts", view["note"])
+
+    def test_only_the_unanswered_market_waits(self):
+        real = self.venue.get_orderbook
+        self.venue.get_orderbook = lambda m: (_ for _ in ()).throw(VenueError("x", transient=True)) if m == OTHER else real(m)
+        _, first = self.submit()
+        _, second = self.submit(proposalId="p-2", agentId="agent-2", marketId=OTHER)
+        self.service.run_batch(self.s)
+        self.assertEqual(self.service.lookup(self.s, first["governorProposalId"])["status"], "submitted")
+        self.assertEqual(self.service.lookup(self.s, second["governorProposalId"])["status"], "queued")
+
+    def test_a_refused_book_is_rejected_with_the_reason(self):
+        code, body = self.submit(marketId="KXNOPE-1")
+        self.service.run_batch(self.s)
+        view = self.service.lookup(self.s, body["governorProposalId"])
+        self.assertEqual(view["decision"]["reasonCodes"], [rules.MARKET_NOT_IN_SNAPSHOT])
+        self.assertEqual(view["note"], "Market data unavailable: kalshi returned HTTP 404.")
+
+    def test_an_unanswered_balance_defers_and_keeps_the_account_connected(self):
+        self.venue.fail_with = VenueError("kalshi request failed.", transient=True)
+        code, body = self.submit()
+        self.service.run_batch(self.s)
+        view = self.service.lookup(self.s, body["governorProposalId"])
+        self.assertEqual((view["status"], self.s["accounts"][0]["status"]), ("queued", "connected"))
+        self.venue.fail_with = None
+        self.service.run_batch(self.s)
+        self.assertEqual(self.service.lookup(self.s, body["governorProposalId"])["status"], "submitted")
+
+
 class ScoringTests(ServiceTest):
     """Step 10: settled markets score every forecast and feed reliability back into sizing."""
 

@@ -33,6 +33,25 @@ vm.runInContext(`
   fetch = async () => ({ok: true, json: async () => ({chatProposals: {agent: [{status: 'executed', order: {status: 'filled'}}]}})});
   schedulePoll();await poll();
   assert.equal(state.chatProposals.agent[0].order.status, 'filled');
-  console.log('Chat UI: session reset, stale response, approval polling and lightweight updates pass.');
+  // A restart mid-turn: the proxy answers with an HTML error page, then the reload shows the saved message.
+  agent = 'agent';
+  load = async () => {state = {chats: {agent: [{role: 'customer', text: 'Put $5 on Cleveland'}]}}};
+  fetch = async () => ({ok: false, status: 502, json: async () => {throw SyntaxError("Unexpected token '<'")}});
+  await chatSend('Put $5 on Cleveland');
+  assert.ok(error.includes("unavailable while your agent was working (HTTP 502)"), error);
+  assert.equal(chatDraft, '');  // the message was saved, so it is not offered again
+  assert.equal(chatBusy, false);
+  // A dropped connection keeps the unsent text for another try.
+  load = async () => {state = {chats: {agent: []}}};
+  fetch = async () => {throw TypeError('Failed to fetch')};
+  await chatSend('Put $6 on Cleveland');
+  assert.equal(error, CHAT_LOST);
+  assert.equal(chatDraft, 'Put $6 on Cleveland');
+  // Other actions explain an unavailable server instead of showing a JSON parse error.
+  busy = false;
+  fetch = async () => ({ok: false, status: 503, json: async () => {throw SyntaxError("Unexpected token '<'")}});
+  await api('refresh');
+  assert.ok(error.includes("unavailable right now (HTTP 503)"), error);
+  console.log('Chat UI: session reset, stale response, approval polling, lightweight updates and lost connections pass.');
 })()
 `, context).catch(error => {console.error(error);process.exitCode = 1});

@@ -21,7 +21,9 @@ from urllib.parse import urlencode, quote, urlsplit
 from urllib.error import HTTPError, URLError
 
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
-class VenueError(ValueError):pass
+class VenueError(ValueError):
+    # transient: the venue or network may answer next time (no response, HTTP 429 or 5xx), unlike a refusal.
+    def __init__(self,message='',transient=False):super().__init__(message);self.transient=transient
 class VenueAdapter(ABC):
     def __init__(self, credentials, environment='sandbox'):
         if environment not in ('sandbox','live'):raise VenueError('Invalid environment.')
@@ -36,8 +38,8 @@ class VenueAdapter(ABC):
         if not public:headers.update(self.headers(method,url))
         try:
             with urlopen(Request(url,data=raw,method=method,headers=headers),timeout=timeout) as r:return json.load(r)
-        except HTTPError as e:raise VenueError(f'{self.venue} returned HTTP {e.code}. Check credentials, environment and permissions.') from None
-        except (OSError,http.client.HTTPException,ValueError):raise VenueError(f'{self.venue} request failed. No confirmed execution result.') from None
+        except HTTPError as e:raise VenueError(f'{self.venue} returned HTTP {e.code}. Check credentials, environment and permissions.',transient=e.code==429 or e.code>=500) from None
+        except (OSError,http.client.HTTPException,ValueError):raise VenueError(f'{self.venue} request failed. No confirmed execution result.',transient=True) from None
     def test_connection(self):return self.get_balance_positions()
     @abstractmethod
     def get_markets(self,category):pass
