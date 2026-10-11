@@ -16,7 +16,7 @@ from adapters import VenueError
 from engine import PERSONALITIES, main_seed
 from governor import api, records, rules
 from governor_service import GovernorService, utc_now
-from test_engine import MANDATE, FakeVault, FakeVenue
+from tests.python.test_engine import MANDATE, FakeVault, FakeVenue
 from workspace import Workspace
 import trading_rules
 

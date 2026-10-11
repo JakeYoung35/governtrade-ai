@@ -358,7 +358,7 @@ class GuardTests(unittest.TestCase):
                          ("0.0000001", "1"))
 
     def test_public_state_leaves_out_governor_records(self):
-        from test_engine import FakeVault
+        from tests.python.test_engine import FakeVault
         from workspace import Workspace
         s = state()
         run_batch(s)

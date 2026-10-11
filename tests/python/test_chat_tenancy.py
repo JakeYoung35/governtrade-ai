@@ -9,8 +9,8 @@ from unittest.mock import patch, Mock
 import server
 import tenancy
 from agent_llm import ModelTurn
-from test_agent_chat import ChatVenue, KeyVault, ScriptedModel, calls, propose
-from test_governor_service import workspace_state
+from tests.python.test_agent_chat import ChatVenue, KeyVault, ScriptedModel, calls, propose
+from tests.python.test_governor_service import workspace_state
 
 
 class Socket:

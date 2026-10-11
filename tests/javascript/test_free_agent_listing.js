@@ -1,12 +1,13 @@
-// Run with node test_free_agent_listing.js. No browser, venue or model credentials required.
+// Run with node tests/javascript/test_free_agent_listing.js. No browser, venue or model credentials required.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const vm = require('node:vm');
 let selected = null;
 const context = vm.createContext({assert, console, setTimeout, clearTimeout, clearInterval,
   document: {addEventListener() {}, querySelector(s) { return s === '#free-agent-account' && selected ? {value: selected} : null; }},
   setSelected(v) { selected = v; }});
-const source = fs.readFileSync('static/app.js', 'utf8').replace('});initializeAuth();', '});');
+const source = fs.readFileSync(path.join(__dirname, '../../static/app.js'), 'utf8').replace('});initializeAuth();', '});');
 vm.runInContext(source, context);
 vm.runInContext(`
 (async () => {

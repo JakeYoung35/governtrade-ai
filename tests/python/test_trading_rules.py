@@ -9,8 +9,8 @@ import trading_rules
 from agent_chat import AgentChat
 from engine import main_seed, migrate, seed
 from governor import rules as codes
-from test_engine import MANDATE, FakeVault, FakeVenue
-from test_governor_service import ServiceTest
+from tests.python.test_engine import MANDATE, FakeVault, FakeVenue
+from tests.python.test_governor_service import ServiceTest
 from workspace import Workspace
 
 # A schema 1 workspace as PR #36 saved it: dollar rules, a dollar mandate and a copied account ceiling.

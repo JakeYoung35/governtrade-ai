@@ -142,7 +142,7 @@ The API exposes `GET /api/governor/schema` for its current schema and `GET /api/
 | `store.py`, `migrations/` | Persistence and database schema |
 | `static/` | Browser application and styling |
 | `replay/`, `scripts/replay_demo.py` | Offline paper-trading and reproducible governor scenarios |
-| `test_*.py` | Automated test modules |
+| `tests/python/`, `tests/javascript/` | Python and JavaScript automated tests |
 
 ## Run locally
 
@@ -194,7 +194,7 @@ The replay demo is offline and uses simulated fills and recorded order books. It
 - [Setup and operations](docs/setup-and-operations.md)
 - [Render hosting and custom domain](docs/render-hosting.md)
 - [Collaboration](COLLABORATION.md)
-- [Verification notes](VERIFICATION.md)
+- [Verification notes](docs/verification.md)
 
 ## Near-future innovations
 

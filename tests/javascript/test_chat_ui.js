@@ -1,10 +1,11 @@
-// Run with node test_chat_ui.js. No browser, venue or model credentials required.
+// Run with node tests/javascript/test_chat_ui.js. No browser, venue or model credentials required.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const vm = require('node:vm');
 const context = vm.createContext({assert, console, setTimeout, clearTimeout, clearInterval,
   document: {addEventListener() {}, querySelector() { return null; }}});
-const source = fs.readFileSync('static/app.js', 'utf8').replace('});initializeAuth();', '});');
+const source = fs.readFileSync(path.join(__dirname, '../../static/app.js'), 'utf8').replace('});initializeAuth();', '});');
 vm.runInContext(source, context);
 vm.runInContext(`
 (async () => {

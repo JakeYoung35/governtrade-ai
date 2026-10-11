@@ -1,0 +1,1 @@
+"""GovernTrade automated tests."""
