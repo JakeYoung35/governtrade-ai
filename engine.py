@@ -68,20 +68,16 @@ def action(s,b):
     else:raise ValueError('Unknown action.')
 
 # User mandates and account ceilings are distinct policy layers.
-PERSONALITIES={
- 'Conservative':{'autoLimit':10,'dailyCap':50,'minimum':200,'newMarketApproval':False},
- 'Moderate':{'autoLimit':25,'dailyCap':100,'minimum':100,'newMarketApproval':False},
- 'Aggressive':{'autoLimit':50,'dailyCap':100,'minimum':50,'newMarketApproval':False}}
-# Fixed limits of the simulated presenter demo and of schema-2 migration only. A real workspace's limits are the
-# user's own trading rules (trading_rules.py); there are no presets.
+# Fixed dollar limits of the simulated presenter demo only. A real workspace's limits are the user's own trading
+# rules and agent mandates as shares of the account's value (trading_rules.py); there are no presets.
 MAIN_DEFAULT={'dailyCap':100,'automation':True}
 SAFETY={'dailyLossCap':50,'marketCap':50,'exposureCap':500,'slippage':1}
 CATEGORIES=['crypto','sports','economics','politics','culture','other']
 DEMO_AGENTS=[
- {'id':'demo-conservative','name':'Economics Scout','personality':'Conservative','mandate':copy.deepcopy(PERSONALITIES['Conservative']),'demoMarket':'economics','priorDailySpend':0},
- {'id':'demo-moderate','name':'Sports Analyst','personality':'Moderate','mandate':copy.deepcopy(PERSONALITIES['Moderate']),'demoMarket':'sports','priorDailySpend':0},
- {'id':'demo-aggressive','name':'Momentum Trader','personality':'Aggressive','mandate':copy.deepcopy(PERSONALITIES['Aggressive']),'demoMarket':'crypto','priorDailySpend':80},
- {'id':'demo-new-market','name':'Discovery Agent','personality':'Moderate','mandate':{**PERSONALITIES['Moderate'],'newMarketApproval':True},'demoMarket':'politics','priorDailySpend':0}]
+ {'id':'demo-conservative','name':'Economics Scout','mandate':{'autoLimit':10,'dailyCap':50,'minimum':200,'newMarketApproval':False},'demoMarket':'economics','priorDailySpend':0},
+ {'id':'demo-moderate','name':'Sports Analyst','mandate':{'autoLimit':25,'dailyCap':100,'minimum':100,'newMarketApproval':False},'demoMarket':'sports','priorDailySpend':0},
+ {'id':'demo-aggressive','name':'Momentum Trader','mandate':{'autoLimit':50,'dailyCap':100,'minimum':50,'newMarketApproval':False},'demoMarket':'crypto','priorDailySpend':80},
+ {'id':'demo-new-market','name':'Discovery Agent','mandate':{'autoLimit':25,'dailyCap':100,'minimum':100,'newMarketApproval':True},'demoMarket':'politics','priorDailySpend':0}]
 # Governor records (see governor/records.py): loss-breaker state, batch inputs, decisions, forecasts.
 def governor_seed():return {'governor':{'breakers':{}},'governorBatches':[],'governorDecisions':[],'governorForecasts':[],'governorBreakerEvents':[],'governorReplacedForecasts':[],'governorRequests':[]}
 def main_seed():
