@@ -17,6 +17,7 @@ import {accountLabel, providerName, takenColors} from './Agents.js';
 import {MandateStep} from './NewAgent.js';
 import {Dialog} from '../ui/Dialog.js';
 import {ApprovalCard, orderHref} from '../ui/ApprovalCard.js';
+import {pendingOrders} from '../order-state.js';
 
 const STATUS = {
   active: ['Active', 'pill-allow'],
@@ -68,20 +69,17 @@ function Hero({agent, workspace, account, thinking, onOpen, onError}) {
   </section>`;
 }
 
-// The first check that blocked an order in its latest evaluation, e.g. "Agent mandate: Trade exceeds the agent daily limit."
-function blockReason(order) {
-  const latest = order.evaluations?.[order.evaluations.length - 1];
-  const check = latest?.checks?.find(c => c.outcome === 'BLOCK');
-  return check ? `${check.name}: ${check.reason}` : null;
-}
-
+// The proposal's order as the chat's proposal view reports it (status, decision and, when blocked, the first check
+// that blocked it, e.g. "Agent mandate: Trade exceeds the agent daily limit."). A waiting order the state carries
+// shows as its approval card.
 function ProposalCard({proposal, workspace}) {
-  const order = workspace.orders?.find(o => o.id === proposal.order?.id);
-  if (order?.status === 'awaiting approval') return html`<${ApprovalCard} order=${order} workspace=${workspace} />`;
+  const order = proposal.order;
+  const waiting = order?.status === 'awaiting approval' && pendingOrders(workspace).find(o => o.id === order.id);
+  if (waiting) return html`<${ApprovalCard} order=${waiting} workspace=${workspace} />`;
   const {label, tone} = statusOf(order ? order.status : proposal.status);
   const estimate = Number(proposal.estimatedYesProbability);
   const outcome = governorLine(proposal, {money, reasonText});
-  const blocked = order?.decision === 'BLOCK' ? blockReason(order) : null;
+  const blocked = order?.decision === 'BLOCK' ? proposal.blockReason : null;
   return html`<article class="proposal">
     <div class="proposal-head"><h3>${proposal.marketName || order?.market?.name || proposal.marketId}</h3><span class=${`pill pill-${tone}`}>${label}</span></div>
     <p>Buy ${String(proposal.side || '').toUpperCase()} · up to ${money(proposal.maxBudgetUsd)}${Number.isFinite(estimate) ? ` · agent estimate ${Math.round(estimate * 100)}% YES` : ''}</p>
@@ -346,8 +344,10 @@ export function AgentDetail({id, workspace}) {
     return html`<div class="card"><div class="empty"><h3>Agent not found</h3><p>It may have been deleted.</p><a class="btn" href="/agents">Back to agents</a></div></div>`;
   }
   const account = workspace.accounts?.find(a => a.id === agent.accountId);
-  const inChat = new Set((workspace.chatProposals?.[id] || []).map(p => p.order?.id).filter(Boolean));
-  const waiting = (workspace.orders || []).filter(o => o.agent === id && o.status === 'awaiting approval' && !inChat.has(o.id));
+  // Waiting orders the conversation does not already show: the server counts the agent's waiting orders over every
+  // order (activity.awaiting); the chat shows the ones its proposals made.
+  const inChat = new Set((workspace.chatProposals?.[id] || []).filter(p => p.order?.status === 'awaiting approval').map(p => p.order.id));
+  const waiting = Math.max(0, (agent.activity?.awaiting || 0) - inChat.size);
   const close = () => setModal('');
   const saved = message => () => { setModal(''); setStore({toast: message}); };
 
@@ -357,8 +357,8 @@ export function AgentDetail({id, workspace}) {
     <${ErrorNote} message=${error} />
     <div class="agent-layout">
       <div class="section-stack">
-        ${waiting.length ? html`<a class="notice notice-warn notice-link" href="/approvals">
-          <${Icon} name="approvals" /><span>${waiting.length === 1 ? `1 order from ${agent.name} is` : `${waiting.length} orders from ${agent.name} are`} waiting for your approval.</span><span class="notice-action">Review<${Icon} name="arrow" /></span>
+        ${waiting ? html`<a class="notice notice-warn notice-link" href="/approvals">
+          <${Icon} name="approvals" /><span>${waiting === 1 ? `1 order from ${agent.name} is` : `${waiting} orders from ${agent.name} are`} waiting for your approval.</span><span class="notice-action">Review<${Icon} name="arrow" /></span>
         </a>` : null}
         <${Conversation} agent=${agent} workspace=${workspace} />
       </div>

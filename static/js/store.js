@@ -5,7 +5,7 @@ import {moodEvents, hasInFlight} from './order-state.js';
 const initial = {
   phase: 'starting',     // starting | signed-out | local-entry | unavailable | ready
   auth: {mode: 'local', user: null, config: null},
-  workspace: null,       // the public workspace state from /api/state (accounts, agents, rules, orders...)
+  workspace: null,       // the public workspace state from /api/state (accounts, agents, rules, a window of orders...)
   error: '',             // the latest workspace-level error, shown by the screen that caused it
   moodEvents: {},
   toast: '',

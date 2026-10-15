@@ -21,6 +21,7 @@ from agent_llm import TIMEOUT_SECONDS, ModelError, connect, post_json
 from engine import event
 from governor import api
 from governor_service import utc_now
+from order_views import block_reason
 import trading_rules
 
 HISTORY_MESSAGES = 20  # earlier chat messages sent as context
@@ -467,7 +468,9 @@ class AgentChat:
                 **view, "messageIndex": int(match.group(1)), "position": int(match.group(2)),
                 "maxBudgetUsd": request["proposal"]["requestedBudget"],
                 "estimatedYesProbability": request["proposal"]["estimatedYesProbability"],
-                "reasoning": request.get("reasoning"), "marketName": order["market"].get("name") if order else None})
+                "reasoning": request.get("reasoning"), "marketName": order["market"].get("name") if order else None,
+                # The state carries no evaluations (order_views.py), so the card's block reason comes from here.
+                "blockReason": block_reason(order) if order and order.get("decision") == "BLOCK" else None})
         for items in views.values():
             items.sort(key=lambda v: (v["messageIndex"], v["position"]))
         return views

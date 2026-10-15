@@ -364,7 +364,7 @@ class GuardTests(unittest.TestCase):
         run_batch(s)
         public = Workspace(FakeVault()).public({**s, "accounts": [], "agentConfigs": []})
         self.assertFalse([k for k in public if k.startswith("governor")])
-        self.assertIn("orders", public)
+        self.assertIn("recentOrders", public)
 
 
 class OrderingTests(unittest.TestCase):

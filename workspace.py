@@ -5,18 +5,11 @@ from engine import main_seed,checks,event,rules,validate_permissions,validate_ma
 import trading_rules
 from vault import masks
 from providers import validate_model_key,validate_free_agent,catalog,FREE_PROVIDER
+import order_views
 
 TRANSIENT_SYNC_GRACE_SECONDS=120  # how long a connected account rides out unanswered balance reads before showing an error
 BALANCE_RETRY_SECONDS=0.5
 LOOK_FOCI=('general','crypto','sports','politics','economics','culture')
-
-ORDER_CATEGORIES=('crypto','sports','economics','politics','culture','other')
-
-def order_category(o):
-    """The market category Activity filters by. Kalshi quotes carry it as market['agent'] (a legacy name, not the
-    agent); any other source, older order or unknown value is 'other', so no order drops out of the filter."""
-    market=o.get('market') or {};value=market.get('category') or market.get('agent')
-    return value if value in ORDER_CATEGORIES else 'other'
 
 def validate_look(look):
     """An agent's creature: a seed the front end draws it from, and the market focus that picks its accessory.
@@ -239,19 +232,19 @@ class Workspace:
         summaries = {a['id']: governor.account_summary(s, a) for a in s['accounts']
                      if a['venue'] == 'kalshi' and a.get('status') != 'removed'}
         order_governors = governor.order_governors(s)
-        # Only compact allowlisted governor details reach the browser.
-        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor') and k!='chatRequests'})  # request IDs are server bookkeeping
+        # Only compact allowlisted governor details reach the browser. Orders and events grow without limit, so the
+        # state carries a bounded window of them (order_views.py); the rest is read page by page.
+        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor') and k not in ('chatRequests','keys','orders','events')})  # request IDs and idempotency keys are server bookkeeping
         for a in public['accounts']:
             a['hasCredentials']=bool(a.get('credentialRef'));a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'
+        activity=order_views.agent_activity(s['orders'])
         for a in public['agentConfigs']:
             a.pop('modelCredentialRef',None);a['usage']=__import__('engine').usage(s,a['accountId'],a['id'])
+            a['activity']=activity.get(a['id'],{'awaiting':0,'lastOrder':None})
         for a in public['accounts']:
             a['summary'] = summaries.get(a['id'])
-        for o in public['orders']:
-            o['category'] = order_category(o)
-            if o.get('governorProposalId') in order_governors:
-                o['governor'] = copy.deepcopy(order_governors[o['governorProposalId']])
+        public.update(order_views.window(s, order_governors))
         totals = [summaries[a['id']] for a in s['accounts'] if a['id'] in summaries
                   and a.get('status') != 'disconnected']
         public['summary'] = {key: sum(t[key] for t in totals)

@@ -447,6 +447,7 @@ textarea.input{padding:var(--space-3);resize:vertical;line-height:var(--leading)
 .chart-legend li{display:flex;align-items:center;gap:var(--space-2)}
 .swatch{display:inline-block;width:10px;height:10px;border-radius:2px}
 .outcome-chart{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:var(--space-2);height:200px}
+.outcome-chart-loading{place-items:center}
 .outcome-day{display:flex;flex-direction:column;min-width:0}
 .outcome-bars{flex:1;display:flex;align-items:flex-end;justify-content:center;gap:2px;border-bottom:1px solid var(--line-strong)}
 .outcome-bar{position:relative;width:min(14px,28%);height:var(--h);border-radius:4px 4px 0 0}

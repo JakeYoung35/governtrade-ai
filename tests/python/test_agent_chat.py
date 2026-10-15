@@ -119,6 +119,14 @@ class ProposalTests(ChatTest):
         self.assertEqual((view["messageIndex"], view["status"], view["maxBudgetUsd"]), (0, "submitted", "20"))
         self.assertEqual(view["order"]["status"], "filled")
         self.assertEqual(view["marketName"], "BTC")  # FakeVenue's quote name
+        self.assertIsNone(view["blockReason"])
+        # The browser state carries no evaluations, so a blocked order's reason travels with its proposal view.
+        order = next(o for o in self.s["orders"] if o["id"] == view["order"]["id"])
+        order.update(decision="BLOCK", status="blocked", evaluations=[{"outcome": "BLOCK", "checks": [
+            {"name": "Your rules", "outcome": "ALLOW", "reason": ""},
+            {"name": "Agent mandate", "outcome": "BLOCK", "reason": "Trade exceeds the agent daily limit."}]}])
+        self.assertEqual(service.proposal_views(self.s)["agent"][0]["blockReason"],
+                         "Agent mandate: Trade exceeds the agent daily limit.")
 
     def test_invalid_arguments_go_back_to_the_model_to_correct(self):
         model = ScriptedModel(calls(propose(estimatedYesProbability=1.5)), calls(propose()), ModelTurn("Done."))

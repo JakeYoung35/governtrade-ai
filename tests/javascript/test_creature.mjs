@@ -43,7 +43,14 @@ assert.ok(creatureSvg('k3v9qa', {mood: 'filled', live: true}).includes('class="c
 // Moods follow what is happening to the agent, in priority order.
 const now = Date.parse('2026-10-14T12:00:00Z');
 const agent = {id: 'a1', accountId: 'acc', status: 'active'};
-const ws = (orders = [], extra = {}) => ({accounts: [{id: 'acc', status: 'connected'}], permissions: {automation: true}, orders, ...extra});
+// The server summarises each agent's orders (order_views.agent_activity); this builds that summary from a list.
+const activityOf = (id, orders) => {
+  const own = orders.filter(o => o.agent === id);
+  const last = own.reduce((latest, o) => (!latest || Date.parse(o.time) > Date.parse(latest.time) ? o : latest), null);
+  return {awaiting: own.filter(o => o.status === 'awaiting approval').length, lastOrder: last && {time: last.time, decision: last.decision, status: last.status}};
+};
+const ws = (orders = [], extra = {}) => ({accounts: [{id: 'acc', status: 'connected'}], permissions: {automation: true},
+  agentConfigs: ['a1', 'a2'].map(id => ({id, activity: activityOf(id, orders)})), ...extra});
 assert.equal(moodFor(agent, ws(), {now}), 'idle');
 assert.equal(moodFor(agent, ws(), {now, thinking: true}), 'thinking');
 assert.equal(moodFor(agent, ws([{agent: 'a1', status: 'awaiting approval', time: '2026-10-14T11:00:00Z'}]), {now}), 'waiting');

@@ -10,6 +10,7 @@ from governor.records import compact_for_json
 from governor_service import GovernorService
 from agent_chat import AgentChat,CHAT_PROPOSAL_PREFIX
 import hosting
+import order_views
 import authentication
 import tenancy
 ROOT=Path(__file__).parent;DATA=Path(os.environ.get('GOVERNTRADE_DATA_DIR',str(ROOT/'.data')));DATA.mkdir(parents=True,exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
@@ -295,6 +296,11 @@ class Handler(SimpleHTTPRequestHandler):
             # Light poll for the chat UI while proposals are being decided: no venue refresh, unlike /api/state.
             if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             with locked('main'):return self.json(200,{'chatProposals':chat_service().proposal_views(read('main'))})
+        if order_views.route_path(urlsplit(self.path).path):
+            # Pages of orders, events and Activity's counts (order_views.py): same-origin reads with no venue refresh.
+            if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
+            with locked('main'):s=read('main');status,body=order_views.route(s,governor().order_governors(s),self.path)
+            return self.json(status,body)
         if self.path.startswith('/api/worker'):
             if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
             # The in-app agent answers chat messages itself (agent_chat.py), so they are no longer offered to workers

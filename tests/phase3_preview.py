@@ -13,6 +13,7 @@ from unittest.mock import patch
 from tests.python.test_agent_chat import ChatVenue, ScriptedModel, calls, propose
 from agent_chat import AgentChat
 from agent_llm import ModelTurn
+import order_views
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -129,6 +130,7 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == '/api/auth': return self.json(200, {'mode': 'fixture', 'user': None, 'csrf': 'fixture'})
         if path == '/api/state': return self.json(200, self.state())
+        if order_views.route_path(path): return self.json(*order_views.route(s, case.service.order_governors(s), self.path))
         if '.' not in path.rsplit('/', 1)[-1]: self.path = '/'
         return super().do_GET()
     def do_POST(self):

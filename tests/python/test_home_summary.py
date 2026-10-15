@@ -2,6 +2,7 @@
 import copy
 import datetime as dt
 import unittest
+import order_views
 from governor_service import GovernorService
 from tests.python.test_governor_service import ServiceTest
 from governor.breaker import BreakerState
@@ -24,7 +25,7 @@ class HomeSummaryTests(ServiceTest):
                             {**base, 'id': 'unknown', 'market': {'id': 'm', 'agent': 'agent-7'}},
                             {**base, 'id': 'older', 'market': {'id': 'm'}}]
         public = self.workspace.public(self.s)
-        self.assertEqual({o['id']: o['category'] for o in public['orders']},
+        self.assertEqual({o['id']: o['category'] for o in public['recentOrders']},
                          {'kalshi': 'sports', 'named': 'crypto', 'unknown': 'other', 'older': 'other'})
         self.assertNotIn('category', self.s['orders'][0])  # public() never changes stored orders
 
@@ -46,12 +47,18 @@ class HomeSummaryTests(ServiceTest):
         self.service.run_batch(self.s)
         before = copy.deepcopy(self.s)
         public = self.workspace.public(self.s)
-        order = next(o for o in public['orders'] if o.get('governorProposalId'))
-        g = order['governor']
+        stored = next(o for o in self.s['orders'] if o.get('governorProposalId'))
+        # The drawer's full order carries the allowlisted trace; the state's row carries it only while it waits.
+        status, body = order_views.route(self.s, self.service.order_governors(self.s), f"/api/orders/{stored['id']}")
+        self.assertEqual(status, 200)
+        g = body['order']['governor']
         self.assertEqual(float(g['maxBudgetUsd']), 20)
         self.assertIn('targetStake', g)
         self.assertIn('headroom', g)
         self.assertNotIn('fills', g)
+        row = next(o for o in public['recentOrders'] if o['id'] == stored['id'])
+        self.assertEqual(row['governor'], g if stored['status'] == 'awaiting approval'
+                         else {k: g.get(k) for k in order_views.GOVERNOR_SUMMARY})
         self.assertFalse(any(k.startswith('governor') for k in public))
         self.assertEqual(self.s, before)
 

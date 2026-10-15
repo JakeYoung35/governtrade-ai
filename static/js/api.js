@@ -196,6 +196,24 @@ export async function pollWorkspace() {
   }
 }
 
+// A read of data the workspace state leaves out: pages of orders and events, one full order, Activity's counts.
+// Resolves undefined when the signed-in user changed meanwhile; otherwise throws an Error that can be shown as-is,
+// with the HTTP status on it (a 404 means the order is not in this workspace).
+export async function fetchData(url) {
+  const g = generation;
+  const r = await send(url);
+  if (g !== generation) return undefined;
+  if (r.status === 401) {
+    resetUser('starting');
+    await initializeAuth();
+    return undefined;
+  }
+  const d = await readJson(r);
+  if (g !== generation) return undefined;
+  if (!r.ok) throw Object.assign(Error(d.error || 'Unable to load this. Try again.'), {status: r.status});
+  return d;
+}
+
 // Chat can take a full model turn. Keep its pending state across route changes. Resolves with the action's result
 // only once the server confirmed the message ({duplicate: true} when this requestId was already stored); every other
 // outcome throws, so the caller keeps the message. Resending with the same requestId never runs it twice.

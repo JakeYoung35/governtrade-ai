@@ -17,7 +17,7 @@ const NAV = [
 const TABS = ['home', 'approvals', 'agents', 'activity'];
 const SECTION = {'new-agent': 'agents', agent: 'agents'};
 
-const awaiting = workspace => (workspace.orders || []).filter(o => o.status === 'awaiting approval').length;
+const awaiting = workspace => workspace.orderStats?.awaiting || 0;
 
 function Count({n}) {
   return n ? html`<span class="nav-count num" aria-label=${`${n} waiting`}>${n}</span>` : null;

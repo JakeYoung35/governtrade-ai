@@ -10,6 +10,8 @@ import {GovernorRail} from './GovernorRail.js';
 import {Verdict, verdictLabel} from './Verdict.js';
 import {ApprovalCard, orderLine} from './ApprovalCard.js';
 import {accountLabel} from '../screens/Agents.js';
+import {useReads} from '../remote.js';
+import {windowOrders} from '../order-state.js';
 
 const LAYERS = {account_ceiling: 'Your rules', agent_mandate: 'Agent mandate', execution: 'Execution'};
 const layerName = layer => LAYERS[layer] || String(layer || '').replaceAll('_', ' ');
@@ -57,11 +59,16 @@ export function Drawer({id, workspace}) {
     document.body.style.overflow = 'hidden';
     return () => { document.body.style.overflow = oldOverflow; if (previous?.isConnected) previous.focus(); };
   }, []);
-  const order = workspace.orders?.find(o => o.id === id);
+  // The state's row (if it carries this order) shows at once; the full order, with the whole reasoning, the governor's
+  // sizing and every evaluation, comes from the server and is read again after each workspace refresh.
+  const read = useReads([`/api/orders/${encodeURIComponent(id)}`], workspace);
+  const full = read.data?.[0].order.id === id ? read.data[0].order : null;
+  const order = full || windowOrders(workspace).find(o => o.id === id);
   const agent = workspace.agentConfigs?.find(a => a.id === order?.agent);
   const account = workspace.accounts?.find(a => a.id === order?.accountId);
   const status = statusOf(order?.status);
-  const evaluations = order?.evaluations || [];
+  const evaluations = full?.evaluations || [];
+  const pending = html`<p class="muted">${read.error ? read.error.message : 'Loading…'}</p>`;
   const outside = e => {
     if (e.target !== dialog.current) return;
     const r = dialog.current.getBoundingClientRect();
@@ -70,7 +77,8 @@ export function Drawer({id, workspace}) {
 
   return html`<dialog ref=${dialog} class="order-drawer" aria-labelledby="order-title" onCancel=${e => { e.preventDefault(); closeOrder(); }} onClick=${outside}>
     <div class="drawer-head"><h2 id="order-title">Order details</h2><button class="btn" onClick=${closeOrder} autofocus>Close</button></div>
-    ${!order ? html`<div class="empty"><h3>Order unavailable</h3><p>This order is not in your workspace. It may belong to another account or have been removed.</p></div>` : html`<div class="drawer-body section-stack">
+    ${!order && read.error?.status === 404 ? html`<div class="empty"><h3>Order unavailable</h3><p>This order is not in your workspace. It may belong to another account or have been removed.</p></div>`
+      : !order ? html`<div class="empty" aria-busy=${!read.error}><p class=${read.error ? '' : 'muted'} role=${read.error ? 'alert' : null}>${read.error ? read.error.message : 'Loading the order…'}</p></div>` : html`<div class="drawer-body section-stack">
       <header class="order-title">
         <h3>${order.market?.name || order.market?.id}</h3>
         <p class="muted">${agent?.name || order.agent} · ${accountLabel(account)} · ${when(order.time)}</p>
@@ -84,10 +92,10 @@ export function Drawer({id, workspace}) {
         <div><dt>Order ID</dt><dd class="mono-small">${order.id}</dd></div>
       </dl>
       ${order.status === 'awaiting approval' ? html`<section class="section-stack-sm"><h3>Your approval</h3><${ApprovalCard} key=${order.id} order=${order} workspace=${workspace} detail /></section>`
-        : html`<section class="section-stack-sm"><h3>Governor sizing</h3><${GovernorRail} order=${order} /></section>`}
-      ${order.request ? html`<section class="section-stack-sm"><h3>Agent's reasoning</h3><p class="order-reason">${order.request}</p></section>` : null}
+        : html`<section class="section-stack-sm"><h3>Governor sizing</h3>${full ? html`<${GovernorRail} order=${full} />` : pending}</section>`}
+      ${order.request ? html`<section class="section-stack-sm"><h3>Agent's reasoning</h3>${full ? html`<p class="order-reason">${full.request}</p>` : pending}</section>` : null}
       <section class="section-stack-sm"><h3>Evaluations</h3>
-        ${!evaluations.length ? html`<p class="muted">No evaluations recorded.</p>`
+        ${!full ? pending : !evaluations.length ? html`<p class="muted">No evaluations recorded.</p>`
           : evaluations.map((evaluation, i) => html`<${Evaluation} evaluation=${evaluation} index=${i} count=${evaluations.length} />`)}
       </section>
     </div>`}

@@ -12,9 +12,10 @@ export function moodFor(agent, workspace, {now = Date.now(), thinking = false} =
   if (account && (account.error || account.status === 'error')) return 'offline';
   if (agent.status === 'paused' || workspace.permissions?.automation === false) return 'paused';
   if (thinking) return 'thinking';
-  const orders = (workspace.orders || []).filter(o => o.agent === agent.id);
-  if (orders.some(o => o.status === 'awaiting approval')) return 'waiting';
-  const last = orders.reduce((latest, o) => (!latest || new Date(o.time) > new Date(latest.time) ? o : latest), null);
+  // The server summarises each agent's orders (order_views.agent_activity): the state carries only the newest.
+  const activity = (workspace.agentConfigs || []).find(a => a.id === agent.id)?.activity || agent.activity || {};
+  if (activity.awaiting > 0) return 'waiting';
+  const last = activity.lastOrder;
   if (last && last.decision === 'BLOCK' && now - new Date(last.time) < BLOCK_MOOD_MS) return 'blocked';
   return 'idle';
 }

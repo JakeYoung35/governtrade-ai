@@ -5,8 +5,8 @@ import {useEffect, useState} from 'preact/hooks';
 import {html} from '../html.js';
 import {money} from '../format.js';
 import {countdown} from '../order-state.js';
-import {action} from '../api.js';
-import {useStore, setStore, getStore} from '../store.js';
+import {action, fetchData} from '../api.js';
+import {useStore, setStore} from '../store.js';
 import {statusOf} from '../governor-text.js';
 import {GovernorRail} from './GovernorRail.js';
 import {Verdict} from './Verdict.js';
@@ -21,12 +21,30 @@ export function orderHref(id) {
 export const orderLine = order => `Buy ${String(order.direction || '').toUpperCase()} · ${money(order.amount)}`;
 
 // Reasoning can run to 8,000 characters: three lines in a card, the rest on request (and always in full in the drawer).
-function Reasoning({text}) {
+// The workspace state carries only the first few hundred characters (requestLength is the full length), so Show all
+// reads the full order the first time.
+function Reasoning({order}) {
   const [open, setOpen] = useState(false);
-  const long = text.length > 240 || text.split('\n').length > 3;
+  const [full, setFull] = useState(null);
+  const [state, setState] = useState({loading: false, error: ''});
+  const text = full ?? order.request;
+  const cut = (order.requestLength || 0) > order.request.length;
+  const long = cut || text.length > 240 || text.split('\n').length > 3;
+  async function toggle() {
+    if (open || full != null || !cut) { setOpen(!open); return; }
+    setState({loading: true, error: ''});
+    try {
+      const d = await fetchData(`/api/orders/${encodeURIComponent(order.id)}`);
+      if (d) { setFull(d.order.request || ''); setOpen(true); }
+      setState({loading: false, error: ''});
+    } catch (e) {
+      setState({loading: false, error: e.message});
+    }
+  }
   return html`<div class="order-reason-block">
     <p class=${'order-reason' + (long && !open ? ' clamped' : '')}><span class="muted">Agent's reasoning: </span>${text}</p>
-    ${long ? html`<button type="button" class="link-button" aria-expanded=${open} onClick=${() => setOpen(!open)}>${open ? 'Show less' : 'Show all'}</button>` : null}
+    ${long ? html`<button type="button" class="link-button" aria-expanded=${open} disabled=${state.loading} onClick=${toggle}>${state.loading ? 'Loading…' : open ? 'Show less' : 'Show all'}</button>` : null}
+    ${state.error ? html`<p class="notice notice-error" role="alert">${state.error}</p>` : null}
   </div>`;
 }
 
@@ -42,9 +60,11 @@ export function ApprovalCard({order, workspace, detail = false}) {
   async function decide(approve) {
     setError('');
     try {
-      await action('decision', {id: order.id, approve});
-      const latest = getStore().workspace?.orders?.find(o => o.id === order.id);
-      if (latest) setStore({toast: approve ? `Approved: ${statusOf(latest.status).label.toLowerCase()}.` : 'Denied. The order will not be placed.'});
+      // The decided order leaves the waiting list, and may be outside the state's newest orders, so its status comes
+      // from the action's result (null for a denial; undefined when the user changed meanwhile).
+      const result = await action('decision', {id: order.id, approve});
+      if (result === undefined) return;
+      setStore({toast: !approve ? 'Denied. The order will not be placed.' : result?.status ? `Approved: ${statusOf(result.status).label.toLowerCase()}.` : 'Approved.'});
     } catch (e) {
       setError(e.message);
     }
@@ -58,7 +78,7 @@ export function ApprovalCard({order, workspace, detail = false}) {
     </div>`}
     ${detail ? null : html`<p class="approval-line">${orderLine(order)}</p>`}
     <${GovernorRail} order=${order} />
-    ${!detail && order.request ? html`<${Reasoning} text=${order.request} />` : null}
+    ${!detail && order.request ? html`<${Reasoning} order=${order} />` : null}
     <div class="approval-actions">
       <button class="btn btn-primary" disabled=${busy || expiry.expired} onClick=${() => decide(true)}>Approve</button>
       <button class="btn" disabled=${busy} onClick=${() => decide(false)}>Deny</button>

@@ -26,7 +26,7 @@ function Setup({workspace, state}) {
       ? {detail: `${state.needsMandate.name} needs its mandate before it can trade.`, href: `/agents/new?agent=${state.needsMandate.id}`, cta: 'Set mandate'}
       : {detail: 'It proposes trades; the governor decides. Give it a mandate to start.', href: '/agents/new', cta: 'Create agent'};
   return html`<section class="card get-started" aria-labelledby="get-started">
-    <div class="card-head"><h2 id="get-started">${(workspace.orders || []).length ? 'Finish setting up to trade' : 'Get started'}</h2></div>
+    <div class="card-head"><h2 id="get-started">${workspace.orderStats?.total ? 'Finish setting up to trade' : 'Get started'}</h2></div>
     <ol class="steps">
       <${Step} done=${true} title="Set your trading rules" detail="Every trade has to pass them." />
       <${Step} done=${state.connected} title="Connect Kalshi" detail=${account.detail} href="/accounts" cta=${account.cta} />
@@ -37,7 +37,7 @@ function Setup({workspace, state}) {
 
 export function Home({workspace}) {
   const state = readiness(workspace);
-  const history = (workspace.orders || []).length > 0 || (workspace.agentConfigs || []).some(a => a.status !== 'deleted' && a.mandate);
+  const history = (workspace.orderStats?.total || 0) > 0 || (workspace.agentConfigs || []).some(a => a.status !== 'deleted' && a.mandate);
   const dashboard = html`<${MoneyStrip} workspace=${workspace} /><${Approvals} workspace=${workspace} home /><${AgentLineup} workspace=${workspace} /><${DecisionsTable} workspace=${workspace} />`;
   if (state.ready) return html`<div class="section-stack">${dashboard}</div>`;
   return html`<div class="section-stack"><${Setup} workspace=${workspace} state=${state} />${history ? dashboard : null}</div>`;
