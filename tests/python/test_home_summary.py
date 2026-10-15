@@ -16,6 +16,31 @@ class HomeSummaryTests(ServiceTest):
         self.assertIsNone(public['accounts'][0]['summary']['atRisk'])
         self.assertNotIn('credentialRef', public['accounts'][0])
 
+    def test_orders_carry_a_normalised_category(self):
+        base = {'agent': 'agent', 'accountId': self.s['accounts'][0]['id'], 'direction': 'Yes', 'amount': 5,
+                'status': 'blocked', 'time': '2026-10-14T16:00:00+00:00', 'evaluations': []}
+        self.s['orders'] = [{**base, 'id': 'kalshi', 'market': {'id': 'm', 'agent': 'sports'}},
+                            {**base, 'id': 'named', 'market': {'id': 'm', 'category': 'crypto'}},
+                            {**base, 'id': 'unknown', 'market': {'id': 'm', 'agent': 'agent-7'}},
+                            {**base, 'id': 'older', 'market': {'id': 'm'}}]
+        public = self.workspace.public(self.s)
+        self.assertEqual({o['id']: o['category'] for o in public['orders']},
+                         {'kalshi': 'sports', 'named': 'crypto', 'unknown': 'other', 'older': 'other'})
+        self.assertNotIn('category', self.s['orders'][0])  # public() never changes stored orders
+
+    def test_free_agent_quota_uses_the_servers_utc_day(self):
+        from unittest.mock import patch
+        today = dt.datetime.now(dt.timezone.utc).date().isoformat()
+        with patch('workspace.catalog', return_value={'governtrade-free': {'free': True, 'dailyMessages': 20}}):
+            self.s['freeAgentUsage'] = {'day': today, 'messages': 19}
+            self.assertEqual(self.workspace.public(self.s)['freeAgentQuota'], {'day': today, 'used': 19, 'limit': 20, 'left': 1})
+            self.s['freeAgentUsage'] = {'day': '2000-01-01', 'messages': 20}  # an earlier day no longer counts
+            self.assertEqual(self.workspace.public(self.s)['freeAgentQuota']['left'], 20)
+            self.s['freeAgentUsage'] = {'day': today, 'messages': 25}
+            self.assertEqual(self.workspace.public(self.s)['freeAgentQuota']['left'], 0)
+        with patch('workspace.catalog', return_value={}):
+            self.assertNotIn('freeAgentQuota', self.workspace.public(self.s))
+
     def test_governor_view_uses_requested_budget_and_allowlisted_trace(self):
         self.submit()
         self.service.run_batch(self.s)

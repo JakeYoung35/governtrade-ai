@@ -10,6 +10,14 @@ TRANSIENT_SYNC_GRACE_SECONDS=120  # how long a connected account rides out unans
 BALANCE_RETRY_SECONDS=0.5
 LOOK_FOCI=('general','crypto','sports','politics','economics','culture')
 
+ORDER_CATEGORIES=('crypto','sports','economics','politics','culture','other')
+
+def order_category(o):
+    """The market category Activity filters by. Kalshi quotes carry it as market['agent'] (a legacy name, not the
+    agent); any other source, older order or unknown value is 'other', so no order drops out of the filter."""
+    market=o.get('market') or {};value=market.get('category') or market.get('agent')
+    return value if value in ORDER_CATEGORIES else 'other'
+
 def validate_look(look):
     """An agent's creature: a seed the front end draws it from, and the market focus that picks its accessory.
     It is cosmetic; nothing in governance reads it."""
@@ -241,6 +249,7 @@ class Workspace:
         for a in public['accounts']:
             a['summary'] = summaries.get(a['id'])
         for o in public['orders']:
+            o['category'] = order_category(o)
             if o.get('governorProposalId') in order_governors:
                 o['governor'] = copy.deepcopy(order_governors[o['governorProposalId']])
         totals = [summaries[a['id']] for a in s['accounts'] if a['id'] in summaries
@@ -252,6 +261,11 @@ class Workspace:
                                  breakerLatched=any(t['breakerLatched'] for t in totals),
                                  stale=any(t['stale'] for t in totals))
         public['providers']=catalog();public['rulesCatalog']=trading_rules.catalog()
+        if FREE_PROVIDER in public['providers']:
+            # The server's own count for its own UTC day, so the browser's clock never decides what is left.
+            day=datetime.datetime.now(datetime.timezone.utc).date().isoformat();usage=s.get('freeAgentUsage') or {}
+            used=usage.get('messages',0) if usage.get('day')==day else 0;limit=public['providers'][FREE_PROVIDER]['dailyMessages']
+            public['freeAgentQuota']={'day':day,'used':used,'limit':limit,'left':max(0,limit-used)}
         public['accounts']=[a for a in public['accounts'] if a['venue']=='kalshi' and a.get('status')!='removed']
         visible={a['id'] for a in public['accounts']}
         public['agentConfigs']=[a for a in public['agentConfigs'] if a['accountId'] in visible]

@@ -8,10 +8,10 @@ assert.equal(localDay(undefined), null);
 assert.match(localDay('2026-10-14T12:00:00Z'), /^2026-10-1[345]$/);
 
 const order = (id, extra = {}) => ({id, agent: 'a', status: 'filled', decision: 'ALLOW', time: '2026-10-14T10:00:00Z',
-  market: {id: 'KXBTC-1', name: 'Bitcoin above $100k', agent: 'crypto'}, request: 'Momentum.', direction: 'Yes', evaluations: [], ...extra});
+  market: {id: 'KXBTC-1', name: 'Bitcoin above $100k'}, category: 'crypto', request: 'Momentum.', direction: 'Yes', evaluations: [], ...extra});
 const orders = [
   order('o1', {filled: true, automatic: true}),
-  order('o2', {agent: 'b', status: 'awaiting approval', decision: 'REQUIRE_APPROVAL', market: {id: 'KXNFL-1', name: 'Eagles win', agent: 'sports'},
+  order('o2', {agent: 'b', status: 'awaiting approval', decision: 'REQUIRE_APPROVAL', market: {id: 'KXNFL-1', name: 'Eagles win'}, category: 'sports',
     evaluations: [{outcome: 'REQUIRE_APPROVAL'}], time: '2026-10-13T09:00:00Z'}),
   order('o3', {status: 'blocked', decision: 'BLOCK', time: '2026-10-13T11:00:00Z'}),
   order('o4', {status: 'filled', filled: true, automatic: false, evaluations: [{outcome: 'REQUIRE_APPROVAL'}, {outcome: 'ALLOW'}]}),
@@ -24,6 +24,8 @@ assert.deepEqual(ids(filterOrders(orders, {}, agents)), ['o1', 'o2', 'o3', 'o4',
 assert.deepEqual(ids(filterOrders(orders, {status: 'blocked'}, agents)), ['o3']);
 assert.deepEqual(ids(filterOrders(orders, {agent: 'b'}, agents)), ['o2']);
 assert.deepEqual(ids(filterOrders(orders, {category: 'sports'}, agents)), ['o2']);
+// An order without a category (an older server) counts as "other" instead of dropping out of every filter.
+assert.deepEqual(ids(filterOrders([order('x', {category: undefined})], {category: 'other'}, agents)), ['x']);
 assert.deepEqual(ids(filterOrders(orders, {decision: 'BLOCK'}, agents)), ['o3']);
 // Search matches the market, the agent's name, the order ID and the reasoning, word by word, in any case.
 assert.deepEqual(ids(filterOrders(orders, {query: 'eagles'}, agents)), ['o2']);

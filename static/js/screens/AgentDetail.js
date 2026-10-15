@@ -29,13 +29,12 @@ function ErrorNote({message}) {
   return message ? html`<div class="notice notice-error" role="alert"><${Icon} name="alert" /><span>${message}</span></div>` : null;
 }
 
-// Free agents share a daily message allowance; null for an agent on the user's own model.
+// Free agents share a daily message allowance, counted by the server for its own UTC day (Workspace.public's
+// freeAgentQuota), so the browser's clock never decides it. Null for an agent on the user's own model.
 export function freeMessagesLeft(workspace, agent) {
-  const provider = workspace.providers?.[agent.provider];
-  if (!provider?.free) return null;
-  const usage = workspace.freeAgentUsage;
-  const used = usage?.day === new Date().toISOString().slice(0, 10) ? usage.messages : 0;
-  return {left: Math.max(0, provider.dailyMessages - used), total: provider.dailyMessages};
+  const quota = workspace.freeAgentQuota;
+  if (!workspace.providers?.[agent.provider]?.free || !quota) return null;
+  return {left: quota.left, total: quota.limit};
 }
 
 function Hero({agent, workspace, account, thinking, onOpen, onError}) {

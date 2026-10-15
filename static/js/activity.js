@@ -16,7 +16,7 @@ export function filterOrders(orders = [], filters = {}, agents = new Map()) {
   return orders.filter(o => {
     if (filters.status && o.status !== filters.status) return false;
     if (filters.agent && o.agent !== filters.agent) return false;
-    if (filters.category && o.market?.agent !== filters.category) return false;  // market.agent is the market's category
+    if (filters.category && (o.category || 'other') !== filters.category) return false;  // normalised by Workspace.public
     if (filters.decision && o.decision !== filters.decision) return false;
     if (!words.length) return true;
     const text = [o.market?.name, o.market?.id, o.id, agents.get(o.agent)?.name, o.request, o.direction, o.status].filter(Boolean).join(' ').toLowerCase();
