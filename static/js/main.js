@@ -15,6 +15,7 @@ import {Activity} from './screens/Activity.js';
 import {AgentDetail} from './screens/AgentDetail.js';
 import {Approvals} from './screens/Approvals.js';
 import {Drawer} from './ui/Drawer.js';
+import {Toast} from './ui/Toast.js';
 import {Home} from './screens/Home.js';
 import {Agents} from './screens/Agents.js';
 import {NewAgent} from './screens/NewAgent.js';
@@ -67,7 +68,7 @@ function App() {
   return html`<${Shell} key=${currentGeneration()} route=${route} title=${title} workspace=${workspace} auth=${auth}>
     <${ErrorBanner} error=${error} />
     <${Screen} route=${route} workspace=${workspace} />
-    ${store.toast ? html`<div class="toast" role="status">${store.toast}<button class="btn btn-ghost btn-sm" onClick=${() => setStore({toast: ''})}>Dismiss</button></div>` : null}
+    <${Toast} message=${store.toast} onDismiss=${() => setStore({toast: ''})} />
     ${route.query.has('order') ? html`<${Drawer} id=${route.query.get('order')} workspace=${workspace} />` : null}
   </${Shell}>`;
 }

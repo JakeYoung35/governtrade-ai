@@ -16,7 +16,24 @@ import {windowOrders} from '../order-state.js';
 const LAYERS = {account_ceiling: 'Your rules', agent_mandate: 'Agent mandate', execution: 'Execution'};
 const layerName = layer => LAYERS[layer] || String(layer || '').replaceAll('_', ' ');
 
+// Close, Escape and a click outside play the drawer's exit (.closing in components.css), then leave the order's URL.
+// Back leaves the URL first, so the drawer closes at once.
 export function closeOrder() {
+  const drawer = document.querySelector('dialog.order-drawer[open]');
+  if (!drawer) { leaveOrder(); return; }
+  if (drawer.classList.contains('closing')) return;  // already on its way out
+  drawer.classList.add('closing');
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    if (drawer.isConnected) leaveOrder();  // Back may have closed it meanwhile
+  };
+  drawer.addEventListener('animationend', e => { if (e.target === drawer && e.animationName === 'drawer-out') finish(); });
+  setTimeout(finish, 500);  // if the animation never runs
+}
+
+function leaveOrder() {
   if (history.state?.orderDrawer) { history.back(); return; }
   const query = new URLSearchParams(location.search);
   query.delete('order');
@@ -59,6 +76,7 @@ export function Drawer({id, workspace}) {
     document.body.style.overflow = 'hidden';
     return () => { document.body.style.overflow = oldOverflow; if (previous?.isConnected) previous.focus(); };
   }, []);
+  useEffect(() => dialog.current?.classList.remove('closing'), [id]);  // another order: never left half closed
   // The state's row (if it carries this order) shows at once; the full order, with the whole reasoning, the governor's
   // sizing and every evaluation, comes from the server and is read again after each workspace refresh.
   const read = useReads([`/api/orders/${encodeURIComponent(id)}`], workspace);

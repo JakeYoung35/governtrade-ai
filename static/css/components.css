@@ -38,7 +38,7 @@
 /* Cards */
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm)}
 .card-head{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3);padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--line);min-height:48px}
-.card-head h2{font-size:var(--text-sm)}
+.card-head h2{font-size:var(--text-lg)}
 .card-body{padding:var(--space-4)}
 
 /* Notices */
@@ -260,7 +260,9 @@ summary{cursor:pointer;color:var(--text-2);font-size:var(--text-sm)}
 .creature-still .cr,.creature-still .cr *{animation:none!important}
 .agent-lineup{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));padding:var(--space-4);gap:var(--space-3)}
 .lineup-agent{display:flex;flex-direction:column;align-items:center;padding:var(--space-3);text-align:center;gap:var(--space-2);border-radius:var(--radius);text-decoration:none;color:var(--text);min-width:0;overflow-wrap:anywhere}
+.lineup-agent{transition:background-color var(--dur) var(--ease-out),transform var(--dur-fast) var(--ease-out)}
 .lineup-agent:hover{background:var(--surface-2)}
+.lineup-agent:active{transform:scale(.97)}  /* the press is felt, like a button */
 .lineup-agent .muted{font-size:var(--text-xs)}
 .table-scroll{overflow:auto;border-radius:var(--radius-lg)}
 .decisions-table{border-collapse:collapse;width:100%;font-size:var(--text-sm)}
@@ -287,7 +289,10 @@ summary{cursor:pointer;color:var(--text-2);font-size:var(--text-sm)}
 .checks-passed .checks{margin-top:var(--space-2)}
 .checks li .muted{font-size:var(--text-xs)}
 .checks li p{font-size:var(--text-sm)}
-.toast{position:fixed;bottom:var(--space-6);left:50%;transform:translateX(-50%);max-width:calc(100% - var(--space-8));padding:var(--space-3) var(--space-4);background:var(--surface);border:1px solid var(--line-strong);box-shadow:var(--shadow-pop);border-radius:var(--radius);z-index:50;display:flex;align-items:center;gap:var(--space-4)}
+.toast{position:fixed;bottom:var(--space-6);left:50%;transform:translateX(-50%);max-width:calc(100% - var(--space-8));padding:var(--space-3) var(--space-4);background:var(--surface);border:1px solid var(--line-strong);box-shadow:var(--shadow-pop);border-radius:var(--radius);z-index:50;display:flex;align-items:center;gap:var(--space-4);transition:transform 240ms var(--ease-out),opacity 240ms var(--ease-out)}
+/* It rises in from below the screen edge and drops away faster than it came (Toast.js waits 160ms). */
+@starting-style{.toast{transform:translate(-50%,calc(100% + var(--space-6)));opacity:0}}
+.toast.leaving{transform:translate(-50%,12px);opacity:0;transition-duration:160ms}
 @media (max-width:899px){.toast{bottom:calc(var(--tabbar-height) + env(safe-area-inset-bottom) + var(--space-4))}}
 @media(max-width:600px){.money-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.governor-rail{grid-template-columns:repeat(2,minmax(0,1fr))}.governor-rail li:nth-child(3){border-left:0}.governor-rail li:nth-child(n+3){border-top:1px solid var(--line)}.approval-timer{width:100%;margin:var(--space-1) 0 0}.detail-grid{grid-template-columns:minmax(0,1fr)}}
 
@@ -305,13 +310,19 @@ textarea.input{padding:var(--space-3);resize:vertical;line-height:var(--leading)
 /* Phones: dialogs are bottom sheets, numbers never zoom the page, the drawer clears the notch. */
 @media(max-width:599px){
   .form-dialog{width:100%;max-width:100%;max-height:92dvh;margin:auto 0 0;border-bottom:0;border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding-bottom:env(safe-area-inset-bottom)}
-  .form-dialog[open]{animation:sheet-in var(--dur-slow) var(--ease-out)}
+  .form-dialog[open]{animation:sheet-in var(--dur-slow) var(--ease-drawer)}
   .form-dialog[open]::backdrop{animation:fade-in var(--dur) var(--ease-out)}
   .drawer-head{padding-top:max(var(--space-4),env(safe-area-inset-top))}
 }
 @media(max-width:899px){.rule-number input{font-size:16px}}
-.order-drawer[open]{animation:drawer-in var(--dur-slow) var(--ease-out)}
+/* The order drawer slides in from the right and back out faster (closeOrder waits for .closing to finish). */
+.order-drawer[open]{animation:drawer-in var(--dur-slow) var(--ease-drawer)}
+.order-drawer[open]::backdrop{animation:fade-in var(--dur) var(--ease-out)}
+.order-drawer.closing{animation:drawer-out var(--drawer-exit) var(--ease-out) forwards}
+.order-drawer.closing::backdrop{animation:fade-out var(--drawer-exit) var(--ease-out) forwards}
 @keyframes drawer-in{from{transform:translateX(32px);opacity:0}}
+@keyframes drawer-out{to{transform:translateX(32px);opacity:0}}
+@keyframes fade-out{to{opacity:0}}
 /* Touch screens keep no hover colour after a tap. */
 @media(hover:none){
   .btn-danger-text:hover:not(:disabled){background:transparent}
@@ -322,7 +333,7 @@ textarea.input{padding:var(--space-3);resize:vertical;line-height:var(--leading)
 }
 
 .free-agent-body{display:flex;flex-direction:column;gap:var(--space-3)}
-.free-agent-body>p:first-child{color:var(--text);max-width:720px}
+.free-agent-body>p:first-child{color:var(--text)}
 .free-agent-actions{display:flex;align-items:flex-end;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap;padding-top:var(--space-3);border-top:1px solid var(--line)}
 .free-agent-actions .muted{font-size:var(--text-sm);align-self:center}
 .free-agent-actions .field{flex:1;min-width:min(100%,260px)}

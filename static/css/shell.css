@@ -30,7 +30,7 @@ button.nav-link{width:100%;border:0;background:none;text-align:left}
 
 .main{min-width:0;display:flex;flex-direction:column}
 .topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:var(--space-3);height:calc(var(--topbar-height) + env(safe-area-inset-top));padding:env(safe-area-inset-top) var(--gutter) 0;border-bottom:1px solid var(--line);background:color-mix(in oklab,var(--bg) 88%,transparent);-webkit-backdrop-filter:saturate(1.4) blur(12px);backdrop-filter:saturate(1.4) blur(12px)}
-.topbar h1{font-size:var(--text-md);font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.topbar h1{font-size:var(--text-xl);font-weight:600;letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .topbar .pill{flex:none}
 .topbar .spacer{flex:1}
 .topbar .brand-mark{display:none}
@@ -58,7 +58,7 @@ button.nav-link{width:100%;border:0;background:none;text-align:left}
   .tab .nav-count{position:absolute;top:6px;left:calc(50% + 6px);min-width:18px;height:18px;font-size:11px;margin:0}
   .sheet-layer{display:block;position:fixed;inset:0;z-index:40}
   .sheet-backdrop{position:absolute;inset:0;background:var(--overlay);animation:fade-in var(--dur) var(--ease-out)}
-  .sheet{position:absolute;left:0;right:0;bottom:0;padding:var(--space-2) var(--space-3) calc(var(--space-4) + env(safe-area-inset-bottom));border-radius:var(--radius-lg) var(--radius-lg) 0 0;background:var(--surface);box-shadow:var(--shadow-pop);animation:sheet-in var(--dur-slow) var(--ease-out)}
+  .sheet{position:absolute;left:0;right:0;bottom:0;padding:var(--space-2) var(--space-3) calc(var(--space-4) + env(safe-area-inset-bottom));border-radius:var(--radius-lg) var(--radius-lg) 0 0;background:var(--surface);box-shadow:var(--shadow-pop);animation:sheet-in var(--dur-slow) var(--ease-drawer)}
   .sheet-grip{width:36px;height:4px;border-radius:4px;background:var(--line-strong);margin:var(--space-1) auto var(--space-3)}
   .sheet .nav-link{height:48px;font-size:var(--text-lg)}
   .sheet .nav-link svg{width:20px;height:20px}

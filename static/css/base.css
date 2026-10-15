@@ -13,7 +13,7 @@ h1,h2,h3,h4,p,figure,blockquote,dl,dd{margin:0}
 h1{font-size:var(--text-2xl);line-height:var(--leading-tight);font-weight:600;letter-spacing:-.02em}
 h2{font-size:var(--text-lg);line-height:var(--leading-tight);font-weight:600;letter-spacing:-.01em}
 h3{font-size:var(--text-md);line-height:var(--leading-tight);font-weight:600}
-p{color:var(--text-2)}
+p{color:var(--text-2);max-width:70ch}  /* past ~75 characters the eye loses the start of the next line */
 a{color:inherit}
 img,svg{display:block;max-width:100%}
 button,input,select,textarea{font:inherit;color:inherit;letter-spacing:inherit}
