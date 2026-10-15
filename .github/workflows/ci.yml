@@ -34,8 +34,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     services:
+      # The schema uses TimescaleDB hypertables (production runs on Tiger Cloud), so plain Postgres cannot migrate it.
       postgres:
-        image: postgres:16
+        image: timescale/timescaledb:latest-pg17
         env:
           POSTGRES_USER: governtrade
           POSTGRES_PASSWORD: governtrade
@@ -58,6 +59,9 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
       - run: python3 -m pip install -r requirements.txt
+      # Tiger Cloud has the extension preinstalled and the migrations assume it, so create it explicitly.
+      - name: Enable TimescaleDB
+        run: psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS timescaledb'
       # Same discovery as the plain job, but fails if any test is skipped, so the store
       # tests can never silently fall back to skipping because the database was not reached.
       - name: Run the suite and require zero skipped tests
