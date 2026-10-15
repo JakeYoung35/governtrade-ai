@@ -30,6 +30,11 @@ patch('workspace.validate_model_key', lambda *args: None).start()
 patch('providers.free_agent_key', lambda: 'fixture-free-key').start()  # offers the free agent; chat stays scripted
 patch('workspace.validate_free_agent', lambda *args: None).start()  # no call to Gemini with the placeholder key
 patch('agent_chat.public_market_data', lambda account: case.venue).start()
+class FixtureKeys:
+    """Saving Kalshi keys signs one request to check the key; here nothing is signed or sent."""
+    base = ''
+    def headers(self, method, url): return {}
+patch('workspace.adapter', lambda *args: FixtureKeys()).start()
 for agent in case.s['agentConfigs']:
     agent.update(provider='anthropic', model='fixture-model', modelCredentialRef='fixture', modelKeyMask='sk-a…3f9c')
 case.submit(maxBudgetUsd=100, estimatedYesProbability=0.8)
@@ -58,6 +63,11 @@ def fixture_turns(text):
     amount = re.search(r'\$(\d+(?:\.\d+)?)', text)
     if not amount: return [ModelTurn('How much would you like to commit? Give me a dollar amount and I will propose it.')]
     return [calls(propose(maxBudgetUsd=float(amount.group(1)))), ModelTurn('I proposed the trade for governor review.')]
+# Open positions and a saved key ID for the Accounts screen; set after the examples so the governor sized them first.
+from tests.python.test_governor_service import MARKET
+case.venue.positions = [{'ticker': MARKET, 'position_fp': '10.00', 'market_exposure_dollars': '5.00', 'realized_pnl_dollars': '0'},
+                        {'ticker': 'KXBTCD-26OCT1517-T112999.99', 'position_fp': '-4.00', 'market_exposure_dollars': '2.12', 'realized_pnl_dollars': '0'}]
+s['accounts'][0]['credentialMasks'] = {'key_id': 'a1b2…9f0e', 'private_key': 'saved'}
 root = Path(__file__).resolve().parents[1] / 'static'
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs): super().__init__(*args, directory=str(root), **kwargs)
@@ -76,7 +86,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path != '/api/action': return self.json(404, {'error': 'Fixture endpoint not found.'})
         data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-        if data.get('action') not in ('decision','agent-status','agent-look','mandate-save','agent-delete','agent-save','chat','rules-save','permissions','refresh'): return self.json(400, {'error': 'This fixture does not connect real accounts.'})
+        if data.get('action') not in ('decision','agent-status','agent-look','mandate-save','agent-delete','agent-save','chat','rules-save','permissions','refresh',
+                                      'account-save','account-test','account-disconnect','account-remove'): return self.json(400, {'error': 'This fixture does not support that action.'})
         try:
             result = None
             if data['action'] == 'chat':

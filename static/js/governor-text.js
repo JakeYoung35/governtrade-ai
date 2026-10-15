@@ -38,7 +38,7 @@ const STATUSES = {
   approved: ['Placing order', 'review'],
   rejected: ['Rejected', 'block'],
   executionFailed: ['Order failed', 'block'],
-  'awaiting approval': ['Needs approval', 'review'],
+  'awaiting approval': ['Waiting for you', 'review'],  // the verdict pill already says "Needs approval"
   resting: ['Resting', 'neutral'],
   submitted: ['Submitted', 'neutral'],
   open: ['Open', 'neutral'],
@@ -53,6 +53,14 @@ const STATUSES = {
   unknown: ['Unconfirmed', 'review'],
   failed: ['Failed', 'block'],
 };
+
+// An event's kind ("RULES", "REQUIRE_APPROVAL", "FILLED") as a short label.
+const VERDICT_KINDS = {ALLOW: 'Allowed', REQUIRE_APPROVAL: 'Needs approval', BLOCK: 'Blocked'};
+export function eventKind(kind) {
+  if (VERDICT_KINDS[kind]) return VERDICT_KINDS[kind];
+  const words = String(kind || 'update').replaceAll('_', ' ').toLowerCase();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
 
 export function statusOf(status) {
   const [label, tone] = STATUSES[status] || [status ? status.charAt(0).toUpperCase() + status.slice(1) : 'Unknown', 'neutral'];

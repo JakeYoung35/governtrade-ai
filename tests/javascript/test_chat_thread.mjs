@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {thread, wasDelivered, governorLine, tradingBlocked} from '../../static/js/chat.js';
-import {reasonText, statusOf} from '../../static/js/governor-text.js';
+import {reasonText, statusOf, eventKind} from '../../static/js/governor-text.js';
 import {money} from '../../static/js/format.js';
 
 const you = text => ({role: 'customer', text});
@@ -44,7 +44,11 @@ assert.equal(tradingBlocked(ready, {...scout, status: 'paused'}, connected), 'Sc
 assert.match(tradingBlocked(ready, scout, {status: 'error'}), /not connected/);
 assert.match(tradingBlocked(ready, scout, undefined), /not connected/);
 
-assert.deepEqual(statusOf('awaiting approval'), {label: 'Needs approval', tone: 'review'});
+assert.deepEqual(statusOf('awaiting approval'), {label: 'Waiting for you', tone: 'review'});
+assert.equal(eventKind('REQUIRE_APPROVAL'), 'Needs approval');
+assert.equal(eventKind('RULES'), 'Rules');
+assert.equal(eventKind('SOME_NEW_KIND'), 'Some new kind');
+assert.equal(eventKind(undefined), 'Update');
 assert.deepEqual(statusOf('filled'), {label: 'Filled', tone: 'allow'});
 assert.deepEqual(statusOf('somethingNew'), {label: 'SomethingNew', tone: 'neutral'});
 assert.deepEqual(statusOf(undefined), {label: 'Unknown', tone: 'neutral'});
