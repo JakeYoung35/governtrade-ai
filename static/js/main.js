@@ -35,7 +35,7 @@ function Screen({route, workspace}) {
   if (route.name === 'agents') return html`<${Agents} workspace=${workspace} />`;
   if (route.name === 'new-agent') return html`<${NewAgent} key=${route.query.get('agent') || 'new'} workspace=${workspace} query=${route.query} />`;
   if (route.name === 'not-found') return html`<${NotFound} />`;
-  return html`<${Placeholder} title=${TITLES[route.name]} />`;
+  return html`<${Placeholder} />`;
 }
 
 function ErrorBanner({error}) {

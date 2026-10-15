@@ -3,6 +3,10 @@
 
 const BLOCK_MOOD_MS = 10 * 60 * 1000;
 
+// A persistent mood in words, for a caption under a creature.
+const MOOD_WORDS = {idle: 'Ready', thinking: 'Thinking', waiting: 'Waiting for you', blocked: 'Recently blocked', paused: 'Paused', offline: 'Account offline'};
+export const moodWords = mood => MOOD_WORDS[mood] || mood;
+
 export function moodFor(agent, workspace, {now = Date.now(), thinking = false} = {}) {
   const account = (workspace.accounts || []).find(a => a.id === agent.accountId);
   if (account && (account.error || account.status === 'error')) return 'offline';

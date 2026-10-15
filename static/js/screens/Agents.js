@@ -59,9 +59,9 @@ function AgentCard({agent, workspace}) {
       <${Creature} look=${look} mood=${moodFor(agent, workspace)} size=${76} poke live=${account?.environment === 'live'} />
     </div>
     <div class="agent-card-body">
-      <div class="agent-card-title"><h2>${agent.name}</h2><span class=${'pill ' + statusClass}>${statusLabel}</span></div>
+      <div class="agent-card-title"><h2 class="clamp-2" title=${agent.name}>${agent.name}</h2><span class=${'pill ' + statusClass}>${statusLabel}</span></div>
       <p>${focus} · ${providerName(workspace, agent)}</p>
-      <p class="muted">${accountLabel(account)}</p>
+      <p class="muted one-line" title=${accountLabel(account)}>${accountLabel(account)}</p>
     </div>
     <div class="agent-card-actions">
       ${agent.mandate

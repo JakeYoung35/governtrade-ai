@@ -1,5 +1,5 @@
 // The signed-in frame: sidebar on desktop; top bar; bottom tab bar and a More sheet on mobile.
-import {useEffect, useState} from 'preact/hooks';
+import {useEffect, useRef, useState} from 'preact/hooks';
 import {html} from '../html.js';
 import {Icon, BrandMark} from './icons.js';
 import {signOut} from '../api.js';
@@ -74,10 +74,22 @@ function MoreSheet({current, onClose, auth}) {
 
 export function Shell({route, title, workspace, auth, children}) {
   const [more, setMore] = useState(false);
+  const page = useRef(null);
   const current = SECTION[route.name] || route.name;
   const count = awaiting(workspace);
   const inMore = !TABS.includes(current) && NAV.some(n => n.name === current);
+  // After moving to another page, focus its content so keyboard and screen reader users start there (opening the
+  // order drawer changes only the query, so it does not count). The first page keeps the browser's own focus.
+  const where = `${route.name}:${JSON.stringify(route.params)}`;
+  const shown = useRef(where);
+  useEffect(() => {
+    if (shown.current === where) return;
+    shown.current = where;
+    page.current?.focus({preventScroll: true});
+  }, [where]);
+  const skip = e => { e.preventDefault(); page.current?.focus(); };
   return html`<div class="app">
+    <a class="skip-link" href="#content" onClick=${skip}>Skip to content</a>
     <nav class="sidenav" aria-label="Main">
       <a class="brand" href="/"><${BrandMark} />GovernTrade</a>
       ${NAV.map(n => html`<a class="nav-link" href=${n.href} aria-current=${current === n.name ? 'page' : null}>
@@ -96,7 +108,7 @@ export function Shell({route, title, workspace, auth, children}) {
         <span class="spacer"></span>
         <${GovernorStatus} workspace=${workspace} />
       </header>
-      <main class="page" id="content">${children}</main>
+      <main class="page" id="content" tabindex="-1" ref=${page}>${children}</main>
     </div>
     <nav class="tabbar" aria-label="Main">
       ${NAV.filter(n => TABS.includes(n.name)).map(n => html`<a class="tab" href=${n.href} aria-current=${current === n.name ? 'page' : null}>

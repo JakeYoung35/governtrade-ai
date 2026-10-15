@@ -1,11 +1,11 @@
-// Screens not rebuilt yet on this branch, and unknown paths.
+// The guided demo (deferred: it is not in the navigation) and unknown paths.
 import {html} from '../html.js';
 
-export function Placeholder({title}) {
+export function Placeholder() {
   return html`<div class="card"><div class="empty">
-    <h3>${title} is being rebuilt</h3>
-    <p>This screen arrives in a later phase of the redesign.</p>
-    <a class="btn" href="/">Go to Home</a>
+    <h3>The guided demo is not available yet</h3>
+    <p>To try your agents without real money, connect Kalshi Demo. It uses virtual funds.</p>
+    <a class="btn btn-primary" href="/accounts">Connect Kalshi Demo</a>
   </div></div>`;
 }
 

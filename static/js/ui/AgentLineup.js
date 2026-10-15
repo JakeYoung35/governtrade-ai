@@ -2,11 +2,12 @@ import {html} from '../html.js';
 import {Creature} from '../creature/Creature.js';
 import {lookFor} from '../creature/generate.js';
 import {useAgentMood} from '../creature/useAgentMood.js';
+import {moodWords} from '../creature/moods.js';
 function Agent({agent, workspace}) {
   const {mood, persistent, replay} = useAgentMood(agent, workspace);
   return html`<a class="lineup-agent" href=${`/agents/${encodeURIComponent(agent.id)}`}>
     <${Creature} look=${lookFor(agent)} size=${72} mood=${mood} replay=${replay} live=${workspace.accounts?.find(a => a.id === agent.accountId)?.environment === 'live'} />
-    <strong>${agent.name}</strong><span class="muted">${persistent}</span>
+    <strong>${agent.name}</strong><span class="muted">${moodWords(persistent)}</span>
   </a>`;
 }
 export function AgentLineup({workspace}) {
