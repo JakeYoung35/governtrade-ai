@@ -56,6 +56,32 @@ Reproduced as a user would, at 1280, 768, 375 and 1600px:
 - Free agent: offered, added, lands on its mandate, then listed with "20 of 20 messages left today" and Open.
 - Mobile: hero actions as a 2x2 grid, chat and mandate stacked, page scrolls over the conversation.
 
+## Chat reliability (PR #43 review)
+
+Two findings from the review, fixed:
+
+1. **A 401 during chat lost the message.** `sendChat` returned silently after re-authenticating, so the page treated the
+   send as done. It now throws on every unconfirmed outcome (expired, refused, lost, signed out meanwhile) and resolves
+   only when the server confirmed the message.
+2. **Retries were not idempotent.** Each send now carries a client request ID (`requestId`, a UUID). `AgentChat.begin`
+   records `{id, messageIndex}` in `chatRequests[agent]` (last 50 per agent) in the same save as the customer message, so
+   a stored message always has its ID. A retry with a known ID returns `{duplicate: true, messageIndex}` and starts no
+   turn, including while the original turn is still running. `chatRequests` is a workspace setting like
+   `chatAllowances` (JSON file, Postgres `extra`); no schema change. It is left out of `Workspace.public`.
+
+The composer keeps its draft in sessionStorage per user and agent (`chat-draft.js`) with the ID of an unconfirmed send,
+so a reload or an expired session never loses the message, and sending the unchanged text again reuses the ID.
+
+Tests: `RequestIdTests` (retry after the turn, retry during the turn, a never-stored request runs when resent, invalid
+IDs, the bounded list stays private), `HttpTests.test_a_resend_during_or_after_the_turn_is_stored_once` on the real
+handler, `chatRequests` added to the Postgres round trip, and `tests/javascript/test_chat_send.mjs` (confirmed, duplicate,
+401, refused, lost connection, server error, drafts per user, blocked storage).
+
+Browser, on the fixture with its new switches: `[drop]` (stored, then the connection closes unanswered) shows "The
+connection dropped, but Rally got your message" with an empty box; an interrupted draft comes back after a reload with a
+notice and, when sent, runs once if it was never stored and is reported as already received if it was (no second
+message); `[expire]` (401) signs in again and puts the message back in the box with its request ID.
+
 ## Not verified
 
 - A real model turn and a real Kalshi Demo proposal (needs the user's local workspace and keys; I do not sign in).

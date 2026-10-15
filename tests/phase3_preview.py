@@ -1,6 +1,7 @@
 """Isolated UI fixture for the redesign (Phase 3 onward). Run: python3 -m tests.phase3_preview (PORT, default 3123).
 No credentials, persistence, external models or venue calls. Not a production server.
-Chat uses a scripted model: it proposes the dollar amount in the message; "[slow]" and "[fail]" exercise waiting and errors.
+Chat uses a scripted model: it proposes the dollar amount in the message; "[slow]" and "[fail]" exercise waiting and
+errors, "[drop]" stores the message but closes the connection unanswered, and "[expire]" answers 401.
 """
 import copy
 import datetime as dt
@@ -79,10 +80,17 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             result = None
             if data['action'] == 'chat':
-                chat = AgentChat(case.workspace, case.service, connect=ScriptedModel(*fixture_turns(str(data.get('text', '')))))
+                text = str(data.get('text', ''))
+                if '[expire]' in text: return self.json(401, {'error': 'Sign in again.'})  # the session ran out
+                chat = AgentChat(case.workspace, case.service, connect=ScriptedModel(*fixture_turns(text)))
                 job = chat.begin(s, data)
-                chat.finish(s, job, chat.run(job))
-                case.service.run_batch(s)
+                if job.get('duplicate'): result = {'duplicate': True, 'messageIndex': job['messageIndex']}  # like server.py
+                else:
+                    chat.finish(s, job, chat.run(job))
+                    case.service.run_batch(s)
+                    if '[drop]' in text:  # stored and answered, but the response never reaches the browser
+                        self.close_connection = True
+                        return
             else:
                 result = case.workspace.action(s, data)
             return self.json(200, {**self.state(), 'result': result})  # the same shape as server.py's response

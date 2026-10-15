@@ -29,6 +29,8 @@ MAX_REPLY_CHARS = 6000  # chat_messages.text allows 8,000; leaves room for the g
 MAX_STEPS = 10  # model calls per chat turn
 TURN_SECONDS = 120  # shared deadline for model calls, tools and individual venue requests
 MAX_PROPOSALS = 5  # proposals per chat turn
+MAX_CHAT_REQUESTS = 50  # recent message request IDs kept per agent to recognise a retried send
+REQUEST_ID = re.compile(r"[A-Za-z0-9-]{8,64}")
 MODEL_RETRY_WAITS = (1, 3)  # seconds before each retry of a model call that may succeed if sent again
 # Dollar amounts the user typed: "$25", "$1,000.50", "$5k", "$2 million", "25 dollars", "25 usd", "25 bucks".
 AMOUNT = re.compile(r"\$\s?(?P<a>\d{1,3}(?:,\d{3})+|\d+)(?P<ac>\.\d{1,2})?(?:\s?(?P<as>k|m|thousand|million)\b)?"
@@ -158,6 +160,14 @@ class AgentChat:
             raise ValueError("Validate this agent's model key before chatting.")
         if free and not free_agent_key():
             raise ValueError("The free agent is not available on this server right now. Edit the agent to use your own API key.")
+        request_id = b.get("requestId")
+        if request_id is not None and (not isinstance(request_id, str) or not REQUEST_ID.fullmatch(request_id)):
+            raise ValueError("The message request ID is not valid. Reload the page and send it again.")
+        known = next((r for r in s.get("chatRequests", {}).get(agent["id"], []) if r["id"] == request_id), None)
+        if request_id is not None and known:
+            # A retry of a message already stored (its response was lost): nothing new runs. Its reply is saved by the
+            # original turn, which keeps running on the server even when the browser disconnects.
+            return {"duplicate": True, "agentId": agent["id"], "messageIndex": known["messageIndex"]}
         account = next(a for a in s["accounts"] if a["id"] == agent["accountId"])
         turn = str(uuid.uuid4())
         with self._lock:
@@ -179,6 +189,12 @@ class AgentChat:
             if not amounts and allowance and allowance["replyIndex"] == len(chat) - 1:
                 amounts = [Decimal(a) for a in allowance["amounts"]]
             chat.append({"role": "customer", "text": text.strip()})
+            if request_id is not None:
+                # Saved with the message, in the same workspace save, so a stored message always has its request ID.
+                # Kept in workspace settings (JSON and Postgres `extra`), like chatAllowances.
+                requests = s.setdefault("chatRequests", {}).setdefault(agent["id"], [])
+                requests.append({"id": request_id, "messageIndex": len(chat) - 1})
+                del requests[:-MAX_CHAT_REQUESTS]
         except Exception:
             self.release(agent["id"], turn)
             raise

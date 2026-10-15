@@ -232,7 +232,7 @@ class Workspace:
                      if a['venue'] == 'kalshi' and a.get('status') != 'removed'}
         order_governors = governor.order_governors(s)
         # Only compact allowlisted governor details reach the browser.
-        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor')})
+        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor') and k!='chatRequests'})  # request IDs are server bookkeeping
         for a in public['accounts']:
             a['hasCredentials']=bool(a.get('credentialRef'));a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'

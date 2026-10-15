@@ -66,6 +66,7 @@ class StoreTests(unittest.TestCase):
  def test_round_trip_is_lossless(self):
   s=self.workspace()
   s['chatAllowances']={s['agentConfigs'][0]['id']:{'replyIndex':1,'amounts':['20']}}
+  s['chatRequests']={s['agentConfigs'][0]['id']:[{'id':'req-0001','messageIndex':0}]}  # retried sends are recognised after a restart
   with self.store.session():
    self.w.refresh(s,s['accounts'][0]);self.proposal(s,10,'filled');self.proposal(s,40,'pending')
    s['chats'][s['agentConfigs'][0]['id']]+=[{'role':'customer','text':'Buy BTC'},{'role':'agent','text':'Proposed.'}];self.store.save(s)

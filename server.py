@@ -275,6 +275,8 @@ class Handler(SimpleHTTPRequestHandler):
         # Three phases like a governor pass (agent_chat.py): the model and market reads run with the lock released.
         with locked('main'):
             s=read('main');job=chat_service().begin(s,b)
+            if job.get('duplicate'):  # a retried send of a stored message: report it, start nothing
+                return self.json(200,self.response('main',s,{'duplicate':True,'messageIndex':job['messageIndex']}))
             try:save('main',s)
             except Exception:chat_service().release(job['agentId'],job['turn']);raise
         result=chat_service().run(job)

@@ -9,6 +9,7 @@ import {navigate} from '../router.js';
 import {money, accountValue} from '../format.js';
 import {reasonText, statusOf} from '../governor-text.js';
 import {thread, wasDelivered, governorLine, tradingBlocked} from '../chat.js';
+import {loadDraft, saveDraft, requestIdFor, draftOwner} from '../chat-draft.js';
 import {Creature} from '../creature/Creature.js';
 import {FOCI, colorOf, freshSeed, lookFor} from '../creature/generate.js';
 import {useAgentMood} from '../creature/useAgentMood.js';
@@ -104,8 +105,20 @@ function Message({item, agent, workspace}) {
 
 function Conversation({agent, workspace}) {
   const store = useStore();
-  const [draft, setDraft] = useState('');
+  const owner = draftOwner(store.auth);
+  // The box's text and, while a send is unconfirmed, its request ID (chat-draft.js). Kept in sessionStorage so a
+  // reload or an expired session never loses a message, and a resend after a lost response never runs it twice.
+  const [draft, setDraftState] = useState(() => loadDraft(owner, agent.id));
+  const latest = useRef(draft);
+  const [interrupted, setInterrupted] = useState(() => !!(draft.requestId && draft.text && draft.text === draft.sentText));
   const [error, setError] = useState('');
+  // `stored` differs from what the box shows only while a message is being sent: the box is empty, storage keeps it.
+  function update(next, stored = next) {
+    latest.current = next;
+    setDraftState(next);
+    saveDraft(owner, agent.id, stored);
+  }
+  const setDraft = text => update({...latest.current, text});
   const log = useRef(null);
   const input = useRef(null);
   const messages = workspace.chats?.[agent.id] || [];
@@ -113,7 +126,7 @@ function Conversation({agent, workspace}) {
   const pending = store.chatPending?.agent === agent.id ? store.chatPending : null;
   const otherPending = store.chatPending && !pending;
   const free = freeMessagesLeft(workspace, agent);
-  const canSend = !store.chatPending && draft.trim();
+  const canSend = !store.chatPending && draft.text.trim();
   const blocked = tradingBlocked(workspace, agent, workspace.accounts?.find(a => a.id === agent.accountId));
 
   // Keep the newest message in view: on open, on each new message, and while the agent is thinking.
@@ -122,16 +135,29 @@ function Conversation({agent, workspace}) {
   async function send(e) {
     e?.preventDefault();
     if (!canSend) return;
-    const text = draft.trim();
+    const text = draft.text.trim();
+    const requestId = requestIdFor(latest.current, text);
     const lengthBefore = messages.length;
-    setDraft('');
+    const sending = {text, requestId, sentText: text};
+    update({...sending, text: ''}, sending);
     setError('');
+    setInterrupted(false);
+    // Done with this message: keep only what was typed since, as a new message.
+    const settle = () => update(latest.current.text ? {text: latest.current.text, requestId: null, sentText: null} : {text: '', requestId: null, sentText: null});
+    // Not confirmed: put it back with its request ID, unless something new was typed meanwhile.
+    const restore = () => { if (!latest.current.text.trim()) update(sending); };
     try {
-      await sendChat(agent.id, text);
+      const result = await sendChat(agent.id, text, requestId);
+      settle();
+      if (result?.duplicate) setStore({toast: `${agent.name} already had that message, so it was not sent twice.`});
     } catch (err) {
-      setError(err.message);
-      // Bring the message back unless it reached the agent, without replacing a new draft typed meanwhile.
-      if (!wasDelivered(getStore().workspace?.chats?.[agent.id], lengthBefore, text)) setDraft(current => current.trim() ? current : text);
+      if (err.lost && wasDelivered(getStore().workspace?.chats?.[agent.id], lengthBefore, text)) {
+        settle();  // the response was lost, but the reload shows the message arrived
+        setStore({toast: `The connection dropped, but ${agent.name} got your message.`});
+      } else {
+        setError(err.message);
+        restore();
+      }
     }
     input.current?.focus();
   }
@@ -158,10 +184,11 @@ function Conversation({agent, workspace}) {
     </div>
     <form class="chat-composer" onSubmit=${send}>
       <${ErrorNote} message=${error} />
+      ${interrupted && !error ? html`<div class="notice notice-warn"><${Icon} name="info" /><span>This message was being sent when the page was interrupted. Send it again: if ${agent.name} already has it, it will not run twice.</span></div>` : null}
       ${blocked ? html`<div class="notice"><${Icon} name="info" /><span>${agent.name} can answer questions but will not propose trades. ${blocked}</span></div>` : null}
       <div class="chat-input">
         <label class="visually-hidden" for="chat-text">Message ${agent.name}</label>
-        <textarea id="chat-text" ref=${input} class="input" rows="2" maxlength="2000" value=${draft} placeholder=${EXAMPLE}
+        <textarea id="chat-text" ref=${input} class="input" rows="2" maxlength="2000" value=${draft.text} placeholder=${EXAMPLE}
           onInput=${e => setDraft(e.currentTarget.value)} onKeyDown=${onKeyDown}></textarea>
         <button class="btn btn-primary" disabled=${!canSend}>${pending ? html`<span class="spinner" aria-hidden="true"></span>Working` : 'Send'}</button>
       </div>

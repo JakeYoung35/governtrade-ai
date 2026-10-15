@@ -196,25 +196,32 @@ export async function pollWorkspace() {
   }
 }
 
-// Chat can take a full model turn. Keep its pending state across route changes.
-export async function sendChat(agent, text) {
+// Chat can take a full model turn. Keep its pending state across route changes. Resolves with the action's result
+// only once the server confirmed the message ({duplicate: true} when this requestId was already stored); every other
+// outcome throws, so the caller keeps the message. Resending with the same requestId never runs it twice.
+export async function sendChat(agent, text, requestId) {
   if (getStore().chatPending) throw Error('Your agent is still working on the last message.');
   const g = generation;
+  const kept = (message, kind) => Object.assign(Error(message), {[kind]: true});
   setStore({chatPending: {agent, text}, error: ''});
   try {
-    const r = await send('/api/action', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:JSON.stringify({action:'chat',env:'main',agent,text})});
+    const r = await send('/api/action', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:JSON.stringify({action:'chat',env:'main',agent,text,requestId})});
     const d = await readJson(r);
-    if (g !== generation) return;
-    if (r.status === 401) {resetUser('starting'); await initializeAuth(); return;}
-    // A 4xx is the server refusing the message before it was stored (quota, a turn still running): nothing to check.
-    if (r.status >= 400 && r.status < 500) throw Object.assign(Error(d.error || 'Your agent could not respond.'), {refused: true});
+    if (g !== generation) throw kept('You were signed out while the message was being sent.', 'stale');
+    if (r.status === 401) {
+      resetUser('starting');
+      await initializeAuth();
+      throw kept('Your session expired. Sign in again; your message is kept in the box.', 'expired');
+    }
+    // A 4xx is the server refusing the message before it was stored (quota, a turn still running).
+    if (r.status >= 400 && r.status < 500) throw kept(d.error || 'Your agent could not respond.', 'refused');
     if (!r.ok) throw Error(d.error || 'Your agent could not respond.');
     csrf = d.csrf; setStore({workspace:d.state});
+    return d.result;
   } catch (e) {
-    if (g !== generation) return;
-    if (e.refused) throw e;
+    if (e.stale || e.expired || e.refused) throw e;
+    if (g !== generation) throw kept('You were signed out while the message was being sent.', 'stale');
     await loadWorkspace();
-    if (g !== generation) return;
-    throw Error(`${e.message} Check the conversation before sending again.`);
+    throw kept(`${e.message} Your message is kept in the box. Sending it again is safe: it will not run twice.`, 'lost');
   } finally {if (g === generation) setStore({chatPending:null});}
 }
