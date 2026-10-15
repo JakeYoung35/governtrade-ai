@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python3 -m pip install -r requirements.txt
+      # Same command developers run locally. Postgres store tests skip here; the job below runs them.
+      - run: python3 -m unittest discover -s tests/python -t .
+
+  python-postgres:
+    name: Python tests with Postgres
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: governtrade
+          POSTGRES_PASSWORD: governtrade
+          POSTGRES_DB: governtrade_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U governtrade -d governtrade_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # tests/python/test_store.py runs only when this is set; each run migrates and drops its own schema.
+      TEST_DATABASE_URL: postgresql://governtrade:governtrade@localhost:5432/governtrade_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python3 -m pip install -r requirements.txt
+      # Same discovery as the plain job, but fails if any test is skipped, so the store
+      # tests can never silently fall back to skipping because the database was not reached.
+      - name: Run the suite and require zero skipped tests
+        run: |
+          python3 - <<'EOF'
+          import sys, unittest
+          suite = unittest.defaultTestLoader.discover('tests/python', top_level_dir='.')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          for test, reason in result.skipped:
+              print(f'::error::Skipped with Postgres available: {test.id()}: {reason}')
+          sys.exit(0 if result.wasSuccessful() and not result.skipped else 1)
+          EOF
+
+  node:
+    name: Node tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Runs every tests/javascript/test_* file that exists on the branch, so new suites are
+      # picked up without editing this file. ES module suites (.mjs) run with module-loader.mjs
+      # when the branch has it; it maps the browser import map (preact) to static/vendor.
+      - name: Run every Node test suite
+        run: |
+          shopt -s nullglob
+          suites=(tests/javascript/test_*.js tests/javascript/test_*.mjs)
+          if [ ${#suites[@]} -eq 0 ]; then echo '::error::No Node test suites found'; exit 1; fi
+          loader=()
+          if [ -f tests/javascript/module-loader.mjs ]; then loader=(--loader ./tests/javascript/module-loader.mjs); fi
+          failed=()
+          for suite in "${suites[@]}"; do
+            echo "::group::$suite"
+            if [[ $suite == *.mjs ]]; then
+              node --no-warnings "${loader[@]}" "$suite" || failed+=("$suite")
+            else
+              node "$suite" || failed+=("$suite")
+            fi
+            echo '::endgroup::'
+          done
+          echo "Ran ${#suites[@]} suites."
+          if [ ${#failed[@]} -gt 0 ]; then printf '::error::Failed: %s\n' "${failed[@]}"; exit 1; fi
