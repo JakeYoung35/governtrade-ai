@@ -90,6 +90,11 @@ def read_governor_status(folder):
         return status if isinstance(status,dict) else {}
     except (OSError,ValueError):return {}
 def tenant_save(s,directory):save('main',s,directory)
+def app_route(raw):
+    """A browser route of the front end (/agents, /agents/<id>, /rules): no file extension and not an API path.
+    Real files (/js/main.js, /fonts/x.woff2) are served as files; folders get the app instead of a directory listing."""
+    path=urlsplit(raw).path
+    return path!='/' and not path.startswith('/api/') and path!='/healthz' and '.' not in path.rsplit('/',1)[-1]
 WORKSPACE=Workspace(Vault(DATA),lambda s:save('main',s))
 GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if STORE else None)
 AGENT_CHAT=AgentChat(WORKSPACE,GOVERNOR)
@@ -300,6 +305,9 @@ class Handler(SimpleHTTPRequestHandler):
                 s=read(env)
                 if env=='main':workspace().action(s,{'action':'refresh'});save(env,s)
                 self.json(200,self.response(env,s))
+        elif app_route(self.path):
+            # The front end routes in the browser (/agents, /rules, ...): every such path gets the app shell.
+            query=urlsplit(self.path).query;self.path='/'+('?'+query if query else '');super().do_GET()
         else:super().do_GET()
     def do_POST(self):
         if not self.entry_access():return

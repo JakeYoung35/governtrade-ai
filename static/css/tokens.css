@@ -1,0 +1,100 @@
+/* Design tokens. Every colour, size and duration in the app comes from here, so a dark theme only redefines these. */
+
+@font-face{font-family:Geist;src:url(/fonts/Geist-Variable.woff2) format('woff2');font-weight:100 900;font-style:normal;font-display:swap}
+@font-face{font-family:'Geist Mono';src:url(/fonts/GeistMono-Variable.woff2) format('woff2');font-weight:100 900;font-style:normal;font-display:swap}
+
+:root{
+  --font-sans:Geist,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --font-mono:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+
+  /* Surfaces and lines: warm paper. */
+  --bg:#f6f5f2;
+  --surface:#fff;
+  --surface-2:#f1f0ec;
+  --surface-3:#e9e7e1;
+  --line:#e4e2dc;
+  --line-strong:#d3d0c8;
+  --overlay:rgba(27,26,23,.38);
+
+  /* Text. --text-3 keeps 4.5:1 on both white and --bg. */
+  --text:#1b1a17;
+  --text-2:#5c5a54;
+  --text-3:#6f6c65;
+  --ink:#26231f;
+
+  /* Brand action colour. */
+  --accent:#1f5c4a;
+  --accent-hover:#184d3e;
+  --accent-soft:#e3eee9;
+  --on-accent:#fff;
+  --focus:#1f5c4a;
+
+  /* Governor verdicts. Reserved: agents never use these hues. */
+  --allow:#1f7a55;
+  --allow-soft:#e2f2ea;
+  --review:#8a5a00;
+  --review-soft:#fbf0d9;
+  --block:#b3372f;
+  --block-soft:#fbe6e3;
+
+  /* Agent identity colours (each >= 3:1 on --bg, eye ink >= 4.2:1 on the colour). */
+  --agent-cobalt:#5B7FE8;
+  --agent-iris:#8C73E6;
+  --agent-orchid:#C467C2;
+  --agent-rose:#D9668F;
+  --agent-sky:#3893C9;
+  --agent-lagoon:#2F98A6;
+  --agent-cocoa:#AC7D58;
+  --agent-slate:#7F8EA8;
+
+  /* Type scale. */
+  --text-xs:12px;
+  --text-sm:13px;
+  --text-md:14px;
+  --text-lg:16px;
+  --text-xl:20px;
+  --text-2xl:26px;
+  --text-3xl:32px;
+  --leading:1.5;
+  --leading-tight:1.25;
+
+  /* Spacing (4px grid). */
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:12px;
+  --space-4:16px;
+  --space-5:20px;
+  --space-6:24px;
+  --space-8:32px;
+  --space-10:40px;
+  --space-12:48px;
+
+  --radius-sm:6px;
+  --radius:8px;
+  --radius-lg:12px;
+  --radius-pill:999px;
+
+  --shadow-sm:0 1px 2px rgba(27,26,23,.05);
+  --shadow-pop:0 12px 32px rgba(27,26,23,.14),0 2px 6px rgba(27,26,23,.06);
+
+  /* Motion. */
+  --ease-out:cubic-bezier(.2,.8,.2,1);
+  --ease-in-out:cubic-bezier(.65,0,.35,1);
+  --ease-spring:cubic-bezier(.34,1.56,.64,1);
+  --dur-fast:120ms;
+  --dur:180ms;
+  --dur-slow:280ms;
+
+  /* Layout. */
+  --sidebar-width:232px;
+  --topbar-height:56px;
+  --tabbar-height:60px;
+  --content-max:1200px;
+  --gutter:28px;
+}
+
+@media (max-width:899px){
+  :root{--gutter:16px}
+}
+
+:root{--drawer-width:640px}
