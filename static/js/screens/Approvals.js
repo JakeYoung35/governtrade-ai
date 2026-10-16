@@ -22,7 +22,7 @@ export function Approvals({workspace, home = false}) {
   return html`<section class="section-stack" aria-label="Approvals">
     <div class="section-heading"><h2>${home ? 'Waiting for you' : 'Pending approvals'} <span class="muted">${count}</span></h2>
       ${home && hidden > 0 ? html`<a href="/approvals">See all ${count}</a>` : home ? html`<a href="/approvals">Approvals</a>` : null}</div>
-    ${orders.length ? orders.map(order => html`<${ApprovalCard} key=${order.id} order=${order} workspace=${workspace} />`)
+    ${orders.length ? orders.map(order => html`<${ApprovalCard} key=${order.id} order=${order} workspace=${workspace} verdict=${home} />`)
       : html`<div class="card empty"><h3>No approvals waiting</h3><p>Orders that need your review will appear here.</p></div>`}
     ${more.error ? html`<p class="notice notice-error" role="alert">${more.error.message}</p>` : null}
     ${!home && hidden > 0 ? html`<button class="btn activity-more" disabled=${more.loading} onClick=${() => setWanted(orders.length + PAGE)}>

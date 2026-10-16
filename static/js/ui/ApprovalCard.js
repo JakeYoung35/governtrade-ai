@@ -48,7 +48,21 @@ function Reasoning({order}) {
   </div>`;
 }
 
-export function ApprovalCard({order, workspace, detail = false}) {
+// Phone width, kept in step with the media query (the same 599px breakpoint as the CSS).
+const PHONE = '(max-width: 599px)';
+function usePhone() {
+  const [phone, setPhone] = useState(() => matchMedia(PHONE).matches);
+  useEffect(() => {
+    const query = matchMedia(PHONE), update = () => setPhone(query.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+  return phone;
+}
+
+// `verdict` false leaves out the "Needs approval" pill where the page itself says so (the Approvals page).
+export function ApprovalCard({order, workspace, detail = false, verdict = true}) {
+  const phone = usePhone();
   const [now, setNow] = useState(Date.now());
   const [error, setError] = useState('');
   const {busy} = useStore();
@@ -70,22 +84,28 @@ export function ApprovalCard({order, workspace, detail = false}) {
     }
   }
 
-  return html`<article class=${'approval-card' + (detail ? ' approval-card-detail' : ' card')}>
-    ${detail ? null : html`<div class="approval-heading">
-      <div><h3>${order.market?.name || order.market?.id || 'Market'}</h3>
-        <p class="muted">${agent?.name || order.agent} · ${account?.name || 'Account'}${account?.environment === 'live' ? ' · Live money' : ''}</p></div>
-      <${Verdict} value=${order.decision || 'REQUIRE_APPROVAL'} />
-    </div>`}
-    ${detail ? null : html`<p class="approval-line">${orderLine(order)}</p>`}
-    <${GovernorRail} order=${order} />
-    ${!detail && order.request ? html`<${Reasoning} order=${order} />` : null}
-    <div class="approval-actions">
+  const decision = html`<div class="approval-actions">
       <button class="btn btn-primary" disabled=${busy || expiry.expired} onClick=${() => decide(true)}>Approve</button>
       <button class="btn" disabled=${busy} onClick=${() => decide(false)}>Deny</button>
       ${!detail ? html`<a class="btn btn-ghost" href=${orderHref(order.id)}>Details</a>` : null}
       <span class=${'approval-timer' + (expiry.expired ? ' expired' : ' num')} role="timer" aria-live="off">${expiry.label === 'Expired' ? 'Expired: too late to approve' : expiry.label}</span>
     </div>
     <p class="muted approval-note">Approving rechecks your limits, cash, the agent's status and the price before the order is placed.</p>
-    ${error ? html`<p class="notice notice-error" role="alert">${error}</p>` : null}
+    ${error ? html`<p class="notice notice-error" role="alert">${error}</p>` : null}`;
+  // On a phone the decision comes right after the order line, above the fold; the governor's sizing folds away (the
+  // order line already says what Approve places, and Details shows everything).
+  const compact = phone && !detail;
+  return html`<article class=${'approval-card' + (detail ? ' approval-card-detail' : ' card')}>
+    ${detail ? null : html`<div class="approval-heading">
+      <div><h3>${order.market?.name || order.market?.id || 'Market'}</h3>
+        <p class="muted">${agent?.name || order.agent} · ${account?.name || 'Account'}${account?.environment === 'live' ? ' · Live money' : ''}</p></div>
+      ${verdict ? html`<${Verdict} value=${order.decision || 'REQUIRE_APPROVAL'} />` : null}
+    </div>`}
+    ${detail ? null : html`<p class="approval-line">${orderLine(order)}</p>`}
+    ${compact ? decision : null}
+    ${compact ? html`<details class="approval-sizing"><summary>Governor sizing</summary><${GovernorRail} order=${order} /></details>`
+      : html`<${GovernorRail} order=${order} />`}
+    ${!detail && order.request ? html`<${Reasoning} order=${order} />` : null}
+    ${compact ? null : decision}
   </article>`;
 }

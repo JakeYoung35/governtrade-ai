@@ -482,3 +482,18 @@ textarea.input{padding:var(--space-3);resize:vertical;line-height:var(--leading)
 .event-main .muted{font-size:var(--text-xs)}
 .event-side{display:flex;align-items:center;gap:var(--space-3);flex:none;font-size:var(--text-sm)}
 @media(max-width:599px){.event-row{flex-direction:column;gap:var(--space-2)}}
+/* Touch screens: every control is at least 44px to the finger (Apple HIG: 44x44 pt default, 28 minimum). Visible sizes
+   stay: inline links grow their tap area with padding, which moves nothing; block controls pair padding with an equal
+   negative margin. The all-agent switch needs nothing: its whole row is the label. */
+@media(pointer:coarse){
+  .btn{min-height:44px}
+  .card-head a,.section-heading a,.event-side a,.notice a{padding-block:12px}
+  .decisions-table td:first-child a,.mandate-list a{padding-block:14px}
+  .back-link{padding-block:12px;margin-top:-12px;margin-bottom:calc(var(--space-2) * -1 - 12px)}
+  summary,.link-button{padding-block:12px;margin-block:-12px}
+  .checks-passed summary{padding-bottom:11px;margin-block:0}
+  .rule-slider{height:44px;margin:2px 0 -6px}
+}
+.approval-sizing .governor-detail{margin-top:var(--space-3)}
+/* Metadata lines ("agent · account · time") are labels, not prose: the 70ch measure would break them before a "·". */
+.approval-heading p,.order-title p{max-width:none}
