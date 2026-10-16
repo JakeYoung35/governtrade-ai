@@ -99,13 +99,17 @@ class PersonalHttpTests(unittest.TestCase):
         self.assertEqual(self.call('GET','/')[0],200)
         self.assertEqual(self.call('HEAD','/')[0],200)
         self.assertEqual(self.call('GET','/healthz')[0],200)
+        reads=['/api/orders','/api/orders/some-order','/api/activity?tz=UTC','/api/events']
         for method,path in [('GET','/api/state?main'),('HEAD','/api/state'),('POST','/api/action'),
-                            ('GET','/api/worker'),('GET','/api/governor/summary')]:
+                            ('GET','/api/worker'),('GET','/api/governor/summary')]+[('GET',path) for path in reads]:
             self.assertEqual(self.call(method,path)[0],401)
         self.assertEqual(self.call('GET','/api/worker',extra={'Authorization':'Bearer legacy-worker'})[0],401)
         cookie,csrf,_=self.login('alice')
         self.assertEqual(self.call('GET','/api/worker',cookie,extra={'Authorization':'Bearer legacy-worker'})[0],403)
         self.assertEqual(self.call('GET','/api/state',cookie,extra={'Origin':'https://evil.example'})[0],403)
+        for path in reads:
+            self.assertEqual(self.call('GET',path,cookie,extra={'Origin':'https://evil.example'})[0],403)
+            self.assertIn(self.call('GET',path,cookie)[0],(200,404))  # signed in: an answer (the order does not exist)
         self.assertEqual(self.call('POST','/api/action',cookie,'wrong',{'action':'permissions','values':{'dailyCap':1}})[0],403)
         self.assertEqual(self.call('POST','/api/auth/logout',cookie,csrf)[0],200)
         self.assertEqual(self.call('GET','/api/state',cookie)[0],401)
@@ -119,6 +123,9 @@ class PersonalHttpTests(unittest.TestCase):
                 state['accounts']=[{'id':'same-account-id','name':secret,'venue':'kalshi','environment':'demo',
                                     'status':'disconnected','stale':True,'ceiling':{}}]
                 server.workspace().vault.put({'api_key':secret},'same-reference')
+                state['orders']=[{'id':f'{secret}-order','agent':'nobody','accountId':'same-account-id','market':{'id':'m','name':secret},
+                                  'direction':'Yes','amount':1,'request':secret,'time':'2026-10-14T10:00:00+00:00','status':'blocked',
+                                  'decision':'BLOCK','evaluations':[],'filled':False}]
                 server.save('main',state)
         # Knowledge of another user's resource ID is insufficient to mutate it.
         with tenancy.activate(server.DATA,aid,server.tenant_save),server.locked('main'):
@@ -131,6 +138,11 @@ class PersonalHttpTests(unittest.TestCase):
         for cookie,secret,other in ((alice,'alice-secret','bob-secret'),(bob,'bob-secret','alice-secret')):
             status,_,body=self.call('GET','/api/state?main',cookie)
             self.assertEqual(status,200);self.assertIn(secret,json.dumps(body));self.assertNotIn(other,json.dumps(body))
+            # The paged order reads see only this user's workspace, even given the other user's order ID.
+            status,_,body=self.call('GET','/api/orders',cookie)
+            self.assertEqual([o['id'] for o in body['orders']],[f'{secret}-order']);self.assertNotIn(other,json.dumps(body))
+            self.assertEqual(self.call('GET',f'/api/orders/{secret}-order',cookie)[0],200)
+            self.assertEqual(self.call('GET',f'/api/orders/{other}-order',cookie)[0],404)
         rules={**trading_rules.DEFAULTS,'dailySpendingPercent':42}
         self.assertEqual(self.call('POST','/api/action',alice,ac,{'action':'rules-save','values':rules,'userId':bid})[0],200)
         self.assertEqual(self.call('GET','/api/state?main',alice)[2]['state']['rules']['values']['dailySpendingPercent'],42)

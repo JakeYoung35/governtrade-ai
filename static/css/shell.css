@@ -1,0 +1,91 @@
+/* The app frame: sidebar (desktop), top bar, bottom tab bar and More sheet (mobile), and the full-page screens. */
+
+.brand{display:inline-flex;align-items:center;gap:var(--space-2);font-weight:600;font-size:var(--text-lg);letter-spacing:-.02em;color:var(--text);text-decoration:none}
+.brand-mark{width:26px;height:26px;border-radius:8px;background:var(--ink);display:grid;place-items:center;flex:none}
+.brand-mark svg{width:14px;height:14px;color:#fff}
+.brand small{font-size:11px;font-weight:600;letter-spacing:.04em;color:var(--text-3);margin-left:2px}
+
+/* Skip link: hidden until a keyboard user reaches it */
+.skip-link{position:fixed;top:var(--space-2);left:var(--space-2);z-index:60;padding:var(--space-2) var(--space-4);border-radius:var(--radius);background:var(--ink);color:#fff;font-weight:500;text-decoration:none;transform:translateY(-200%)}
+.skip-link:focus-visible{transform:none}
+.page:focus{outline:none}
+
+/* Desktop frame */
+.app{display:grid;grid-template-columns:var(--sidebar-width) minmax(0,1fr);min-height:100dvh}
+.sidenav{position:sticky;top:0;height:100dvh;display:flex;flex-direction:column;gap:2px;padding:var(--space-5) var(--space-3) var(--space-4);border-right:1px solid var(--line);overflow-y:auto}
+.sidenav .brand{padding:0 var(--space-2) var(--space-6)}
+.nav-link{display:flex;align-items:center;gap:var(--space-3);height:36px;padding:0 var(--space-3);border-radius:var(--radius);color:var(--text-2);font-weight:500;text-decoration:none;transition:background-color var(--dur) var(--ease-out),color var(--dur) var(--ease-out)}
+.nav-link svg{width:18px;height:18px;flex:none}
+button.nav-link{width:100%;border:0;background:none;text-align:left}
+@media (hover:hover){.nav-link:hover{background:var(--surface-2);color:var(--text)}}
+.nav-link[aria-current=page]{background:var(--surface);color:var(--text);box-shadow:var(--shadow-sm),inset 0 0 0 1px var(--line)}
+.nav-count{margin-left:auto;min-width:20px;height:20px;padding:0 6px;border-radius:var(--radius-pill);background:var(--review-soft);color:var(--review);font-size:var(--text-xs);font-weight:600;display:grid;place-items:center}
+.sidenav-foot{margin-top:auto;padding:var(--space-3) var(--space-2) 0;border-top:1px solid var(--line);display:flex;align-items:center;gap:var(--space-2)}
+.sidenav-foot .who{flex:1;min-width:0}
+.sidenav-foot strong{display:block;font-size:var(--text-sm);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sidenav-foot small{display:block;font-size:var(--text-xs);color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.icon-btn{display:grid;place-items:center;width:32px;height:32px;border-radius:var(--radius);border:0;background:transparent;color:var(--text-2);flex:none;transition:background-color var(--dur) var(--ease-out),color var(--dur) var(--ease-out)}
+.icon-btn svg{width:18px;height:18px}
+@media (hover:hover){.icon-btn:hover{background:var(--surface-2);color:var(--text)}}
+
+.main{min-width:0;display:flex;flex-direction:column}
+.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:var(--space-3);height:calc(var(--topbar-height) + env(safe-area-inset-top));padding:env(safe-area-inset-top) var(--gutter) 0;border-bottom:1px solid var(--line);background:color-mix(in oklab,var(--bg) 88%,transparent);-webkit-backdrop-filter:saturate(1.4) blur(12px);backdrop-filter:saturate(1.4) blur(12px)}
+.topbar h1{font-size:var(--text-xl);font-weight:600;letter-spacing:-.015em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.topbar .pill{flex:none}
+.topbar .spacer{flex:1}
+.topbar .brand-mark{display:none}
+.gov-status{display:inline-flex;align-items:center;gap:var(--space-2);height:28px;padding:0 var(--space-3) 0 var(--space-2);border:1px solid var(--line);border-radius:var(--radius-pill);background:var(--surface);font-size:var(--text-xs);color:var(--text-2);white-space:nowrap}
+.gov-status i{width:8px;height:8px;border-radius:50%;background:var(--allow);box-shadow:0 0 0 3px var(--allow-soft)}
+.gov-status.paused i{background:var(--review);box-shadow:0 0 0 3px var(--review-soft)}
+@media (max-width:599px){
+  .gov-status{width:28px;padding:0;justify-content:center;flex:none}
+  .gov-status .gov-text{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+}
+.page{width:100%;max-width:calc(var(--content-max) + 2 * var(--gutter));padding:var(--space-6) var(--gutter) var(--space-12)}
+
+/* Mobile frame */
+.tabbar,.sheet-layer{display:none}
+@media (max-width:899px){
+  .app{grid-template-columns:minmax(0,1fr)}
+  .sidenav{display:none}
+  .topbar .brand-mark{display:grid}
+  .topbar .hide-mobile{display:none}
+  .page{padding:var(--space-5) var(--gutter) calc(var(--tabbar-height) + env(safe-area-inset-bottom) + var(--space-8))}
+  .tabbar{display:grid;grid-template-columns:repeat(5,1fr);position:fixed;z-index:30;left:0;right:0;bottom:0;height:calc(var(--tabbar-height) + env(safe-area-inset-bottom));padding-bottom:env(safe-area-inset-bottom);border-top:1px solid var(--line);background:color-mix(in oklab,var(--surface) 92%,transparent);-webkit-backdrop-filter:saturate(1.4) blur(12px);backdrop-filter:saturate(1.4) blur(12px)}
+  .tab{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:0;background:transparent;color:var(--text-3);font-size:11px;font-weight:500;text-decoration:none;-webkit-user-select:none;user-select:none}
+  .tab svg{width:22px;height:22px}
+  .tab[aria-current=page]{color:var(--text)}
+  .tab .nav-count{position:absolute;top:6px;left:calc(50% + 6px);min-width:18px;height:18px;font-size:11px;margin:0}
+  .sheet-layer{display:block;position:fixed;inset:0;z-index:40}
+  .sheet-backdrop{position:absolute;inset:0;background:var(--overlay);animation:fade-in var(--dur) var(--ease-out)}
+  .sheet{position:absolute;left:0;right:0;bottom:0;padding:var(--space-2) var(--space-3) calc(var(--space-4) + env(safe-area-inset-bottom));border-radius:var(--radius-lg) var(--radius-lg) 0 0;background:var(--surface);box-shadow:var(--shadow-pop);animation:sheet-in var(--dur-slow) var(--ease-drawer)}
+  .sheet-grip{width:36px;height:4px;border-radius:4px;background:var(--line-strong);margin:var(--space-1) auto var(--space-3)}
+  .sheet .nav-link{height:48px;font-size:var(--text-lg)}
+  .sheet .nav-link svg{width:20px;height:20px}
+  .sheet hr{border:0;border-top:1px solid var(--line);margin:var(--space-2) 0}
+  .sheet-who{padding:var(--space-2) var(--space-3)}
+  .sheet-who strong{display:block;font-size:var(--text-sm);font-weight:500}
+  .sheet-who small{display:block;font-size:var(--text-xs);color:var(--text-3)}
+}
+@keyframes fade-in{from{opacity:0}}
+@keyframes sheet-in{from{transform:translateY(100%)}}
+
+/* Full-page screens: sign-in, loading, setup */
+.solo{min-height:100dvh;display:grid;place-items:center;padding:var(--space-6) var(--space-4)}
+.signin{width:min(440px,100%)}
+.signin .brand{margin-bottom:var(--space-8)}
+.signin h1{font-size:var(--text-3xl);letter-spacing:-.03em;line-height:1.1}
+.signin .lead{margin-top:var(--space-3);font-size:var(--text-lg);line-height:1.5}
+.signin form,.signin .actions{display:grid;gap:var(--space-4);margin-top:var(--space-8)}
+.signin .notice{margin-top:var(--space-4)}
+.signin .fine{margin-top:var(--space-6);font-size:var(--text-sm);color:var(--text-3)}
+.google-slot{min-height:44px;display:flex;align-items:center}
+.signin-status{font-size:var(--text-sm);color:var(--text-3)}
+.loading{display:flex;flex-direction:column;align-items:center;gap:var(--space-3);color:var(--text-3);font-size:var(--text-sm)}
+
+.setup-top{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;height:calc(var(--topbar-height) + env(safe-area-inset-top));padding:env(safe-area-inset-top) var(--gutter) 0;border-bottom:1px solid var(--line);background:color-mix(in oklab,var(--bg) 88%,transparent);-webkit-backdrop-filter:saturate(1.4) blur(12px);backdrop-filter:saturate(1.4) blur(12px)}
+.setup{max-width:760px;margin:0 auto;padding:var(--space-8) var(--gutter) 0}
+.setup h1{margin-top:var(--space-2)}
+.setup .lead{margin-top:var(--space-3);font-size:var(--text-lg);line-height:1.55;max-width:640px}
+.setup .notice{margin-top:var(--space-5)}
+.setup form{margin-top:var(--space-6)}

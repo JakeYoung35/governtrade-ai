@@ -10,6 +10,7 @@ from governor.records import compact_for_json
 from governor_service import GovernorService
 from agent_chat import AgentChat,CHAT_PROPOSAL_PREFIX
 import hosting
+import order_views
 import authentication
 import tenancy
 ROOT=Path(__file__).parent;DATA=Path(os.environ.get('GOVERNTRADE_DATA_DIR',str(ROOT/'.data')));DATA.mkdir(parents=True,exist_ok=True);LOCK=threading.RLock();SESSION=secrets.token_urlsafe(32);CSRF=secrets.token_urlsafe(32)
@@ -90,6 +91,11 @@ def read_governor_status(folder):
         return status if isinstance(status,dict) else {}
     except (OSError,ValueError):return {}
 def tenant_save(s,directory):save('main',s,directory)
+def app_route(raw):
+    """A browser route of the front end (/agents, /agents/<id>, /rules): no file extension and not an API path.
+    Real files (/js/main.js, /fonts/x.woff2) are served as files; folders get the app instead of a directory listing."""
+    path=urlsplit(raw).path
+    return path!='/' and not path.startswith('/api/') and path!='/healthz' and '.' not in path.rsplit('/',1)[-1]
 WORKSPACE=Workspace(Vault(DATA),lambda s:save('main',s))
 GOVERNOR=GovernorService(WORKSPACE,find_request=STORE.find_governor_request if STORE else None)
 AGENT_CHAT=AgentChat(WORKSPACE,GOVERNOR)
@@ -270,6 +276,8 @@ class Handler(SimpleHTTPRequestHandler):
         # Three phases like a governor pass (agent_chat.py): the model and market reads run with the lock released.
         with locked('main'):
             s=read('main');job=chat_service().begin(s,b)
+            if job.get('duplicate'):  # a retried send of a stored message: report it, start nothing
+                return self.json(200,self.response('main',s,{'duplicate':True,'messageIndex':job['messageIndex']}))
             try:save('main',s)
             except Exception:chat_service().release(job['agentId'],job['turn']);raise
         result=chat_service().run(job)
@@ -288,6 +296,11 @@ class Handler(SimpleHTTPRequestHandler):
             # Light poll for the chat UI while proposals are being decided: no venue refresh, unlike /api/state.
             if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
             with locked('main'):return self.json(200,{'chatProposals':chat_service().proposal_views(read('main'))})
+        if order_views.route_path(urlsplit(self.path).path):
+            # Pages of orders, events and Activity's counts (order_views.py): same-origin reads with no venue refresh.
+            if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
+            with locked('main'):s=read('main');status,body=order_views.route(s,governor().order_governors(s),self.path)
+            return self.json(status,body)
         if self.path.startswith('/api/worker'):
             if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
             # The in-app agent answers chat messages itself (agent_chat.py), so they are no longer offered to workers
@@ -300,6 +313,9 @@ class Handler(SimpleHTTPRequestHandler):
                 s=read(env)
                 if env=='main':workspace().action(s,{'action':'refresh'});save(env,s)
                 self.json(200,self.response(env,s))
+        elif app_route(self.path):
+            # The front end routes in the browser (/agents, /rules, ...): every such path gets the app shell.
+            query=urlsplit(self.path).query;self.path='/'+('?'+query if query else '');super().do_GET()
         else:super().do_GET()
     def do_POST(self):
         if not self.entry_access():return

@@ -119,6 +119,14 @@ class ProposalTests(ChatTest):
         self.assertEqual((view["messageIndex"], view["status"], view["maxBudgetUsd"]), (0, "submitted", "20"))
         self.assertEqual(view["order"]["status"], "filled")
         self.assertEqual(view["marketName"], "BTC")  # FakeVenue's quote name
+        self.assertIsNone(view["blockReason"])
+        # The browser state carries no evaluations, so a blocked order's reason travels with its proposal view.
+        order = next(o for o in self.s["orders"] if o["id"] == view["order"]["id"])
+        order.update(decision="BLOCK", status="blocked", evaluations=[{"outcome": "BLOCK", "checks": [
+            {"name": "Your rules", "outcome": "ALLOW", "reason": ""},
+            {"name": "Agent mandate", "outcome": "BLOCK", "reason": "Trade exceeds the agent daily limit."}]}])
+        self.assertEqual(service.proposal_views(self.s)["agent"][0]["blockReason"],
+                         "Agent mandate: Trade exceeds the agent daily limit.")
 
     def test_invalid_arguments_go_back_to_the_model_to_correct(self):
         model = ScriptedModel(calls(propose(estimatedYesProbability=1.5)), calls(propose()), ModelTurn("Done."))
@@ -703,6 +711,61 @@ class AdapterTests(unittest.TestCase):
             request.assert_not_called()
 
 
+class RequestIdTests(ChatTest):
+    """A send carries a client request ID so a retry after a lost response never runs the message twice."""
+
+    def begin(self, service, text="Put $20 on Cleveland", request_id="req-0001"):
+        return service.begin(self.s, {"agent": "agent", "text": text, "requestId": request_id})
+
+    def test_a_retry_after_the_turn_finished_does_not_run_again(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(calls(propose()), ModelTurn("Proposed.")))
+        job = self.begin(service)
+        service.finish(self.s, job, service.run(job))
+        retry = self.begin(service)  # the response was lost after the message was stored; the browser sends again
+        self.assertEqual(retry, {"duplicate": True, "agentId": "agent", "messageIndex": 0})
+        self.assertEqual([m["role"] for m in self.s["chats"]["agent"]], ["customer", "agent"])
+        self.assertEqual(len(self.s["governorRequests"]), 1)
+        self.begin(service, "Put $20 on Cleveland", "req-0002")  # a new ID is a new message, even with the same text
+        self.assertEqual(len(self.s["chats"]["agent"]), 3)
+
+    def test_a_retry_while_the_first_turn_is_still_running_is_not_refused(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(ModelTurn("ok")))
+        job = self.begin(service)
+        self.assertTrue(self.begin(service)["duplicate"])  # not "still working": the message is already stored
+        with self.assertRaisesRegex(ValueError, "still working"):
+            self.begin(service, "another message", "req-0002")
+        service.finish(self.s, job, service.run(job))
+
+    def test_a_request_that_was_never_stored_runs_when_sent_again(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(ModelTurn("first"), ModelTurn("second")))
+        running = service.begin(self.s, {"agent": "agent", "text": "first"})
+        with self.assertRaisesRegex(ValueError, "still working"):  # refused before anything was stored
+            self.begin(service, "Put $20 on Cleveland", "req-0009")
+        service.finish(self.s, running, service.run(running))
+        job = self.begin(service, "Put $20 on Cleveland", "req-0009")
+        self.assertNotIn("duplicate", job)
+        service.finish(self.s, job, service.run(job))
+        self.assertEqual([m["text"] for m in self.s["chats"]["agent"]], ["first", "first", "Put $20 on Cleveland", "second"])
+
+    def test_invalid_request_ids_are_refused_before_anything_is_saved(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel())
+        for bad in ["short", "x" * 65, "has space 123", 12345678, ""]:
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "request ID"):
+                self.begin(service, request_id=bad)
+        self.assertEqual(self.s["chats"], {})
+        self.assertNotIn("chatRequests", self.s)
+
+    def test_only_recent_request_ids_are_kept_and_they_stay_private(self):
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(*[ModelTurn("ok")] * (agent_chat.MAX_CHAT_REQUESTS + 2)))
+        for i in range(agent_chat.MAX_CHAT_REQUESTS + 2):
+            job = self.begin(service, f"message {i}", f"req-{i:04d}")
+            service.finish(self.s, job, service.run(job))
+        kept = self.s["chatRequests"]["agent"]
+        self.assertEqual(len(kept), agent_chat.MAX_CHAT_REQUESTS)
+        self.assertEqual(kept[0], {"id": "req-0002", "messageIndex": 4})
+        self.assertNotIn("chatRequests", self.workspace.public(self.s))
+
+
 class HttpTests(unittest.TestCase):
     """The chat route on the real handler: the model runs with the workspace lock released."""
 
@@ -762,6 +825,31 @@ class HttpTests(unittest.TestCase):
         code, light = self.call("GET", "/api/chat/proposals")
         self.assertEqual(light["chatProposals"]["agent"][0]["proposalId"], "chat-0-0")
         self.assertNotIn("sk-test-secret", Path(self.tmp.name, "main.json").read_text())
+
+    def test_a_resend_during_or_after_the_turn_is_stored_once(self):
+        retries = []
+        test = self
+        send = {"action": "chat", "agent": "agent", "text": "Put $20 on Cleveland", "requestId": "req-http-1"}
+
+        class ResendingModel(ScriptedModel):
+            def step(self):
+                if not retries:  # the browser lost the response and sends again while the turn is still running
+                    retries.append(test.call("POST", "/api/action", send))
+                return super().step()
+
+        self.chat.connect = ResendingModel(calls(propose()), ModelTurn("Proposed $20 on Cleveland."))
+        code, body = self.call("POST", "/api/action", send)
+        self.assertEqual(code, 200)
+        (during_code, during), = retries
+        self.assertEqual((during_code, during["result"]), (200, {"duplicate": True, "messageIndex": 0}))
+        self.assertEqual([m["role"] for m in body["state"]["chats"]["agent"]], ["customer", "agent"])
+        code, after = self.call("POST", "/api/action", send)  # and again once the turn is over
+        self.assertEqual((code, after["result"]), (200, {"duplicate": True, "messageIndex": 0}))
+        self.assertEqual(len(after["state"]["chats"]["agent"]), 2)
+        self.assertEqual(len(after["state"]["chatProposals"]["agent"]), 1)
+        self.assertNotIn("chatRequests", after["state"])
+        stored = json.loads(Path(self.tmp.name, "main.json").read_text())
+        self.assertEqual(stored["chatRequests"], {"agent": [{"id": "req-http-1", "messageIndex": 0}]})
 
     def test_workers_get_no_chat_instructions_and_cannot_use_chat_ids(self):
         with patch.dict("os.environ", {"GOVERNTRADE_AGENT_TOKEN": "worker-token"}):

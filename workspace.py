@@ -1,13 +1,23 @@
 """User management and the narrow, governed agent integration boundary."""
-import copy, datetime, math, time, uuid
+import copy, datetime, math, re, time, uuid
 from adapters import adapter,ADAPTERS,VenueError,now
 from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling
 import trading_rules
 from vault import masks
 from providers import validate_model_key,validate_free_agent,catalog,FREE_PROVIDER
+import order_views
 
 TRANSIENT_SYNC_GRACE_SECONDS=120  # how long a connected account rides out unanswered balance reads before showing an error
 BALANCE_RETRY_SECONDS=0.5
+LOOK_FOCI=('general','crypto','sports','politics','economics','culture')
+
+def validate_look(look):
+    """An agent's creature: a seed the front end draws it from, and the market focus that picks its accessory.
+    It is cosmetic; nothing in governance reads it."""
+    if not isinstance(look,dict) or set(look)!={'seed','focus'}:raise ValueError('An agent look needs a seed and a market focus.')
+    if not isinstance(look['seed'],str) or not re.fullmatch(r'[a-z0-9]{6,12}',look['seed']):raise ValueError('The agent look seed must be 6 to 12 lowercase letters or digits.')
+    if look['focus'] not in LOOK_FOCI:raise ValueError('Choose a market focus: '+', '.join(LOOK_FOCI)+'.')
+    return {'seed':look['seed'],'focus':look['focus']}
 
 class Workspace:
     def __init__(self,vault,persist=lambda s:None):self.vault=vault;self.persist=persist
@@ -141,6 +151,7 @@ class Workspace:
             agent=next((x for x in s['agentConfigs'] if x['id']==b.get('id')),None)
             if agent and agent['status']=='deleted':raise ValueError('Deleted agents cannot be edited.')
             if agent and agent['accountId']!=a['id']:raise ValueError('Create a new agent to change its bound account.')
+            look=validate_look(b['look']) if b.get('look') is not None else None  # checked before anything is stored
             if b.get('provider')==FREE_PROVIDER:
                 # The free agent runs on the server's Gemini key: nothing is stored for this agent.
                 validate_free_agent(b.get('model'))
@@ -155,7 +166,12 @@ class Workspace:
                 if not agent:
                     agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
                 agent.update(name=b['name'],accountId=a['id'],provider=b['provider'],model=b['model'],modelValidated=True,modelCredentialRef=reference,modelKeyMask=masks({'key':key})['key'])
+            if look:agent['look']=look
             s['chats'].setdefault(agent['id'],[]);event(s,'Agent saved; a user mandate is required before trading.');return {'agentId':agent['id']}
+        elif action=='agent-look':
+            agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
+            if agent['status']=='deleted':raise ValueError('Deleted agents cannot be edited.')
+            agent['look']=validate_look(b.get('look'))
         elif action=='mandate-save':
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
             if agent['status']=='deleted' or not agent.get('modelValidated'):raise ValueError('Validate this agent’s provider key before mandate setup.')
@@ -211,14 +227,38 @@ class Workspace:
             o['status']='denied';event(s,'User denied exact proposal.','DENIED',o['id'])
         else:raise ValueError('Unsupported user action.')  # chat runs in agent_chat.py, outside the workspace lock
     def public(self,s):
-        # Governor records (batch inputs with order books, traces, forecasts) are large and not used by the UI.
-        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor')})
+        from governor_service import GovernorService
+        governor = GovernorService(self)
+        summaries = {a['id']: governor.account_summary(s, a) for a in s['accounts']
+                     if a['venue'] == 'kalshi' and a.get('status') != 'removed'}
+        order_governors = governor.order_governors(s)
+        # Only compact allowlisted governor details reach the browser. Orders and events grow without limit, so the
+        # state carries a bounded window of them (order_views.py); the rest is read page by page.
+        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor') and k not in ('chatRequests','keys','orders','events')})  # request IDs and idempotency keys are server bookkeeping
         for a in public['accounts']:
             a['hasCredentials']=bool(a.get('credentialRef'));a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'
+        activity=order_views.agent_activity(s['orders'])
         for a in public['agentConfigs']:
             a.pop('modelCredentialRef',None);a['usage']=__import__('engine').usage(s,a['accountId'],a['id'])
+            a['activity']=activity.get(a['id'],{'awaiting':0,'lastOrder':None})
+        for a in public['accounts']:
+            a['summary'] = summaries.get(a['id'])
+        public.update(order_views.window(s, order_governors))
+        totals = [summaries[a['id']] for a in s['accounts'] if a['id'] in summaries
+                  and a.get('status') != 'disconnected']
+        public['summary'] = {key: sum(t[key] for t in totals)
+                             if totals and all(t[key] is not None for t in totals) else None
+                             for key in ('accountValue', 'spentToday', 'dailyCap', 'atRisk', 'exposureCap', 'lossHeadroom')}
+        public['summary'].update(rulesVersion=s.get('rules', {}).get('version'),
+                                 breakerLatched=any(t['breakerLatched'] for t in totals),
+                                 stale=any(t['stale'] for t in totals))
         public['providers']=catalog();public['rulesCatalog']=trading_rules.catalog()
+        if FREE_PROVIDER in public['providers']:
+            # The server's own count for its own UTC day, so the browser's clock never decides what is left.
+            day=datetime.datetime.now(datetime.timezone.utc).date().isoformat();usage=s.get('freeAgentUsage') or {}
+            used=usage.get('messages',0) if usage.get('day')==day else 0;limit=public['providers'][FREE_PROVIDER]['dailyMessages']
+            public['freeAgentQuota']={'day':day,'used':used,'limit':limit,'left':max(0,limit-used)}
         public['accounts']=[a for a in public['accounts'] if a['venue']=='kalshi' and a.get('status')!='removed']
         visible={a['id'] for a in public['accounts']}
         public['agentConfigs']=[a for a in public['agentConfigs'] if a['accountId'] in visible]
