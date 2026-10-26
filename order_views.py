@@ -195,8 +195,41 @@ def route_path(path):
     return path in ('/api/orders', '/api/activity', '/api/events') or (path.startswith('/api/orders/') and path != '/api/orders/')
 
 
-def route(s, governors, path):
-    """The paged reads, for server.py and the UI fixture: (status, body) for a URL whose path route_path() accepts."""
+def governor_details(requests, decisions):
+    """Allowlisted public governor details per governor proposal ID; never raw forecasts or batch inputs."""
+    by_request, by_decision = {}, {}
+    for r in requests:
+        by_request.setdefault(r['governorProposalId'], r)
+    for d in decisions:
+        by_decision.setdefault(d['proposalId'], d)
+    result = {}
+    for proposal_id in by_request.keys() | by_decision.keys():
+        proposal = by_request.get(proposal_id, {}).get('proposal', {})
+        decision = by_decision.get(proposal_id, {})
+        trace = decision.get('trace') or {}
+        result[proposal_id] = {
+            'maxBudgetUsd': proposal.get('requestedBudget'),
+            'estimatedYesProbability': proposal.get('estimatedYesProbability'),
+            **{k: decision.get(k) for k in ('decision', 'approvedBudgetUsd', 'contracts', 'limitPrice',
+                                           'reasonCodes', 'reliabilityScore')},
+            **{k: trace.get(k) for k in ('fullKelly', 'targetStake', 'headroom', 'stakeLimit')}}
+    return result
+
+
+def with_older_governors(governors, orders, history):
+    """`governors` plus the details of any of `orders` whose governor records are older than the state's windows.
+    Only a database keeps those (history, see route()); without one they are gone and the order shows none."""
+    missing = sorted({o['governorProposalId'] for o in orders
+                      if o.get('governorProposalId') and o['governorProposalId'] not in governors})
+    if history is None or not missing:
+        return governors
+    return {**governors, **governor_details(*history.governor_records(missing))}
+
+
+def route(s, governors, path, history=None):
+    """The paged reads, for server.py and the UI fixture: (status, body) for a URL whose path route_path() accepts.
+    `history` is the database the state was loaded from (store.PostgresStore), or None for a JSON workspace. The
+    state holds only recent events and governor records; history answers for the older ones."""
     parts = urlsplit(path)
     query = parse_qs(parts.query)
     first = lambda key: query.get(key, [''])[0]
@@ -207,19 +240,25 @@ def route(s, governors, path):
             filters = {key: first(key) for key in ('status', 'agent', 'category', 'decision', 'query')}
             matching = filter_orders(orders, filters, names)
             offset, limit = page(query)
-            return 200, {'orders': [list_order(o, governors) for o in matching[offset:offset + limit]],
+            rows = matching[offset:offset + limit]
+            governors = with_older_governors(governors, rows, history)
+            return 200, {'orders': [list_order(o, governors) for o in rows],
                          'matching': len(matching), 'total': len(orders), 'offset': offset}
         if parts.path == '/api/activity':
             zone, name = time_zone(first('tz'))
             return 200, {'counts': counts(orders), 'daily': daily_outcomes(orders, zone), 'timeZone': name}
         if parts.path == '/api/events':
-            events = s.get('events') or []
             offset, limit = page(query, RECENT_EVENTS)
-            return 200, {'events': copy.deepcopy(events[offset:offset + limit]), 'total': len(events), 'offset': offset}
+            if history is not None:
+                events, total = history.events_page(offset, limit)
+            else:
+                events = s.get('events') or []
+                events, total = copy.deepcopy(events[offset:offset + limit]), len(events)
+            return 200, {'events': events, 'total': total, 'offset': offset}
     except BadRequest as e:
         return 400, {'error': str(e)}
     order_id = unquote(parts.path[len('/api/orders/'):])
     order = next((o for o in orders if o.get('id') == order_id), None)
     if order is None:
         return 404, {'error': 'This order is not in your workspace.'}
-    return 200, {'order': full_order(order, governors)}
+    return 200, {'order': full_order(order, with_older_governors(governors, [order], history))}

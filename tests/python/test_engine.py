@@ -3,7 +3,7 @@ from unittest.mock import patch
 from pathlib import Path
 from engine import *
 from adapters import KalshiAdapter,VenueError,now
-from workspace import Workspace
+from workspace import Workspace,STATE_REFRESH_SECONDS
 from vault import Vault
 import trading_rules
 class GovernanceTests(unittest.TestCase):
@@ -244,6 +244,36 @@ class FollowupTests(MainTests):
   self.remove_account()
   with self.assertRaisesRegex(ValueError,'was removed'):self.w.action(self.s,{'action':'account-test','id':'account'})
 
+class StateRefreshTests(MainTests):
+ def at(self,clock):return patch('workspace.now',return_value=f'2026-10-11T{clock}+00:00')
+ def reads(self):return patch.object(self.v,'get_balance_positions',wraps=self.v.get_balance_positions)
+ def test_polls_inside_the_window_do_not_read_the_venue_or_save(self):
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.assertTrue(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   for clock in ['12:00:03','12:00:15','12:00:29']:
+    with self.at(clock):self.assertFalse(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   self.assertEqual(reads.call_count,1)
+   with self.at('12:00:30'):self.assertTrue(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   self.assertEqual(reads.call_count,2)
+ def test_failing_account_is_retried_once_per_window(self):
+  self.v.fail_with=VenueError('kalshi request failed.',transient=True,timed_out=True)
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.w.refresh_due(self.s,STATE_REFRESH_SECONDS)
+   with self.at('12:00:10'):self.w.refresh_due(self.s,STATE_REFRESH_SECONDS)
+   self.assertEqual(reads.call_count,1);self.assertEqual(self.a['status'],'connected');self.assertTrue(self.a['stale'])
+ def test_explicit_refresh_is_never_throttled(self):
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.w.refresh_due(self.s,STATE_REFRESH_SECONDS)
+   with self.at('12:00:03'):self.w.action(self.s,{'action':'refresh'});self.w.action(self.s,{'action':'refresh'})
+   self.assertEqual(reads.call_count,3)
+ def test_account_refreshed_by_an_action_starts_a_new_window(self):
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.w.action(self.s,{'action':'refresh'})
+   with self.at('12:00:20'):self.w.action(self.s,{'action':'account-test','id':'account'})
+   with self.at('12:00:25'):self.assertFalse(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   self.assertEqual(reads.call_count,2)
+ def test_disconnected_account_is_never_read(self):
+  self.a['status']='disconnected';self.assertFalse(self.w.refresh_due(self.s))
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
   v=KalshiAdapter({},subaccount=2);calls=[]

@@ -195,6 +195,32 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(([e['id'] for e in body['events']][:2], len(body['events']), body['total']), (['e20', 'e21'], 20, 45))
         self.assertEqual(len(self.get('/api/events?offset=40&limit=100')[1]['events']), 5)
 
+    def test_a_database_answers_past_the_state_windows(self):
+        """A Postgres workspace loads only recent events and governor records; route() asks the store for older ones."""
+        class History:
+            def __init__(self):
+                self.asked = []
+
+            def events_page(self, offset, limit):
+                return [{'id': f'db{offset}'}], 900
+
+            def governor_records(self, proposal_ids):
+                self.asked.append(proposal_ids)
+                return ([{'governorProposalId': 'old', 'proposal': {'requestedBudget': '100'}}],
+                        [{'proposalId': 'old', 'decision': 'resized', 'approvedBudgetUsd': '40'}])
+        history = History()
+        self.assertEqual(route(self.s, {}, '/api/events?offset=600', history)[1], {'events': [{'id': 'db600'}], 'total': 900, 'offset': 600})
+        self.s['orders'][0]['governorProposalId'] = 'old'
+        self.s['orders'][1]['governorProposalId'] = 'recent'
+        recent = {'recent': {'decision': 'approved', 'approvedBudgetUsd': '5', 'maxBudgetUsd': '5'}}
+        rows = route(self.s, recent, '/api/orders', history)[1]['orders']
+        self.assertEqual(rows[0]['governor'], {'decision': 'resized', 'approvedBudgetUsd': '40', 'maxBudgetUsd': '100'})
+        self.assertEqual(rows[1]['governor'], recent['recent'])
+        self.assertEqual(history.asked, [['old']])  # only what the state lacks
+        drawer = route(self.s, recent, f"/api/orders/{self.s['orders'][0]['id']}", history)[1]['order']
+        self.assertEqual(drawer['governor']['approvedBudgetUsd'], '40')
+        self.assertNotIn('governor', route(self.s, recent, '/api/orders')[1]['orders'][0])  # a JSON workspace has no history
+
 
 class StateWindowTests(ServiceTest):
     def test_the_state_carries_a_window_not_every_order(self):

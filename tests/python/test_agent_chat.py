@@ -736,6 +736,16 @@ class RequestIdTests(ChatTest):
             self.begin(service, "another message", "req-0002")
         service.finish(self.s, job, service.run(job))
 
+    def test_a_retry_is_recognised_even_after_the_agent_key_changed(self):
+        # A refusal would tell the browser the message was never stored, and it would put it back in the box.
+        service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(ModelTurn("ok")))
+        job = self.begin(service)
+        service.finish(self.s, job, service.run(job))
+        self.s["agentConfigs"][0]["modelValidated"] = False
+        self.assertEqual(self.begin(service), {"duplicate": True, "agentId": "agent", "messageIndex": 0})
+        with self.assertRaisesRegex(ValueError, "Validate this agent's model key"):
+            self.begin(service, "Put $20 on Cleveland", "req-0002")
+
     def test_a_request_that_was_never_stored_runs_when_sent_again(self):
         service = AgentChat(self.workspace, self.governor, connect=ScriptedModel(ModelTurn("first"), ModelTurn("second")))
         running = service.begin(self.s, {"agent": "agent", "text": "first"})

@@ -114,6 +114,8 @@ export function Activity({workspace}) {
   const orders = pages.data ? pages.data.flatMap(p => p.orders) : null;
   const matching = pages.data?.[0].matching, total = pages.data?.[0].total ?? workspace.orderStats?.total ?? 0;
   const events = eventsWanted > EVENT_PAGE && older.data ? older.data.flatMap(p => p.events) : workspace.events || [];
+  // The state counts only the events it loaded (a Postgres workspace loads the newest 500); a page read counts all.
+  const eventTotal = (eventsWanted > EVENT_PAGE ? older.data?.[0].total : null) ?? workspace.eventCount ?? events.length;
   const error = summary.error || pages.error || older.error;
   const running = workspace.permissions?.automation !== false;
   const update = (key, value) => { setFilters(f => ({...f, [key]: value})); setWanted(PAGE); };
@@ -141,6 +143,6 @@ export function Activity({workspace}) {
       empty=${!orders ? 'Loading orders…' : total ? 'No orders match these filters.' : "No orders yet. Your agents' proposals will appear here."} />
     ${orders && matching > orders.length ? html`<button class="btn activity-more" disabled=${pages.loading} onClick=${() => setWanted(orders.length + PAGE)}>
       ${pages.loading ? 'Loading…' : `Show ${Math.min(PAGE, matching - orders.length)} more orders`}</button>` : null}
-    <${Events} events=${events} total=${workspace.eventCount ?? events.length} loading=${older.loading} more=${() => setEventsWanted(events.length + EVENT_PAGE)} />
+    <${Events} events=${events} total=${eventTotal} loading=${older.loading} more=${() => setEventsWanted(events.length + EVENT_PAGE)} />
   </div>`;
 }

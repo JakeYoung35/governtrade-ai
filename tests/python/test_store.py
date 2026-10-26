@@ -200,6 +200,21 @@ class StoreTests(unittest.TestCase):
    s=self.store.load();s['governorRequests'][0].update(status='decided',decision='rejected');self.store.save(s);self.store.save(s)
   loaded=self.reload();self.assertEqual(loaded,s);self.assertEqual(loaded['governorRequests'][0]['status'],'decided')
   self.assertEqual(self.count('governor_requests'),1)
+ def test_events_and_governor_records_past_the_state_windows(self):
+  # Activity and the order drawer read these through order_views.route() once the state's windows end.
+  from datetime import datetime,timedelta,timezone
+  from store import EVENT_LIMIT
+  s=self.workspace();start=datetime(2026,10,1,tzinfo=timezone.utc)
+  s['events']=[{'id':f'e{i:04d}','time':(start+timedelta(seconds=i)).isoformat(),'text':str(i),'kind':'UPDATED','trade':None}
+               for i in reversed(range(EVENT_LIMIT+5))]
+  with self.store.session():self.governor_batch(s);self.store.save(s)
+  with self.store.session():
+   events,total=self.store.events_page(EVENT_LIMIT,10)
+   self.assertEqual(([e['id'] for e in events],total),(['e0004','e0003','e0002','e0001','e0000'],EVENT_LIMIT+5))
+   requests,decisions=self.store.governor_records(['batch-1-0','missing'])
+   self.assertEqual([d['proposalId'] for d in decisions],['batch-1-0'])
+   self.assertEqual(decisions[0],next(d for d in s['governorDecisions'] if d['proposalId']=='batch-1-0'))
+   self.assertEqual(requests,[])
  def test_older_governor_request_is_found_for_retries(self):
   from governor_service import GovernorService
   s=self.workspace();g=s['agentConfigs'][0]['id']

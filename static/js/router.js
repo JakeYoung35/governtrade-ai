@@ -42,11 +42,13 @@ const ROUTES = [
 
 export function match(pathname) {
   const parts = pathname.replace(/\/+$/, '').split('/').filter(Boolean);
+  // A malformed escape (/agents/%E0%A4%A) is an unknown page, not a crash while rendering.
+  const decode = segment => { try { return decodeURIComponent(segment); } catch { return null; } };
   for (const [pattern, name] of ROUTES) {
     const want = pattern.split('/').filter(Boolean);
     if (want.length !== parts.length) continue;
     const params = {};
-    if (want.every((seg, i) => seg.startsWith(':') ? (params[seg.slice(1)] = decodeURIComponent(parts[i]), true) : seg === parts[i])) {
+    if (want.every((seg, i) => seg.startsWith(':') ? (params[seg.slice(1)] = decode(parts[i])) !== null : seg === parts[i])) {
       return {name, params};
     }
   }

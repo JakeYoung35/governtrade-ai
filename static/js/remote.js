@@ -47,7 +47,8 @@ export function useReads(urls, version) {
         remember(key, generation, data);
         if (live) setState({key, data, error: null});
       },
-      error => { if (live) setState(s => ({...s, key, error})); });
+      // Never pass off another set of URLs' answer as this one's: keep it only if it was for these URLs.
+      error => { if (live) setState(s => ({key, data: s.key === key ? s.data : remembered(key), error})); });
     return () => { live = false; };
   }, [key, version]);
   const current = state.key === key;

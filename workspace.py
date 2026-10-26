@@ -9,6 +9,7 @@ import order_views
 
 TRANSIENT_SYNC_GRACE_SECONDS=120  # how long a connected account rides out unanswered balance reads before showing an error
 BALANCE_RETRY_SECONDS=0.5
+STATE_REFRESH_SECONDS=30  # how old a balance attempt may be before a page's state read re-reads the venue
 LOOK_FOCI=('general','crypto','sports','politics','economics','culture')
 
 def validate_look(look):
@@ -25,6 +26,18 @@ class Workspace:
     def refresh(self,s,a,test=False):
         # test: the user's "Test connection" reports every failure as an error instead of riding out a transient one.
         b,failure=self.read_balance(a);return self.apply_balance(s,a,b,'refused' if test else failure)
+    def refresh_due(self,s,maxAge=0):
+        # Reads each Kalshi account whose last attempt is at least maxAge seconds old (0: every account).
+        # Returns whether any account was read, so a caller only saves when the state changed.
+        synced=False
+        for a in s['accounts']:
+            if a['venue']=='kalshi' and a['status'] not in ('disconnected','removed') and a.get('credentialRef') and self.sync_due(a,maxAge):self.refresh(s,a);synced=True
+        return synced
+    def sync_due(self,a,maxAge):
+        # Page polls read the state every few seconds; the window stops each poll from reaching the venue again.
+        last=a.get('syncAttemptedAt')
+        if last is None or maxAge<=0:return True
+        return (datetime.datetime.fromisoformat(now())-datetime.datetime.fromisoformat(last)).total_seconds()>=maxAge
     def read_balance(self,a):
         # Venue read only, no state changes, so the governor can fetch outside the workspace lock.
         # Returns (balance, None), or (None, failure) where failure is 'transient' (no answer, HTTP 429 or 5xx)
@@ -45,6 +58,7 @@ class Workspace:
             except (ValueError,KeyError,TypeError,ImportError):return None,'refused'
         return None,'transient'
     def apply_balance(self,s,a,b,failure='refused'):
+        a['syncAttemptedAt']=now()  # recorded for failures too, so an unreachable venue is not retried on every poll
         if b is None:
             # A connected account rides out transient failures for a short grace period, however many reads fail
             # in it: it stays connected, so agents can still propose, but the balance is marked stale, so every
@@ -99,9 +113,7 @@ class Workspace:
         a=next(x for x in s['accounts'] if x['id']==agent['accountId']);v=self.venue(a);m=v.get_quote(b['marketId'],b['direction']);o={'id':str(uuid.uuid4()),'agent':agent['id'],'accountId':a['id'],'market':m,'amount':round(amount,2),'direction':b['direction'],'request':b['reasoning'],'time':now(),'evaluations':[],'filled':False,**({'governedTerms':dict(governed)} if governed else {})};s['orders'].insert(0,o);s['keys'][scoped]=o['id'];return self.evaluate(s,o)
     def action(self,s,b):
         action=b['action'];s['clock']=now()
-        if action=='refresh':
-            for a in s['accounts']:
-                if a['venue']=='kalshi' and a['status'] not in ('disconnected','removed') and a.get('credentialRef'):self.refresh(s,a)
+        if action=='refresh':self.refresh_due(s)
         elif action=='account-save':
             kind=b.get('connectionType');environment={'kalshi-demo':'sandbox','kalshi-live':'live'}.get(kind)
             if not environment:raise ValueError('Choose Kalshi Demo or Kalshi Live.')

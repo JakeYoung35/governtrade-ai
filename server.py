@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlsplit,parse_qsl
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
 from engine import seed,main_seed,action,AGENTS,migrate
-from workspace import Workspace
+from workspace import Workspace,STATE_REFRESH_SECONDS
 from vault import Vault
 from store import PostgresStore
 from governor.records import compact_for_json
@@ -299,7 +299,7 @@ class Handler(SimpleHTTPRequestHandler):
         if order_views.route_path(urlsplit(self.path).path):
             # Pages of orders, events and Activity's counts (order_views.py): same-origin reads with no venue refresh.
             if not self.same_origin():return self.json(403,{'error':'Cross-origin access denied.'})
-            with locked('main'):s=read('main');status,body=order_views.route(s,governor().order_governors(s),self.path)
+            with locked('main'):s=read('main');status,body=order_views.route(s,governor().order_governors(s),self.path,active_store())
             return self.json(status,body)
         if self.path.startswith('/api/worker'):
             if not self.worker_ok():return self.json(403,{'error':'Worker access denied.'})
@@ -311,7 +311,7 @@ class Handler(SimpleHTTPRequestHandler):
             env='demo' if 'demo' in self.path else 'main'
             with locked(env):
                 s=read(env)
-                if env=='main':workspace().action(s,{'action':'refresh'});save(env,s)
+                if env=='main' and workspace().refresh_due(s,STATE_REFRESH_SECONDS):save(env,s)
                 self.json(200,self.response(env,s))
         elif app_route(self.path):
             # The front end routes in the browser (/agents, /rules, ...): every such path gets the app shell.

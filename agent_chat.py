@@ -156,19 +156,20 @@ class AgentChat:
         agent = next((a for a in s["agentConfigs"] if a["id"] == b.get("agent") and a.get("status") != "deleted"), None)
         if agent is None:
             raise ValueError("Choose an agent.")
-        free = agent.get("provider") == FREE_PROVIDER
-        if not agent.get("modelValidated") or not (free or agent.get("modelCredentialRef")):
-            raise ValueError("Validate this agent's model key before chatting.")
-        if free and not free_agent_key():
-            raise ValueError("The free agent is not available on this server right now. Edit the agent to use your own API key.")
         request_id = b.get("requestId")
         if request_id is not None and (not isinstance(request_id, str) or not REQUEST_ID.fullmatch(request_id)):
             raise ValueError("The message request ID is not valid. Reload the page and send it again.")
         known = next((r for r in s.get("chatRequests", {}).get(agent["id"], []) if r["id"] == request_id), None)
         if request_id is not None and known:
             # A retry of a message already stored (its response was lost): nothing new runs. Its reply is saved by the
-            # original turn, which keeps running on the server even when the browser disconnects.
+            # original turn, which keeps running on the server even when the browser disconnects. Checked before the
+            # agent's key, which may have changed since: a refusal here would tell the browser it was never stored.
             return {"duplicate": True, "agentId": agent["id"], "messageIndex": known["messageIndex"]}
+        free = agent.get("provider") == FREE_PROVIDER
+        if not agent.get("modelValidated") or not (free or agent.get("modelCredentialRef")):
+            raise ValueError("Validate this agent's model key before chatting.")
+        if free and not free_agent_key():
+            raise ValueError("The free agent is not available on this server right now. Edit the agent to use your own API key.")
         account = next(a for a in s["accounts"] if a["id"] == agent["accountId"])
         turn = str(uuid.uuid4())
         with self._lock:

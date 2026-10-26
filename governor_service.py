@@ -614,24 +614,9 @@ class GovernorService:
 
     @staticmethod
     def order_governors(s):
-        """Allowlisted public order details; never expose raw forecasts or batch inputs."""
-        requests, decisions = {}, {}
-        for r in s.get("governorRequests", []):
-            requests.setdefault(r["governorProposalId"], r)
-        for d in s.get("governorDecisions", []):
-            decisions.setdefault(d["proposalId"], d)
-        result = {}
-        for proposal_id in requests.keys() | decisions.keys():
-            proposal = requests.get(proposal_id, {}).get("proposal", {})
-            decision = decisions.get(proposal_id, {})
-            trace = decision.get("trace") or {}
-            result[proposal_id] = {
-                "maxBudgetUsd": proposal.get("requestedBudget"),
-                "estimatedYesProbability": proposal.get("estimatedYesProbability"),
-                **{k: decision.get(k) for k in ("decision", "approvedBudgetUsd", "contracts", "limitPrice",
-                                               "reasonCodes", "reliabilityScore")},
-                **{k: trace.get(k) for k in ("fullKelly", "targetStake", "headroom", "stakeLimit")}}
-        return result
+        """Allowlisted public order details for the governor records the state holds (order_views.governor_details)."""
+        from order_views import governor_details
+        return governor_details(s.get("governorRequests", []), s.get("governorDecisions", []))
 
     def summary(self, s):
         """Read model for the dashboard: small, with no batch inputs or decision traces."""
