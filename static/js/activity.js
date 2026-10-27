@@ -2,8 +2,9 @@
 // server (order_views.py), which has every order; the browser state carries only the newest.
 
 // Order statuses offered in the status filter, in the order a trade moves through them.
-export const STATUS_FILTERS = ['awaiting approval', 'submitted', 'submission unknown', 'resting', 'open', 'partially filled',
-  'filled', 'settled', 'blocked', 'denied', 'rejected', 'expired', 'cancelled'];
+// Only statuses the server assigns (see the test in tests/javascript/test_activity.mjs); an expired approval is 'cancelled'.
+export const STATUS_FILTERS = ['awaiting approval', 'submitted', 'submission unknown', 'open',
+  'filled', 'settled', 'blocked', 'denied', 'rejected', 'cancelled'];
 export const CATEGORIES = ['crypto', 'sports', 'economics', 'politics', 'culture', 'other'];
 export const DECISIONS = [['ALLOW', 'Allowed'], ['REQUIRE_APPROVAL', 'Needs approval'], ['BLOCK', 'Blocked']];
 

@@ -20,4 +20,10 @@ assert.deepEqual(pageUrls('/api/events', {}, 0), []);
 // The daily chart groups by the viewer's calendar days, so the browser names its IANA zone.
 assert.match(viewerTimeZone(), /^[A-Za-z_]+(\/[A-Za-z0-9_+-]+)*$/);
 assert.ok(STATUS_FILTERS.includes('awaiting approval'));
-console.log('Activity tests passed: paged reads, time zone');
+
+// Every status filter must be one the server assigns, or it filters to zero results. Mirrors the statuses set in
+// workspace.py (open and settled come from engine.py's demo simulator); governor_service.py only sets its own request statuses.
+const SERVER_ORDER_STATUSES = ['awaiting approval', 'blocked', 'submitted', 'submission unknown', 'rejected', 'filled',
+  'cancelled', 'denied', 'open', 'settled'];
+for (const status of STATUS_FILTERS) assert.ok(SERVER_ORDER_STATUSES.includes(status), `${status} is not a server status`);
+console.log('Activity tests passed: paged reads, time zone, status filters');
