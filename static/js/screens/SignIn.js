@@ -1,20 +1,15 @@
-// Full-page states before the workspace: loading, unavailable, and the three ways in (local, Google, Auth0).
+// Full-page states before the workspace: loading, unavailable, and the landing page with the three ways in (local, Google, Auth0).
 import {useEffect, useRef, useState} from 'preact/hooks';
 import {html} from '../html.js';
 import {Icon, BrandMark} from '../ui/icons.js';
 import {enterLocalWorkspace, googleCredential, initializeAuth, signinNotice} from '../api.js';
 import {setStore} from '../store.js';
+import {Landing} from './Landing.js';
 
 const Brand = () => html`<span class="brand"><${BrandMark} />GovernTrade<small>AI</small></span>`;
 
 function ErrorNote({message}) {
   return message ? html`<div class="notice notice-error" role="alert"><${Icon} name="alert" />${message}</div>` : null;
-}
-
-function Intro({lead}) {
-  return html`<${Brand} />
-    <h1>Your markets.<br />Your agents. Your rules.</h1>
-    <p class="lead">${lead}</p>`;
 }
 
 export function Loading() {
@@ -39,17 +34,17 @@ export function Unavailable({error}) {
   </div></div>`;
 }
 
-export function LocalEntry() {
+function LocalAction({size}) {
   const [entering, setEntering] = useState(false);
-  return html`<div class="solo"><div class="signin">
-    <${Intro} lead="Connect your Kalshi account, create agents and set the boundaries for every trade." />
-    <div class="actions">
-      <button class="btn btn-primary btn-lg btn-block" disabled=${entering} onClick=${() => { setEntering(true); enterLocalWorkspace(); }}>
-        ${entering ? html`<span class="spinner" aria-hidden="true"></span>Opening` : html`Enter local workspace<${Icon} name="arrow" />`}
-      </button>
-    </div>
-    <p class="fine">This app runs on this computer. It is not a hosted multi-user sign-in.</p>
-  </div></div>`;
+  return html`<button class=${'btn btn-primary btn-' + size} disabled=${entering} onClick=${() => { setEntering(true); enterLocalWorkspace(); }}>
+    ${entering ? html`<span class="spinner" aria-hidden="true"></span>Opening` : html`Enter local workspace<${Icon} name="arrow" />`}
+  </button>`;
+}
+
+export function LocalEntry() {
+  return html`<${Landing} action=${size => html`<${LocalAction} size=${size} />`} repeatable
+    lead="Hire a crew of AI agents to trade prediction markets. They pitch trades; the governor sizes every one and holds it to the limits you set."
+    fine="This app runs on this computer. It is not a hosted multi-user sign-in." />`;
 }
 
 function GoogleButton({config}) {
@@ -78,15 +73,12 @@ function GoogleButton({config}) {
 
 export function SignedOut({auth, error}) {
   const message = error || signinNotice();
-  const lead = 'Sign in to your personal trading workspace. Connect Kalshi, create agents and set the boundaries for every trade.';
-  return html`<div class="solo"><div class="signin">
-    <${Intro} lead=${lead} />
-    <div class="actions">
-      ${auth.mode === 'auth0'
-        ? html`<a class="btn btn-primary btn-lg btn-block" href=${auth.config.loginUrl} target="_self">Sign in<${Icon} name="arrow" /></a>`
-        : html`<${GoogleButton} config=${auth.config} />`}
-    </div>
-    <${ErrorNote} message=${message} />
-    <p class="fine">Your accounts, API keys, agents and trade history belong to your workspace. There is no shared website password.</p>
-  </div></div>`;
+  // Auth0 is a plain link and can appear more than once; Google's button mounts into a single slot.
+  const action = auth.mode === 'auth0'
+    ? size => html`<a class=${'btn btn-primary btn-' + size} href=${auth.config.loginUrl} target="_self">Sign in<${Icon} name="arrow" /></a>`
+    : () => html`<${GoogleButton} config=${auth.config} />`;
+  return html`<${Landing} action=${action} repeatable=${auth.mode === 'auth0'}
+    lead="Hire a crew of AI agents to trade prediction markets. Connect Kalshi, and the governor sizes every trade they pitch and holds it to the limits you set."
+    notice=${html`<${ErrorNote} message=${message} />`}
+    fine="Your accounts, API keys, agents and trade history belong to your workspace. There is no shared website password." />`;
 }
