@@ -154,8 +154,12 @@ class Handler(SimpleHTTPRequestHandler):
         worker_path=path in ('/api/worker','/api/governor/proposals','/api/governor/schema') or path.startswith('/api/governor/proposals/')
         if (worker_path and self.worker_ok()) or hosting.password_ok(self.headers.get('Authorization','')):return True
         self.send_response(401);self.send_header('WWW-Authenticate','Basic realm="GovernTrade private workspace", charset="UTF-8"');self.send_header('Cache-Control','no-store');self.send_header('Content-Length','0');self.end_headers();return False
+    def route_app_shell(self):
+        # Shared by GET and HEAD so a browser route answers the same way to both; a HEAD that skipped this would 404.
+        if app_route(self.path):
+            query=urlsplit(self.path).query;self.path='/'+('?'+query if query else '')
     def do_HEAD(self):
-        if self.entry_access():super().do_HEAD()
+        if self.entry_access():self.route_app_shell();super().do_HEAD()
     def json(self,code,p):
         raw=json.dumps(p,allow_nan=False).encode();self.send_response(code);self.send_header('Content-Type','application/json');self.send_header('Cache-Control','no-store');self.send_header('X-Content-Type-Options','nosniff')
         for cookie in self.auth_cookies:self.send_header('Set-Cookie',cookie)
@@ -316,10 +320,7 @@ class Handler(SimpleHTTPRequestHandler):
                     synced=workspace().refresh_due(s,STATE_REFRESH_SECONDS)
                     if expired or synced:save(env,s)
                 self.json(200,self.response(env,s))
-        elif app_route(self.path):
-            # The front end routes in the browser (/agents, /rules, ...): every such path gets the app shell.
-            query=urlsplit(self.path).query;self.path='/'+('?'+query if query else '');super().do_GET()
-        else:super().do_GET()
+        else:self.route_app_shell();super().do_GET()  # browser routes (/agents, /rules, ...) get the app shell
     def do_POST(self):
         if not self.entry_access():return
         return self.scoped(self.post_content)

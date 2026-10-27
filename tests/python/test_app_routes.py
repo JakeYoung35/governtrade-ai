@@ -23,6 +23,13 @@ class AppRouteTests(unittest.TestCase):
         r = conn.getresponse();body = r.read();conn.close()
         return r.status, r.getheader('Content-Type', ''), body
 
+    def head(self, path):
+        port = self.httpd.server_address[1]
+        conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+        conn.request('HEAD', path, headers={'Host': f'localhost:{port}'})
+        r = conn.getresponse();body = r.read();conn.close()
+        return r.status, r.getheader('Content-Type', ''), body
+
     def test_page_paths_get_the_app_shell(self):
         for path in ('/', '/agents', '/agents/3f2a', '/rules?from=setup', '/activity/', '/vendor', '/fonts/'):
             with self.subTest(path=path):
@@ -35,6 +42,17 @@ class AppRouteTests(unittest.TestCase):
         status, kind, body = self.get('/vendor/preact.module.js')
         self.assertEqual(status, 200);self.assertIn('javascript', kind);self.assertNotEqual(body, self.shell)
         self.assertEqual(self.get('/js/missing.js')[0], 404)
+
+    def test_head_matches_get_for_page_paths(self):
+        # Link checkers and prefetchers send HEAD; it must not 404 where GET returns the shell.
+        status, kind, body = self.head('/agents')
+        self.assertEqual(status, 200)
+        self.assertTrue(kind.startswith('text/html'))
+        self.assertEqual(body, b'')
+
+    def test_head_still_serves_files_and_404s_missing_ones(self):
+        self.assertEqual(self.head('/js/main.js')[0], 200)
+        self.assertEqual(self.head('/nope.txt')[0], 404)
 
     def test_api_paths_never_fall_back_to_the_shell(self):
         status, _, body = self.get('/api/unknown')
