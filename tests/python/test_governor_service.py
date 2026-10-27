@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from adapters import VenueError
-from engine import PERSONALITIES, main_seed
+from engine import main_seed
 from governor import api, records, rules
 from governor_service import GovernorService, utc_now
 from tests.python.test_engine import MANDATE, FakeVault, FakeVenue

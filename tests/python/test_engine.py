@@ -117,7 +117,7 @@ class FollowupTests(MainTests):
   self.assertEqual(self.proposal()['decision'],'BLOCK')
   with self.assertRaises(ValueError):self.w.action(self.s,{'action':'agent-status','id':'agent','status':'active'})
  def test_mandate_ceiling_and_worker_boundary(self):
-  with self.assertRaises(ValueError):validate_mandate({**PERSONALITIES['Moderate'],'dailyCap':101},100)
+  with self.assertRaises(ValueError):validate_mandate({'autoLimit':25,'dailyCap':101,'minimum':100,'newMarketApproval':False},100)
   with self.assertRaises(ValueError):self.w.proposal(self.s,{'agentId':'agent','marketId':'BTC','direction':'Yes','amount':10,'reasoning':'x','idempotencyKey':'x','mandate':{'dailyCap':999}})
  def test_kill_switch_pauses_every_agent(self):
   self.s['agentConfigs'].append({**self.g,'id':'other'})
