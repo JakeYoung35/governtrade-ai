@@ -311,7 +311,10 @@ class Handler(SimpleHTTPRequestHandler):
             env='demo' if 'demo' in self.path else 'main'
             with locked(env):
                 s=read(env)
-                if env=='main' and workspace().refresh_due(s,STATE_REFRESH_SECONDS):save(env,s)
+                if env=='main':
+                    expired=workspace().expire_approvals(s)
+                    synced=workspace().refresh_due(s,STATE_REFRESH_SECONDS)
+                    if expired or synced:save(env,s)
                 self.json(200,self.response(env,s))
         elif app_route(self.path):
             # The front end routes in the browser (/agents, /rules, ...): every such path gets the app shell.

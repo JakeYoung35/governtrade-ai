@@ -274,6 +274,41 @@ class StateRefreshTests(MainTests):
    self.assertEqual(reads.call_count,2)
  def test_disconnected_account_is_never_read(self):
   self.a['status']='disconnected';self.assertFalse(self.w.refresh_due(self.s))
+class ApprovalExpiryTests(MainTests):
+ DEADLINE='2026-10-11T12:00:00+00:00'
+ def at(self,clock):return patch('workspace.now',return_value=f'2026-10-11T{clock}+00:00')
+ def waiting(self,approve_by=DEADLINE,key='waiting'):
+  o={'id':key,'agent':'agent','accountId':'account','amount':10,'direction':'Yes','status':'awaiting approval','filled':False,'evaluations':[],'time':now(),'market':{'id':'BTC','price':.5}}
+  if approve_by:o['governedTerms']={'approveBy':approve_by}
+  self.s['orders'].insert(0,o);return o
+ def expired_events(self):return [e for e in self.s['events'] if e['kind']=='EXPIRED']
+ def test_expired_approval_is_cancelled_by_a_state_read(self):
+  o=self.waiting()
+  with self.at('12:00:01'):self.assertTrue(self.w.expire_approvals(self.s))
+  self.assertEqual(o['status'],'cancelled');self.assertEqual(len(self.expired_events()),1);self.assertEqual(self.v.calls,0)
+ def test_expiry_reports_no_change_when_nothing_expired(self):
+  self.waiting()
+  with self.at('12:00:01'):self.assertTrue(self.w.expire_approvals(self.s));self.assertFalse(self.w.expire_approvals(self.s))
+ def test_approval_exactly_at_the_deadline_stays_open(self):
+  o=self.waiting()
+  with self.at('12:00:00'):self.assertFalse(self.w.expire_approvals(self.s))
+  self.assertEqual(o['status'],'awaiting approval')
+ def test_approval_without_a_deadline_stays_open(self):
+  o=self.waiting(approve_by=None)
+  with self.at('18:00:00'):self.assertFalse(self.w.expire_approvals(self.s))
+  self.assertEqual(o['status'],'awaiting approval')
+ def test_deny_after_expiry_changes_nothing(self):
+  o=self.waiting()
+  with self.at('12:00:01'):self.w.action(self.s,{'action':'decision','id':'waiting','approve':False})
+  self.assertEqual(o['status'],'cancelled');self.assertFalse([e for e in self.s['events'] if e['kind']=='DENIED'])
+ def test_approve_after_expiry_never_trades(self):
+  o=self.waiting()
+  with self.at('12:00:01'):self.w.action(self.s,{'action':'decision','id':'waiting','approve':True})
+  self.assertEqual(o['status'],'cancelled');self.assertEqual(self.v.calls,0)
+ def test_expired_approval_leaves_the_waiting_count(self):
+  self.waiting()
+  with self.at('12:00:01'):self.w.expire_approvals(self.s)
+  state=self.w.public(self.s);self.assertEqual(state['orderStats']['awaiting'],0);self.assertEqual(state['pendingOrders'],[])
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
   v=KalshiAdapter({},subaccount=2);calls=[]

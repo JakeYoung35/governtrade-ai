@@ -33,6 +33,15 @@ class Workspace:
         for a in s['accounts']:
             if a['venue']=='kalshi' and a['status'] not in ('disconnected','removed') and a.get('credentialRef') and self.sync_due(a,maxAge):self.refresh(s,a);synced=True
         return synced
+    def expire_approvals(self,s):
+        # Runs on every state read as well as the decision, so an approval nobody answers still ends at its deadline
+        # and stops counting as waiting. No venue call. Returns whether anything changed, so a caller saves only then.
+        current=datetime.datetime.fromisoformat(now());expired=False
+        for o in s['orders']:
+            approve_by=(o.get('governedTerms') or {}).get('approveBy')
+            if o['status']=='awaiting approval' and approve_by and current>datetime.datetime.fromisoformat(approve_by):
+                o['status']='cancelled';event(s,'Approval window expired; the governor sized this trade for earlier market conditions.','EXPIRED',o['id']);expired=True
+        return expired
     def sync_due(self,a,maxAge):
         # Page polls read the state every few seconds; the window stops each poll from reaching the venue again.
         last=a.get('syncAttemptedAt')
@@ -113,7 +122,7 @@ class Workspace:
         a=next(x for x in s['accounts'] if x['id']==agent['accountId']);v=self.venue(a);m=v.get_quote(b['marketId'],b['direction']);o={'id':str(uuid.uuid4()),'agent':agent['id'],'accountId':a['id'],'market':m,'amount':round(amount,2),'direction':b['direction'],'request':b['reasoning'],'time':now(),'evaluations':[],'filled':False,**({'governedTerms':dict(governed)} if governed else {})};s['orders'].insert(0,o);s['keys'][scoped]=o['id'];return self.evaluate(s,o)
     def action(self,s,b):
         action=b['action'];s['clock']=now()
-        if action=='refresh':self.refresh_due(s)
+        if action=='refresh':self.refresh_due(s);self.expire_approvals(s)
         elif action=='account-save':
             kind=b.get('connectionType');environment={'kalshi-demo':'sandbox','kalshi-live':'live'}.get(kind)
             if not environment:raise ValueError('Choose Kalshi Demo or Kalshi Live.')
@@ -229,12 +238,9 @@ class Workspace:
             elif changed:event(s,f"Trading rules updated (version {s['rules']['version']}): {', '.join(changed)}.",'RULES')
             return {'version':s['rules']['version']}
         elif action=='decision':
+            self.expire_approvals(s)  # a late approval must not trade on sizing the governor made for earlier conditions
             o=next(x for x in s['orders'] if x['id']==b['id'])
             if o['status']!='awaiting approval':return o
-            approve_by=(o.get('governedTerms') or {}).get('approveBy')
-            if b['approve'] is True and approve_by and datetime.datetime.fromisoformat(now())>datetime.datetime.fromisoformat(approve_by):
-                # The governor's sizing is only valid for a limited time; a late approval must not trade on it.
-                o['status']='cancelled';event(s,'Approval window expired; the governor sized this trade for earlier market conditions.','EXPIRED',o['id']);return o
             if b['approve'] is True:return self.evaluate(s,o,True)
             o['status']='denied';event(s,'User denied exact proposal.','DENIED',o['id'])
         else:raise ValueError('Unsupported user action.')  # chat runs in agent_chat.py, outside the workspace lock
