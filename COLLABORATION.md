@@ -32,7 +32,6 @@ After merging, each collaborator switches to main and pulls. Refresh the preview
 ## Checks
 
 - `python3 -m unittest discover -s . -p 'test_*.py' -v` (Postgres store tests run only when `TEST_DATABASE_URL` is set; they use and drop a temporary schema)
-- `node --check static/app.js`
-- `node tests/javascript/test_chat_ui.js` and `node tests/javascript/test_free_agent_listing.js` (browser-free UI checks) if Node.js is installed.
+- `for f in tests/javascript/test_*.mjs; do node --experimental-loader ./tests/javascript/module-loader.mjs "$f"; done` (browser-free checks of the static/js modules) if Node.js is installed.
 
 Keep `.data/`, secrets and Python caches out of commits. The included .gitignore excludes the private encrypted credential store and account state and caches. Your local balance and trade records do not sync through GitHub.
