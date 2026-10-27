@@ -5,7 +5,7 @@ import json
 import unittest
 
 import order_views
-from order_views import counts, daily_outcomes, filter_orders, list_order, route, time_zone
+from order_views import counts, daily_outcomes, filter_orders, governor_details, list_order, route, time_zone
 from tests.python.test_governor_service import ServiceTest
 
 UTC = dt.timezone.utc
@@ -220,6 +220,35 @@ class RouteTests(unittest.TestCase):
         drawer = route(self.s, recent, f"/api/orders/{self.s['orders'][0]['id']}", history)[1]['order']
         self.assertEqual(drawer['governor']['approvedBudgetUsd'], '40')
         self.assertNotIn('governor', route(self.s, recent, '/api/orders')[1]['orders'][0])  # a JSON workspace has no history
+
+    def test_a_database_fills_in_a_governor_the_state_holds_only_half_of(self):
+        """Requests and decisions load in separate windows, so the state can hold a delayed proposal's recent
+        decision without its older request (or the reverse); the database supplies the missing half."""
+        class History:
+            def __init__(self):
+                self.asked = []
+
+            def governor_records(self, proposal_ids):
+                self.asked.append(proposal_ids)
+                return ([{'governorProposalId': p, 'proposal': {'requestedBudget': '100', 'estimatedYesProbability': '0.6'}}
+                         for p in proposal_ids],
+                        [{'proposalId': p, 'decision': 'resized', 'approvedBudgetUsd': '40'} for p in proposal_ids])
+        history = History()
+        for o, proposal_id in zip(self.s['orders'], ('no-request', 'no-decision', 'whole')):
+            o['governorProposalId'] = proposal_id
+        loaded = governor_details(
+            [{'governorProposalId': p, 'proposal': {'requestedBudget': '100', 'estimatedYesProbability': '0.6'}}
+             for p in ('no-decision', 'whole')],
+            [{'proposalId': p, 'decision': 'resized', 'approvedBudgetUsd': '40'} for p in ('no-request', 'whole')])
+        self.assertIsNone(loaded['no-request']['maxBudgetUsd'])
+        for proposal_id in ('no-request', 'no-decision'):
+            drawer = route(self.s, loaded, f"/api/orders/{next(o['id'] for o in self.s['orders'] if o['governorProposalId'] == proposal_id)}", history)
+            governor = drawer[1]['order']['governor']
+            self.assertEqual((governor['maxBudgetUsd'], governor['estimatedYesProbability'], governor['decision'],
+                              governor['approvedBudgetUsd']), ('100', '0.6', 'resized', '40'))
+        self.assertEqual(history.asked, [['no-request'], ['no-decision']])
+        route(self.s, loaded, '/api/orders', history)
+        self.assertEqual(history.asked[-1], ['no-decision', 'no-request'])  # never the whole one
 
 
 class StateWindowTests(ServiceTest):

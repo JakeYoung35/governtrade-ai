@@ -216,14 +216,27 @@ def governor_details(requests, decisions):
     return result
 
 
+def partial_governor(governor):
+    """Whether either of a governor's records is missing from the state. Requests and decisions are loaded in
+    separate windows (by received and decided time), so a delayed proposal can have one without the other. An
+    order exists only after its decision, so its request and decision are both stored."""
+    return governor is None or governor.get('maxBudgetUsd') is None or governor.get('decision') is None
+
+
 def with_older_governors(governors, orders, history):
-    """`governors` plus the details of any of `orders` whose governor records are older than the state's windows.
-    Only a database keeps those (history, see route()); without one they are gone and the order shows none."""
+    """`governors` plus the details of any of `orders` whose governor records, or one of them, are older than the
+    state's windows. Only a database keeps those (history, see route()); without one they are gone and the order
+    shows what the state has."""
     missing = sorted({o['governorProposalId'] for o in orders
-                      if o.get('governorProposalId') and o['governorProposalId'] not in governors})
+                      if o.get('governorProposalId') and partial_governor(governors.get(o['governorProposalId']))})
     if history is None or not missing:
         return governors
-    return {**governors, **governor_details(*history.governor_records(missing))}
+    older = governor_details(*history.governor_records(missing))
+    merged = dict(governors)
+    for proposal_id, details in older.items():
+        loaded = governors.get(proposal_id) or {}
+        merged[proposal_id] = {**details, **{k: v for k, v in loaded.items() if v is not None}}
+    return merged
 
 
 def route(s, governors, path, history=None):
