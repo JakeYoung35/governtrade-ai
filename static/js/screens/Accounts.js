@@ -5,7 +5,7 @@ import {html} from '../html.js';
 import {Icon} from '../ui/icons.js';
 import {Dialog} from '../ui/Dialog.js';
 import {action} from '../api.js';
-import {useStore, setStore} from '../store.js';
+import {useStore, getStore, setStore} from '../store.js';
 import {money, when, accountValue} from '../format.js';
 
 const KEY_PAGES = {'kalshi-demo': 'https://demo.kalshi.co/', 'kalshi-live': 'https://kalshi.com/account/profile'};
@@ -47,7 +47,12 @@ function AccountCard({account, open}) {
     setTesting(true);
     try {
       await action('account-test', {id: account.id});
-      setStore({toast: `${account.name} is connected.`});
+      // A refused or unreachable balance read still answers 200: the server records it on the account instead,
+      // so only a fresh balance on a connected account counts as a passed test.
+      const tested = getStore().workspace?.accounts?.find(a => a.id === account.id);
+      if (!tested) return;
+      if (tested.status === 'connected' && !tested.stale) setStore({toast: `${account.name} is connected.`});
+      else if (!tested.error) setError('Kalshi did not confirm the connection. Check the keys and try again.');
     } catch (err) {
       setError(err.message);
     } finally {
