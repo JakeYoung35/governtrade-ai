@@ -578,6 +578,46 @@ class GovernorService:
             return self.reset_breaker(s, b["accountId"], b["reason"])
         raise ValueError("Unsupported governor action.")
 
+    def account_summary(self, s, account, now=None):
+        """Read-only dashboard figures, sharing the governor's exposure and loss-limit math."""
+        from engine import usage, ceiling
+        from governor.breaker import BreakerState
+        now = now or self.clock()
+        policy = self.policy_for(s)
+        balance = account.get("balance")
+        raw = s.get("governor", {}).get("breakers", {}).get(account["id"])
+        breaker = BreakerState.from_dict(raw) if raw else BreakerState()
+        result = {"accountValue": None, "spentToday": usage({**s, "clock": now.isoformat()}, account["id"])["daily"],
+                  "dailyCap": None, "atRisk": None, "exposureCap": None, "lossHeadroom": None,
+                  "breakerLatched": breaker.latched, "stale": bool(account.get("stale"))}
+        if balance is None:
+            return result
+        equity = _equity(balance)
+        # Use the balance timestamp as the cutoff for executions it may not yet include.
+        try:
+            started = dt.datetime.fromisoformat(balance["asOf"])
+        except (KeyError, TypeError, ValueError):
+            started = now
+        in_flight = self._in_flight(s, account, started, None, balance)
+        exposures = self._exposures(s, account, balance, SimpleNamespace(books={}), now, in_flight)
+        result.update(accountValue=float(equity), dailyCap=ceiling(s, account)["dailyCap"],
+                      atRisk=float(sum((e.amount for e in exposures), ZERO)))
+        if policy:
+            baseline = account.get("baseline") or {}
+            day_open = baseline.get("equity") if baseline.get("day") == now.date().isoformat() else None
+            checked = check(breaker, equity=equity, day_open_equity=day_open, now=now, policy=policy)
+            result.update(exposureCap=float(equity * policy.total_cap),
+                          lossHeadroom=0 if checked.state.latched else
+                          (None if checked.threshold is None else float(max(ZERO, equity - checked.threshold))),
+                          breakerLatched=checked.state.latched)
+        return result
+
+    @staticmethod
+    def order_governors(s):
+        """Allowlisted public order details for the governor records the state holds (order_views.governor_details)."""
+        from order_views import governor_details
+        return governor_details(s.get("governorRequests", []), s.get("governorDecisions", []))
+
     def summary(self, s):
         """Read model for the dashboard: small, with no batch inputs or decision traces."""
         policy = self.policy_for(s)

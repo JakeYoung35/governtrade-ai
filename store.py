@@ -148,6 +148,20 @@ class PostgresStore:
         with self.connection() as conn:
             row=conn.execute('SELECT payload FROM governor_requests WHERE agent_id=%s AND proposal_id=%s',(agent_id,proposal_id)).fetchone()
         return row and row['payload']
+    def events_page(self,offset,limit):
+        """A page of every stored event, newest first, and how many there are: the state loads only EVENT_LIMIT."""
+        with self.connection() as conn:
+            rows=conn.execute('SELECT * FROM events ORDER BY time DESC,seq DESC OFFSET %s LIMIT %s',(offset,limit))
+            events=[{'id':r['id'],'time':iso(r['time']),'text':r['text'],'kind':r['kind'],'trade':r['order_id']} for r in rows]
+            return events,conn.execute('SELECT count(*) AS n FROM events').fetchone()['n']
+    def governor_records(self,proposal_ids):
+        """Governed requests and decisions by governor proposal ID, shaped as in the state, for orders older than
+        its windows (REQUEST_WINDOW, DECISION_WINDOW)."""
+        with self.connection() as conn:
+            requests=[r['payload'] for r in conn.execute('SELECT payload FROM governor_requests WHERE governor_proposal_id=ANY(%s::text[])',(proposal_ids,))]
+            decisions=[{**r['payload'],'batchId':r['batch_id'],'accountId':r['account_id'],'decidedAt':iso(r['decided_at'])}
+                for r in conn.execute('SELECT payload,batch_id,account_id,decided_at FROM governor_decisions WHERE proposal_id=ANY(%s::text[])',(proposal_ids,))]
+        return requests,decisions
     def signatures(self,s):
         seen={'settings':signature(self.settings(s)),'events':{e['id'] for e in s['events']},'keys':set(s['keys']),
               'governorBatches':{b['id'] for b in s.get('governorBatches',[])},'governorDecisions':{d['proposalId'] for d in s.get('governorDecisions',[])},

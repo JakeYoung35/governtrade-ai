@@ -3,7 +3,7 @@ from unittest.mock import patch
 from pathlib import Path
 from engine import *
 from adapters import KalshiAdapter,VenueError,now
-from workspace import Workspace
+from workspace import Workspace,STATE_REFRESH_SECONDS
 from vault import Vault
 import trading_rules
 class GovernanceTests(unittest.TestCase):
@@ -244,6 +244,85 @@ class FollowupTests(MainTests):
   self.remove_account()
   with self.assertRaisesRegex(ValueError,'was removed'):self.w.action(self.s,{'action':'account-test','id':'account'})
 
+class StateRefreshTests(MainTests):
+ def at(self,clock):return patch('workspace.now',return_value=f'2026-10-11T{clock}+00:00')
+ def reads(self):return patch.object(self.v,'get_balance_positions',wraps=self.v.get_balance_positions)
+ def test_polls_inside_the_window_do_not_read_the_venue_or_save(self):
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.assertTrue(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   for clock in ['12:00:03','12:00:15','12:00:29']:
+    with self.at(clock):self.assertFalse(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   self.assertEqual(reads.call_count,1)
+   with self.at('12:00:30'):self.assertTrue(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   self.assertEqual(reads.call_count,2)
+ def test_failing_account_is_retried_once_per_window(self):
+  self.v.fail_with=VenueError('kalshi request failed.',transient=True,timed_out=True)
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.w.refresh_due(self.s,STATE_REFRESH_SECONDS)
+   with self.at('12:00:10'):self.w.refresh_due(self.s,STATE_REFRESH_SECONDS)
+   self.assertEqual(reads.call_count,1);self.assertEqual(self.a['status'],'connected');self.assertTrue(self.a['stale'])
+ def test_explicit_refresh_is_never_throttled(self):
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.w.refresh_due(self.s,STATE_REFRESH_SECONDS)
+   with self.at('12:00:03'):self.w.action(self.s,{'action':'refresh'});self.w.action(self.s,{'action':'refresh'})
+   self.assertEqual(reads.call_count,3)
+ def test_account_refreshed_by_an_action_starts_a_new_window(self):
+  with self.reads() as reads:
+   with self.at('12:00:00'):self.w.action(self.s,{'action':'refresh'})
+   with self.at('12:00:20'):self.w.action(self.s,{'action':'account-test','id':'account'})
+   with self.at('12:00:25'):self.assertFalse(self.w.refresh_due(self.s,STATE_REFRESH_SECONDS))
+   self.assertEqual(reads.call_count,2)
+ def test_disconnected_account_is_never_read(self):
+  self.a['status']='disconnected';self.assertFalse(self.w.refresh_due(self.s))
+class ApprovalExpiryTests(MainTests):
+ DEADLINE='2026-10-11T12:00:00+00:00'
+ def at(self,clock):return patch('workspace.now',return_value=f'2026-10-11T{clock}+00:00')
+ def waiting(self,approve_by=DEADLINE,key='waiting'):
+  o={'id':key,'agent':'agent','accountId':'account','amount':10,'direction':'Yes','status':'awaiting approval','filled':False,'evaluations':[],'time':now(),'market':{'id':'BTC','price':.5}}
+  if approve_by:o['governedTerms']={'approveBy':approve_by}
+  self.s['orders'].insert(0,o);return o
+ def expired_events(self):return [e for e in self.s['events'] if e['kind']=='EXPIRED']
+ def test_expired_approval_is_cancelled_by_a_state_read(self):
+  o=self.waiting()
+  with self.at('12:00:01'):self.assertTrue(self.w.expire_approvals(self.s))
+  self.assertEqual(o['status'],'cancelled');self.assertEqual(len(self.expired_events()),1);self.assertEqual(self.v.calls,0)
+ def test_expiry_reports_no_change_when_nothing_expired(self):
+  self.waiting()
+  with self.at('12:00:01'):self.assertTrue(self.w.expire_approvals(self.s));self.assertFalse(self.w.expire_approvals(self.s))
+ def test_approval_exactly_at_the_deadline_stays_open(self):
+  o=self.waiting()
+  with self.at('12:00:00'):self.assertFalse(self.w.expire_approvals(self.s))
+  self.assertEqual(o['status'],'awaiting approval')
+ def test_approval_without_a_deadline_stays_open(self):
+  o=self.waiting(approve_by=None)
+  with self.at('18:00:00'):self.assertFalse(self.w.expire_approvals(self.s))
+  self.assertEqual(o['status'],'awaiting approval')
+ def test_deny_after_expiry_changes_nothing(self):
+  o=self.waiting()
+  with self.at('12:00:01'):self.w.action(self.s,{'action':'decision','id':'waiting','approve':False})
+  self.assertEqual(o['status'],'cancelled');self.assertFalse([e for e in self.s['events'] if e['kind']=='DENIED'])
+ def test_approve_after_expiry_never_trades(self):
+  o=self.waiting()
+  with self.at('12:00:01'):self.w.action(self.s,{'action':'decision','id':'waiting','approve':True})
+  self.assertEqual(o['status'],'cancelled');self.assertEqual(self.v.calls,0)
+ def test_expired_approval_leaves_the_waiting_count(self):
+  self.waiting()
+  with self.at('12:00:01'):self.w.expire_approvals(self.s)
+  state=self.w.public(self.s);self.assertEqual(state['orderStats']['awaiting'],0);self.assertEqual(state['pendingOrders'],[])
+class StateReadClockTests(ApprovalExpiryTests):
+ def test_state_read_moves_usage_to_the_new_day(self):
+  o=self.waiting();o.update(status='filled',committed=True,time='2026-10-10T23:50:00+00:00');self.s['clock']='2026-10-10T23:55:00+00:00'
+  self.assertEqual(self.w.public(self.s)['agentConfigs'][0]['usage']['daily'],10)
+  with patch('workspace.now',return_value='2026-10-11T00:00:05+00:00'):self.w.read_state(self.s)
+  self.assertEqual(self.s['clock'],'2026-10-11T00:00:05+00:00');self.assertEqual(self.w.public(self.s)['agentConfigs'][0]['usage']['daily'],0)
+ def test_expiry_event_has_the_time_of_the_read(self):
+  self.waiting();self.s['clock']='2026-10-11T09:00:00+00:00'
+  with self.at('12:00:01'):self.assertTrue(self.w.read_state(self.s))
+  self.assertEqual(self.expired_events()[0]['time'],'2026-10-11T12:00:01+00:00')
+ def test_a_read_that_only_moves_the_clock_does_not_save(self):
+  with self.at('12:00:00'):self.assertTrue(self.w.read_state(self.s))
+  with self.at('12:00:05'):self.assertFalse(self.w.read_state(self.s))
+  self.assertEqual(self.s['clock'],'2026-10-11T12:00:05+00:00')
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
   v=KalshiAdapter({},subaccount=2);calls=[]

@@ -1,0 +1,61 @@
+/* Agent creatures: moods and their motion (signed off in the creature lab). Reduced motion leaves static poses. */
+
+.creature{display:inline-block;flex:none;line-height:0;vertical-align:middle}
+.cr{display:block;overflow:visible}
+.cr[data-poke]{cursor:pointer;-webkit-tap-highlight-color:transparent}
+.cr .wig,.cr .rig,.cr .body{transform-box:fill-box;transform-origin:50% 100%}
+.cr .pupil{transform:translate(calc(var(--px,0px) + var(--lx,0) * 3.4px),calc(var(--py,0px) + var(--ly,0) * 2.8px));transition:transform .14s var(--ease-out)}
+.cr .ticket{opacity:0;transform-box:fill-box;transform-origin:50% 50%}
+.cr .zz text{opacity:0;font:700 9px var(--font-sans);fill:var(--ink)}
+
+/* Loops */
+.cr.m-idle .body,.cr.m-proposed .body,.cr.m-filled .body,.cr.m-trimmed .body{animation:cr-breathe 3.6s ease-in-out infinite}
+.cr .lid{animation:cr-blink 5.4s infinite var(--bd,0s)}
+@keyframes cr-breathe{50%{transform:scale(1.015,1.03)}}
+@keyframes cr-blink{0%,93%,100%{transform:none}96%{transform:translateY(var(--bdy,12px))}}
+
+.cr.m-thinking .body{animation:cr-sway 2.6s ease-in-out infinite}
+.cr .tdot{animation:cr-dot 1.2s ease-in-out infinite}
+.cr .tdot:nth-child(2){animation-delay:.18s}
+.cr .tdot:nth-child(3){animation-delay:.36s}
+@keyframes cr-sway{25%{transform:rotate(-2.5deg)}75%{transform:rotate(2.5deg)}}
+@keyframes cr-dot{0%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-2px)}}
+
+.cr.m-waiting .body{animation:cr-fidget 2.2s ease-in-out infinite}
+@keyframes cr-fidget{0%,100%{transform:none}8%{transform:scale(1.02,.97)}16%{transform:none}24%{transform:scale(1.02,.97)}32%{transform:none}}
+
+.cr.m-blocked .body{transform:scale(1.03,.94);animation:cr-droop 4.8s ease-in-out infinite}
+@keyframes cr-droop{0%,100%{transform:scale(1.03,.94)}50%{transform:scale(1.035,.955)}}
+
+.cr.m-paused .body{animation:cr-breathe 5.2s ease-in-out infinite}
+.cr .zz text{animation:cr-z 3.6s ease-out infinite}
+.cr .zz text:nth-child(2){animation-delay:1.2s}
+.cr .zz text:nth-child(3){animation-delay:2.4s}
+@keyframes cr-z{0%{opacity:0;transform:translate(0,0) scale(.7)}20%{opacity:.75}100%{opacity:0;transform:translate(9px,-16px) scale(1.15)}}
+
+.cr.m-offline .body{animation:cr-woozy 3.2s ease-in-out infinite}
+.cr .orbit{animation:cr-spin 2.6s linear infinite}
+.cr .swirl{animation:cr-spin 1.8s linear infinite;transform-box:fill-box;transform-origin:50% 50%}
+.cr .coin{transform-box:fill-box;transform-origin:50% 50%;animation:cr-coin 2.4s ease-in-out infinite}
+@keyframes cr-woozy{25%{transform:rotate(-4deg) translateX(-1px)}75%{transform:rotate(4deg) translateX(1px)}}
+@keyframes cr-spin{to{transform:rotate(360deg)}}
+@keyframes cr-coin{0%,40%,100%{transform:scaleX(1)}55%{transform:scaleX(.15)}70%{transform:scaleX(1)}}
+
+/* One-shots, started by adding .play (motion.js) */
+.cr.m-proposed.play .rig{animation:cr-lean .75s var(--ease-out)}
+.cr.m-proposed.play .ticket{animation:cr-ticket .95s .08s var(--ease-out)}
+@keyframes cr-lean{30%{transform:rotate(8deg) translateX(1.5px)}100%{transform:none}}
+@keyframes cr-ticket{0%{opacity:0;transform:translate(-8px,6px) scale(.6)}25%{opacity:1}100%{opacity:0;transform:translate(26px,-12px) scale(1) rotate(8deg)}}
+.cr.m-filled.play .rig{animation:cr-hop .74s cubic-bezier(.3,.7,.3,1)}
+.cr.m-filled.play .shadow{animation:cr-shadow .74s cubic-bezier(.3,.7,.3,1);transform-box:fill-box;transform-origin:50% 50%}
+@keyframes cr-hop{0%{transform:none}14%{transform:translateY(2px) scale(1.14,.82)}40%{transform:translateY(-18px) scale(.9,1.12)}66%{transform:translateY(0) scale(1.12,.86)}80%{transform:scale(.97,1.04)}100%{transform:none}}
+@keyframes cr-shadow{44%{transform:scale(.6);opacity:.5}}
+.cr.live.m-filled.play .rig,.cr.live.m-filled.play .shadow{animation:none}  /* no celebrating real money */
+.cr.m-trimmed.play .body{animation:cr-shrug .62s var(--ease-out)}
+@keyframes cr-shrug{25%{transform:scale(1.1,.86)}55%{transform:translateY(-4px) scale(.95,1.08)}100%{transform:none}}
+
+@media (prefers-reduced-motion:reduce){
+  .cr,.cr *{animation:none!important;transition:none!important}
+  .cr .zz text{opacity:.55}
+  .cr .tdot{opacity:.7}
+}

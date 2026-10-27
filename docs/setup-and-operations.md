@@ -5,7 +5,7 @@ Technical setup for running GovernTrade AI locally. For a product overview, see 
 ## Requirements
 
 - Python 3.12 or later
-- Node.js (optional, only for `node --check` syntax checks)
+- Node.js (optional, only for the browser-free JavaScript tests)
 
 ## Run locally
 
@@ -96,7 +96,7 @@ Never commit the connection string or put it in a plaintext `.env` file. Existin
 ## Verification
 
     python -m unittest discover -s . -p "test_*.py" -v
-    node --check static/app.js
+    for f in tests/javascript/test_*.mjs; do node --experimental-loader ./tests/javascript/module-loader.mjs "$f"; done
 
 On macOS and Linux, `python3` also works. Database tests are skipped unless Postgres is configured.
 

@@ -190,7 +190,7 @@ class GoogleSignInTests(HostedServerTest):
 
     def test_assets_are_served_without_a_session_lookup(self):
         with patch.object(auth.AuthStore, 'session', return_value=None) as lookup:
-            self.assertEqual(self.call('GET', '/app.js')[0], 200)
+            self.assertEqual(self.call('GET', '/js/main.js')[0], 200)
             self.assertEqual(self.call('HEAD', '/')[0], 200)
             self.assertEqual(lookup.call_count, 0)
             self.assertEqual(self.call('GET', '/api/state?main')[0], 401)

@@ -1,0 +1,53 @@
+import assert from 'node:assert/strict';
+import {getStore, setStore, resetStore} from '../../static/js/store.js';
+import {pollWorkspace, action, signOut} from '../../static/js/api.js';
+globalThis.document = {visibilityState: 'visible'};
+globalThis.location = {hostname: 'localhost'};
+globalThis.sessionStorage = {removeItem() {}};
+const state = {orders: [], accounts: []};
+const response = (data, status = 200) => ({ok: status === 200, status, json: async () => data});
+const ready = () => resetStore({phase:'ready', workspace:state, auth:{mode:'local'}});
+ready();
+let calls = 0;
+globalThis.fetch = async () => { calls++; return response({state, csrf:'test'}); };
+await pollWorkspace(); assert.equal(getStore().workspace, state); // no identical update
+setStore({busy:true}); await pollWorkspace(); assert.equal(calls,1);
+setStore({busy:false});
+let answer;
+globalThis.fetch = () => new Promise(resolve => {answer = resolve;});
+const pending = pollWorkspace();
+const newer = {...state, orders:[{id:'new',agent:'a'}]};
+setStore({workspace:newer}); answer(response({state})); await pending;
+assert.equal(getStore().workspace,newer); // cannot overwrite a newer action
+ready();
+const oldUser = pollWorkspace(); await signOut(); answer(response({state:newer})); await oldUser;
+assert.equal(getStore().workspace,null); assert.equal(getStore().phase,'local-entry');
+ready();
+globalThis.fetch = async url => url === '/api/auth' ? response({mode:'google',user:null,csrf:'new'}) : response({},401);
+await pollWorkspace(); assert.equal(getStore().phase,'signed-out'); assert.equal(getStore().workspace,null);
+ready();
+globalThis.fetch = async () => response({state:newer,csrf:'test'});
+document.visibilityState = 'hidden'; await pollWorkspace(); assert.equal(getStore().workspace,state);
+document.visibilityState = 'visible';
+globalThis.fetch = async () => response({error:'Unable to save'},400);
+await assert.rejects(action('decision',{id:'x',approve:false}),/Unable to save/);
+assert.equal(getStore().busy,false);
+const down = () => { throw new TypeError('fetch failed'); };
+ready();
+globalThis.fetch = down; await pollWorkspace();
+assert.match(getStore().error,/Could not reach GovernTrade/); assert.equal(getStore().errorSource,'poll');
+globalThis.fetch = async () => response({state:newer,csrf:'test'}); await pollWorkspace();
+assert.equal(getStore().error,''); assert.equal(getStore().errorSource,''); assert.equal(getStore().workspace,newer); // poll error clears
+ready();
+globalThis.fetch = down; await pollWorkspace();
+setStore({error:'Unable to save', errorSource:'action'});
+globalThis.fetch = async () => response({state,csrf:'test'}); await pollWorkspace();
+assert.equal(getStore().error,'Unable to save'); assert.equal(getStore().errorSource,'action'); // action error survives a good poll
+globalThis.fetch = down; await pollWorkspace();
+globalThis.fetch = async () => response({state,csrf:'test'}); await pollWorkspace();
+assert.equal(getStore().error,'Unable to save'); assert.equal(getStore().errorSource,'action'); // and a failed poll in between
+ready();
+globalThis.fetch = down; await pollWorkspace();
+globalThis.fetch = async () => response({state,csrf:'test'}); await pollWorkspace(); // unchanged state still clears
+assert.equal(getStore().error,''); assert.equal(getStore().errorSource,''); assert.equal(getStore().workspace,state);
+console.log('Polling tests passed: unchanged, busy, action race, sign-out, 401, hidden, action error, poll error clears, action error kept');

@@ -3,3 +3,4 @@ keyring>=25,<26
 psycopg[binary]>=3.2,<4
 google-auth[requests]>=2.40,<3
 PyJWT>=2.8,<3
+tzdata>=2024.1  # time zones for Activity's daily chart where the host has no system zone files

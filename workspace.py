@@ -1,13 +1,24 @@
 """User management and the narrow, governed agent integration boundary."""
-import copy, datetime, math, time, uuid
+import copy, datetime, math, re, time, uuid
 from adapters import adapter,ADAPTERS,VenueError,now
 from engine import main_seed,checks,event,rules,validate_permissions,validate_mandate,ceiling
 import trading_rules
 from vault import masks
 from providers import validate_model_key,validate_free_agent,catalog,FREE_PROVIDER
+import order_views
 
 TRANSIENT_SYNC_GRACE_SECONDS=120  # how long a connected account rides out unanswered balance reads before showing an error
 BALANCE_RETRY_SECONDS=0.5
+STATE_REFRESH_SECONDS=30  # how old a balance attempt may be before a page's state read re-reads the venue
+LOOK_FOCI=('general','crypto','sports','politics','economics','culture')
+
+def validate_look(look):
+    """An agent's creature: a seed the front end draws it from, and the market focus that picks its accessory.
+    It is cosmetic; nothing in governance reads it."""
+    if not isinstance(look,dict) or set(look)!={'seed','focus'}:raise ValueError('An agent look needs a seed and a market focus.')
+    if not isinstance(look['seed'],str) or not re.fullmatch(r'[a-z0-9]{6,12}',look['seed']):raise ValueError('The agent look seed must be 6 to 12 lowercase letters or digits.')
+    if look['focus'] not in LOOK_FOCI:raise ValueError('Choose a market focus: '+', '.join(LOOK_FOCI)+'.')
+    return {'seed':look['seed'],'focus':look['focus']}
 
 class Workspace:
     def __init__(self,vault,persist=lambda s:None):self.vault=vault;self.persist=persist
@@ -15,6 +26,35 @@ class Workspace:
     def refresh(self,s,a,test=False):
         # test: the user's "Test connection" reports every failure as an error instead of riding out a transient one.
         b,failure=self.read_balance(a);return self.apply_balance(s,a,b,'refused' if test else failure)
+    def refresh_due(self,s,maxAge=0):
+        # Reads each Kalshi account whose last attempt is at least maxAge seconds old (0: every account).
+        # Returns whether any account was read, so a caller only saves when the state changed.
+        synced=False
+        for a in s['accounts']:
+            if a['venue']=='kalshi' and a['status'] not in ('disconnected','removed') and a.get('credentialRef') and self.sync_due(a,maxAge):self.refresh(s,a);synced=True
+        return synced
+    def read_state(self,s):
+        # A page's poll of the main state. It moves the clock first: no action runs between polls, and today's usage
+        # and the time of an expiry event both come from s['clock']. Returns whether to save; a clock that only moved
+        # is not worth a save, since every read sets it again.
+        s['clock']=now()
+        expired=self.expire_approvals(s)
+        synced=self.refresh_due(s,STATE_REFRESH_SECONDS)
+        return expired or synced
+    def expire_approvals(self,s):
+        # Runs on every state read as well as the decision, so an approval nobody answers still ends at its deadline
+        # and stops counting as waiting. No venue call. Returns whether anything changed, so a caller saves only then.
+        current=datetime.datetime.fromisoformat(now());expired=False
+        for o in s['orders']:
+            approve_by=(o.get('governedTerms') or {}).get('approveBy')
+            if o['status']=='awaiting approval' and approve_by and current>datetime.datetime.fromisoformat(approve_by):
+                o['status']='cancelled';event(s,'Approval window expired; the governor sized this trade for earlier market conditions.','EXPIRED',o['id']);expired=True
+        return expired
+    def sync_due(self,a,maxAge):
+        # Page polls read the state every few seconds; the window stops each poll from reaching the venue again.
+        last=a.get('syncAttemptedAt')
+        if last is None or maxAge<=0:return True
+        return (datetime.datetime.fromisoformat(now())-datetime.datetime.fromisoformat(last)).total_seconds()>=maxAge
     def read_balance(self,a):
         # Venue read only, no state changes, so the governor can fetch outside the workspace lock.
         # Returns (balance, None), or (None, failure) where failure is 'transient' (no answer, HTTP 429 or 5xx)
@@ -35,6 +75,7 @@ class Workspace:
             except (ValueError,KeyError,TypeError,ImportError):return None,'refused'
         return None,'transient'
     def apply_balance(self,s,a,b,failure='refused'):
+        a['syncAttemptedAt']=now()  # recorded for failures too, so an unreachable venue is not retried on every poll
         if b is None:
             # A connected account rides out transient failures for a short grace period, however many reads fail
             # in it: it stays connected, so agents can still propose, but the balance is marked stale, so every
@@ -89,9 +130,7 @@ class Workspace:
         a=next(x for x in s['accounts'] if x['id']==agent['accountId']);v=self.venue(a);m=v.get_quote(b['marketId'],b['direction']);o={'id':str(uuid.uuid4()),'agent':agent['id'],'accountId':a['id'],'market':m,'amount':round(amount,2),'direction':b['direction'],'request':b['reasoning'],'time':now(),'evaluations':[],'filled':False,**({'governedTerms':dict(governed)} if governed else {})};s['orders'].insert(0,o);s['keys'][scoped]=o['id'];return self.evaluate(s,o)
     def action(self,s,b):
         action=b['action'];s['clock']=now()
-        if action=='refresh':
-            for a in s['accounts']:
-                if a['venue']=='kalshi' and a['status'] not in ('disconnected','removed') and a.get('credentialRef'):self.refresh(s,a)
+        if action=='refresh':self.refresh_due(s);self.expire_approvals(s)
         elif action=='account-save':
             kind=b.get('connectionType');environment={'kalshi-demo':'sandbox','kalshi-live':'live'}.get(kind)
             if not environment:raise ValueError('Choose Kalshi Demo or Kalshi Live.')
@@ -141,6 +180,7 @@ class Workspace:
             agent=next((x for x in s['agentConfigs'] if x['id']==b.get('id')),None)
             if agent and agent['status']=='deleted':raise ValueError('Deleted agents cannot be edited.')
             if agent and agent['accountId']!=a['id']:raise ValueError('Create a new agent to change its bound account.')
+            look=validate_look(b['look']) if b.get('look') is not None else None  # checked before anything is stored
             if b.get('provider')==FREE_PROVIDER:
                 # The free agent runs on the server's Gemini key: nothing is stored for this agent.
                 validate_free_agent(b.get('model'))
@@ -155,7 +195,12 @@ class Workspace:
                 if not agent:
                     agent={'id':str(uuid.uuid4()),'status':'draft','mandate':None,'personality':None};s['agentConfigs'].append(agent)
                 agent.update(name=b['name'],accountId=a['id'],provider=b['provider'],model=b['model'],modelValidated=True,modelCredentialRef=reference,modelKeyMask=masks({'key':key})['key'])
+            if look:agent['look']=look
             s['chats'].setdefault(agent['id'],[]);event(s,'Agent saved; a user mandate is required before trading.');return {'agentId':agent['id']}
+        elif action=='agent-look':
+            agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
+            if agent['status']=='deleted':raise ValueError('Deleted agents cannot be edited.')
+            agent['look']=validate_look(b.get('look'))
         elif action=='mandate-save':
             agent=next(x for x in s['agentConfigs'] if x['id']==b['id'])
             if agent['status']=='deleted' or not agent.get('modelValidated'):raise ValueError('Validate this agent’s provider key before mandate setup.')
@@ -201,24 +246,49 @@ class Workspace:
             elif changed:event(s,f"Trading rules updated (version {s['rules']['version']}): {', '.join(changed)}.",'RULES')
             return {'version':s['rules']['version']}
         elif action=='decision':
+            self.expire_approvals(s)  # a late approval must not trade on sizing the governor made for earlier conditions
             o=next(x for x in s['orders'] if x['id']==b['id'])
             if o['status']!='awaiting approval':return o
-            approve_by=(o.get('governedTerms') or {}).get('approveBy')
-            if b['approve'] is True and approve_by and datetime.datetime.fromisoformat(now())>datetime.datetime.fromisoformat(approve_by):
-                # The governor's sizing is only valid for a limited time; a late approval must not trade on it.
-                o['status']='cancelled';event(s,'Approval window expired; the governor sized this trade for earlier market conditions.','EXPIRED',o['id']);return o
             if b['approve'] is True:return self.evaluate(s,o,True)
             o['status']='denied';event(s,'User denied exact proposal.','DENIED',o['id'])
         else:raise ValueError('Unsupported user action.')  # chat runs in agent_chat.py, outside the workspace lock
     def public(self,s):
-        # Governor records (batch inputs with order books, traces, forecasts) are large and not used by the UI.
-        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor')})
+        from governor_service import GovernorService
+        governor = GovernorService(self)
+        summaries = {a['id']: governor.account_summary(s, a) for a in s['accounts']
+                     if a['venue'] == 'kalshi' and a.get('status') != 'removed'}
+        order_governors = governor.order_governors(s)
+        # Only compact allowlisted governor details reach the browser. Orders and events grow without limit, so the
+        # state carries a bounded window of them (order_views.py); the rest is read page by page.
+        public=copy.deepcopy({k:v for k,v in s.items() if not k.startswith('governor') and k not in ('chatRequests','keys','orders','events')})  # request IDs and idempotency keys are server bookkeeping
         for a in public['accounts']:
             a['hasCredentials']=bool(a.get('credentialRef'));a.pop('credentialRef',None);a.pop('permissions',None);a['effectiveCeiling']=ceiling(s,a)
             a['connectionType']='kalshi-live' if a['environment']=='live' else 'kalshi-demo'
+        activity=order_views.agent_activity(s['orders'])
         for a in public['agentConfigs']:
             a.pop('modelCredentialRef',None);a['usage']=__import__('engine').usage(s,a['accountId'],a['id'])
+            a['activity']=activity.get(a['id'],{'awaiting':0,'lastOrder':None})
+        for a in public['accounts']:
+            a['summary'] = summaries.get(a['id'])
+        public.update(order_views.window(s, order_governors))
+        # An account whose balance sync failed has no balance to add, so one of them would blank every total. Those
+        # are left out and counted, so Home can say why the totals are smaller than the accounts suggest.
+        totals = [summaries[a['id']] for a in s['accounts'] if a['id'] in summaries
+                  and a.get('status') not in ('disconnected', 'error')]
+        excluded = sum(1 for a in s['accounts'] if a['id'] in summaries and a.get('status') == 'error')
+        public['summary'] = {key: sum(t[key] for t in totals)
+                             if totals and all(t[key] is not None for t in totals) else None
+                             for key in ('accountValue', 'spentToday', 'dailyCap', 'atRisk', 'exposureCap', 'lossHeadroom')}
+        public['summary'].update(rulesVersion=s.get('rules', {}).get('version'),
+                                 breakerLatched=any(t['breakerLatched'] for t in totals),
+                                 stale=any(t['stale'] for t in totals),
+                                 excludedAccounts=excluded)
         public['providers']=catalog();public['rulesCatalog']=trading_rules.catalog()
+        if FREE_PROVIDER in public['providers']:
+            # The server's own count for its own UTC day, so the browser's clock never decides what is left.
+            day=datetime.datetime.now(datetime.timezone.utc).date().isoformat();usage=s.get('freeAgentUsage') or {}
+            used=usage.get('messages',0) if usage.get('day')==day else 0;limit=public['providers'][FREE_PROVIDER]['dailyMessages']
+            public['freeAgentQuota']={'day':day,'used':used,'limit':limit,'left':max(0,limit-used)}
         public['accounts']=[a for a in public['accounts'] if a['venue']=='kalshi' and a.get('status')!='removed']
         visible={a['id'] for a in public['accounts']}
         public['agentConfigs']=[a for a in public['agentConfigs'] if a['accountId'] in visible]

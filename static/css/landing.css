@@ -1,0 +1,103 @@
+/* The signed-out landing page (screens/Landing.js): hero with the agents' stage, the crew, how it works, closer. */
+
+.landing{max-width:1200px;margin:0 auto;padding:0 var(--gutter);overflow-x:clip}
+.landing p{max-width:none}
+
+.landing-nav{display:flex;align-items:center;justify-content:space-between;gap:var(--space-4);padding:var(--space-5) 0}
+.landing-links{display:flex;gap:var(--space-6)}
+.landing-links button{border:0;background:none;padding:var(--space-1) 0;font-size:var(--text-md);color:var(--text-2)}
+.landing-links button:hover{color:var(--text)}
+
+.landing-hero{display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:var(--space-12);align-items:center;padding:var(--space-10) 0 var(--space-12);scroll-margin-top:var(--space-6)}
+.landing-intro{scroll-margin-top:var(--space-8)}
+.landing-pill{display:inline-flex;align-items:center;gap:var(--space-2);padding:5px var(--space-3) 5px var(--space-2);border-radius:var(--radius-pill);background:var(--surface);border:1px solid var(--line);font-size:var(--text-sm);color:var(--text-2)}
+.landing-pill i{width:8px;height:8px;margin-left:4px;border-radius:50%;background:var(--allow);animation:landing-ping 2s infinite}
+@keyframes landing-ping{0%{box-shadow:0 0 0 0 color-mix(in oklab,var(--allow) 60%,transparent)}70%,100%{box-shadow:0 0 0 7px transparent}}
+.landing-title{font-size:clamp(40px,5.6vw,68px);line-height:1.02;letter-spacing:-.04em;margin:var(--space-5) 0}
+.landing-title .word{display:inline-block;opacity:0;transform:translateY(18px);animation:landing-rise .8s var(--ease-out) forwards}
+@keyframes landing-rise{to{opacity:1;transform:none}}
+.landing-hero-lead{font-size:18px;line-height:1.55;color:var(--text-2);max-width:42ch!important;margin-bottom:var(--space-8)}
+.landing-cta{display:flex;flex-wrap:wrap;gap:var(--space-3);align-items:center}
+.landing-intro .notice{margin-top:var(--space-4)}
+.landing-fine{margin-top:var(--space-5);font-size:var(--text-sm);color:var(--text-3)}
+
+/* The stage */
+.landing-stage{position:relative;aspect-ratio:1.12;background:var(--surface);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow-pop);overflow:hidden}
+.landing-stage::before{content:'';position:absolute;inset:0;opacity:.9;background:
+  radial-gradient(circle at 50% 26%,var(--accent-soft),transparent 46%),
+  repeating-linear-gradient(0deg,transparent 0 27px,var(--surface-2) 27px 28px),
+  repeating-linear-gradient(90deg,transparent 0 27px,var(--surface-2) 27px 28px)}
+.stage-floor{position:absolute;left:0;right:0;bottom:0;height:24%;background:var(--surface-2);border-top:1px solid var(--line)}
+.stage-tally,.stage-venue{position:absolute;top:9%;display:grid;gap:3px;font:500 var(--text-xs) var(--font-mono);color:var(--text-3)}
+.stage-tally{left:5%}
+.stage-tally b{display:inline-block;min-width:2ch;margin-right:6px;text-align:right;color:var(--text)}
+.stage-venue{right:5%;padding:var(--space-2) var(--space-3);background:var(--surface);border:1px solid var(--line);border-radius:10px;color:var(--text-2);box-shadow:var(--shadow-sm)}
+.stage-venue b{color:var(--text)}
+.stage-gov{position:absolute;left:50%;top:13%;transform:translateX(-50%);display:grid;justify-items:center;gap:var(--space-2);font:600 11px var(--font-mono);letter-spacing:.14em;color:var(--text-3)}
+.stage-gov svg{width:96px;height:96px;color:var(--accent);filter:drop-shadow(0 8px 16px color-mix(in oklab,var(--accent) 25%,transparent));transition:transform .3s var(--ease-spring)}
+.stage-gov.pulse svg{transform:scale(1.12)}
+.stage-verdict{position:absolute;left:50%;top:44%;padding:6px 14px;border-radius:var(--radius-pill);border:1.5px solid;font:600 var(--text-sm) var(--font-mono);letter-spacing:.04em;white-space:nowrap;opacity:0;animation:landing-stamp 1.6s var(--ease-out) forwards}
+@keyframes landing-stamp{
+  0%{opacity:0;transform:translate(-50%,0) scale(1.6) rotate(-6deg)}
+  14%{opacity:1;transform:translate(-50%,0) scale(1) rotate(-3deg)}
+  80%{opacity:1;transform:translate(-50%,0) rotate(-3deg)}
+  100%{opacity:0;transform:translate(-50%,-6px) rotate(-3deg)}
+}
+.stage-verdict.v-allow{background:var(--allow-soft);color:var(--allow)}
+.stage-verdict.v-review{background:var(--review-soft);color:var(--review)}
+.stage-verdict.v-block{background:var(--block-soft);color:var(--block)}
+.stage-ticket{position:absolute;left:0;top:0;z-index:3;opacity:0;padding:5px var(--space-2);background:#fff;border:1.5px solid var(--ink);border-radius:5px;font:600 11px var(--font-mono);white-space:nowrap;box-shadow:0 6px 14px rgba(27,26,23,.15);pointer-events:none}
+.stage-crew{position:absolute;left:0;right:0;bottom:9%;display:flex;justify-content:space-around;align-items:flex-end;padding:0 4%}
+.stage-agent{display:grid;justify-items:center;gap:var(--space-1);font:500 11px var(--font-mono);color:var(--text-3);opacity:0;transform:translateY(30px);animation:landing-hop-in .7s var(--ease-spring) forwards}
+@keyframes landing-hop-in{to{opacity:1;transform:none}}
+
+/* Sections */
+.landing-section{padding:88px 0;scroll-margin-top:var(--space-4)}
+.landing-label{font:500 var(--text-xs) var(--font-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.landing-section h2{font-size:clamp(28px,3.4vw,40px);line-height:1.1;letter-spacing:-.03em;margin:var(--space-3) 0 var(--space-4);max-width:22ch}
+.landing-lead{color:var(--text-2);font-size:var(--text-lg);max-width:56ch!important;margin-bottom:var(--space-10)}
+.landing-section .landing-roster,.landing-section .landing-steps{margin-top:var(--space-8)}
+.landing-lead+.landing-roster{margin-top:0}
+
+.landing-roster{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:var(--space-4)}
+.roster-card{display:grid;justify-items:center;gap:var(--space-2);padding:22px var(--space-3) var(--space-4);background:var(--surface);border:1px solid var(--line);border-radius:16px;text-align:center;transition:transform .3s var(--ease-spring),box-shadow .3s var(--ease-out)}
+.roster-card:hover{transform:translateY(-6px) rotate(-1deg);box-shadow:var(--shadow-pop)}
+.roster-card b{font-size:var(--text-md)}
+.roster-card span:last-child{font-size:var(--text-xs);color:var(--text-3)}
+
+.landing-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--space-5)}
+.step-card{display:grid;align-content:start;gap:var(--space-3);padding:var(--space-6);background:var(--surface);border:1px solid var(--line);border-radius:16px}
+.step-cast{height:96px;display:flex;align-items:flex-end;gap:6px}
+.step-num{font:600 var(--text-xs) var(--font-mono);color:var(--text-3)}
+.step-card h3{font-size:18px;letter-spacing:-.01em}
+.step-card p{font-size:var(--text-md)}
+
+.landing-closer{position:relative;overflow:hidden;padding:80px var(--space-6) 150px;border-radius:28px;background:var(--ink);text-align:center}
+.landing-closer h2{margin:0 auto var(--space-3);color:#fff}
+.landing-closer p{margin:0 auto var(--space-6);max-width:46ch!important;color:#bdb9b0}
+.landing-closer .btn:not(.btn-primary){background:var(--bg);border-color:var(--bg);color:var(--ink)}
+.closer-peek{position:absolute;left:0;right:0;bottom:-34px;display:flex;justify-content:center;gap:14px}
+.closer-peek .creature{transition:transform .45s var(--ease-spring)}
+.closer-peek .creature:nth-child(2n){transition-delay:.05s}
+.closer-peek .creature:nth-child(3n){transition-delay:.1s}
+.landing-closer:hover .closer-peek .creature{transform:translateY(-22px)}
+
+.landing-footer{padding:var(--space-8) 0 var(--space-12);font-size:var(--text-sm);color:var(--text-3)}
+
+.reveal{opacity:0;transform:translateY(18px);transition:opacity .8s var(--ease-out),transform .8s var(--ease-out)}
+.reveal.in{opacity:1;transform:none}
+
+@media (max-width:899px){
+  .landing-links{display:none}
+  .landing-hero{grid-template-columns:1fr;gap:var(--space-8);padding-top:var(--space-4)}
+  .landing-roster{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .landing-steps{grid-template-columns:1fr}
+  .landing-section{padding:56px 0}
+  .stage-gov svg{width:64px;height:64px}
+  .stage-tally,.stage-venue{font-size:10px}
+}
+
+@media (prefers-reduced-motion:reduce){
+  .landing-title .word,.stage-agent{opacity:1;transform:none}
+  .reveal{opacity:1;transform:none}
+}
