@@ -2,6 +2,8 @@
 
 The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. Proposals reach the governor two ways: the in-app agent chat (below) and an external worker using the governed proposal API.
 
+A replacement for how agents are configured is proposed in [proposals/autonomous-agents.md](proposals/autonomous-agents.md); this document describes the current contract.
+
 ## In-app agent chat
 
 When the user sends a chat message, `agent_chat.py` calls the agent's configured model (`agent_llm.py`: OpenAI chat completions, Anthropic messages or Gemini `generateContent`, with tool calling) using the agent's saved key. The model gets four tools: `find_series` and `list_markets` (Kalshi market discovery by category and keywords), `get_market` (asks, rules and tradability for one ticker) and `propose_trade`. Each `propose_trade` is validated against the governed proposal schema below, with errors returned to the model so it can correct itself, and the reply's proposals are submitted through `GovernorService.submit` with `proposalId` `chat-<message index>-<n>`. At most 5 proposals per message. `propose_trade` is withheld while the agent is paused, has no mandate, its account is disconnected, or all-agent trading is off.
