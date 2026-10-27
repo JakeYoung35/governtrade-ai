@@ -19,7 +19,9 @@ const Warning = ({children}) => html`<div class="notice notice-warn"><${Icon} na
 export function MoneyStrip({workspace}) {
   const accounts = (workspace.accounts || []).filter(a => !['removed', 'disconnected'].includes(a.status));
   const summary = workspace.summary || {};
+  const excluded = summary.excludedAccounts || 0;
   const notes = [
+    excluded ? `${excluded} ${excluded === 1 ? 'account' : 'accounts'} not included: balance sync failed` : null,
     summary.breakerLatched ? 'A loss limit was reached, so new trades are stopped for the affected account.' : null,
     summary.stale ? 'Some balances are out of date. Trades on those accounts wait for a fresh balance.' : null,
   ].filter(Boolean);

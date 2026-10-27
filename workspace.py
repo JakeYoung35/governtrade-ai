@@ -263,14 +263,18 @@ class Workspace:
         for a in public['accounts']:
             a['summary'] = summaries.get(a['id'])
         public.update(order_views.window(s, order_governors))
+        # An account whose balance sync failed has no balance to add, so one of them would blank every total. Those
+        # are left out and counted, so Home can say why the totals are smaller than the accounts suggest.
         totals = [summaries[a['id']] for a in s['accounts'] if a['id'] in summaries
-                  and a.get('status') != 'disconnected']
+                  and a.get('status') not in ('disconnected', 'error')]
+        excluded = sum(1 for a in s['accounts'] if a['id'] in summaries and a.get('status') == 'error')
         public['summary'] = {key: sum(t[key] for t in totals)
                              if totals and all(t[key] is not None for t in totals) else None
                              for key in ('accountValue', 'spentToday', 'dailyCap', 'atRisk', 'exposureCap', 'lossHeadroom')}
         public['summary'].update(rulesVersion=s.get('rules', {}).get('version'),
                                  breakerLatched=any(t['breakerLatched'] for t in totals),
-                                 stale=any(t['stale'] for t in totals))
+                                 stale=any(t['stale'] for t in totals),
+                                 excludedAccounts=excluded)
         public['providers']=catalog();public['rulesCatalog']=trading_rules.catalog()
         if FREE_PROVIDER in public['providers']:
             # The server's own count for its own UTC day, so the browser's clock never decides what is left.

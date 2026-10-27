@@ -102,4 +102,55 @@ class HomeSummaryTests(ServiceTest):
         self.assertIsNone(public['summary']['accountValue'])
         self.assertEqual(before, self.s)
 
+    TOTALS = ('accountValue', 'spentToday', 'dailyCap', 'atRisk', 'exposureCap', 'lossHeadroom')
+
+    def healthy_account(self, **overrides):
+        account = {**self.s['accounts'][0], 'status': 'connected', 'stale': False, 'error': None,
+                   'balance': {'cash': 900, 'reserved': 0, 'positionValue': 100, 'positions': []}, **overrides}
+        return account
+
+    def own_summary(self, public, account_id):
+        return next(a['summary'] for a in public['accounts'] if a['id'] == account_id)
+
+    def test_errored_account_is_left_out_of_totals_and_counted(self):
+        healthy = self.healthy_account(id='healthy')
+        failed = self.healthy_account(id='failed', status='error', stale=True, balance=None,
+                                      error='Balance sync failed.')
+        self.s['accounts'] = [healthy, failed]
+        public = self.workspace.public(self.s)
+        own = self.own_summary(public, 'healthy')
+        self.assertIsNotNone(own['accountValue'])
+        for key in self.TOTALS:
+            self.assertEqual(public['summary'][key], own[key])
+        self.assertEqual(public['summary']['excludedAccounts'], 1)
+        self.assertFalse(public['summary']['stale'])
+
+    def test_disconnected_account_is_left_out_without_being_counted(self):
+        healthy = self.healthy_account(id='healthy')
+        disconnected = self.healthy_account(id='off', status='disconnected', stale=True, balance=None)
+        self.s['accounts'] = [healthy, disconnected]
+        public = self.workspace.public(self.s)
+        own = self.own_summary(public, 'healthy')
+        for key in self.TOTALS:
+            self.assertEqual(public['summary'][key], own[key])
+        self.assertEqual(public['summary']['excludedAccounts'], 0)
+
+    def test_stale_account_is_counted_and_marks_totals_stale(self):
+        healthy = self.healthy_account(id='healthy')
+        stale = self.healthy_account(id='stale', stale=True, balance={'cash': 50, 'reserved': 0, 'positionValue': 0})
+        self.s['accounts'] = [healthy, stale]
+        public = self.workspace.public(self.s)
+        self.assertEqual(public['summary']['accountValue'],
+                         self.own_summary(public, 'healthy')['accountValue'] + 50)
+        self.assertTrue(public['summary']['stale'])
+        self.assertEqual(public['summary']['excludedAccounts'], 0)
+
+    def test_only_errored_accounts_leave_totals_null(self):
+        self.s['accounts'] = [self.healthy_account(id='one', status='error', stale=True, balance=None),
+                              self.healthy_account(id='two', status='error', stale=True, balance=None)]
+        public = self.workspace.public(self.s)
+        for key in self.TOTALS:
+            self.assertIsNone(public['summary'][key])
+        self.assertEqual(public['summary']['excludedAccounts'], 2)
+
 if __name__ == '__main__': unittest.main()
