@@ -8,6 +8,7 @@ Kalshi taker fees, and fills consume the book's liquidity. Positions are marked 
 for their side. set_price() scripts a market move and settle() pays out a scripted result.
 """
 import copy
+import datetime
 import itertools
 import json
 from pathlib import Path
@@ -26,7 +27,13 @@ class PaperVenue:
 
     def __init__(self, clock, cash="1000", fixture=FIXTURE):
         self.clock = clock
-        self.books = copy.deepcopy(json.loads(Path(fixture).read_text())["books"])
+        recorded = json.loads(Path(fixture).read_text())
+        self.books = copy.deepcopy(recorded["books"])
+        # Replay the books as if recorded now: the app checks close times against the real clock, so the
+        # recorded ones would otherwise pass and every paper order would be blocked as a closed market.
+        shift = clock() - datetime.datetime.fromisoformat(recorded["recordedAt"])
+        for book in self.books.values():
+            book["closeAt"] = (datetime.datetime.fromisoformat(book["closeAt"]) + shift).isoformat()
         self.cash = to_decimal(cash, "cash")
         self.positions = {}  # market_id -> {"yes": qty, "no": qty, "cost": dollars, "fees": dollars}
         self.outcomes = {}  # market_id -> YES settlement value (string) once settled
