@@ -80,6 +80,8 @@ export function Shell({route, title, workspace, auth, children}) {
   const inMore = !TABS.includes(current) && NAV.some(n => n.name === current);
   // After moving to another page, focus its content so keyboard and screen reader users start there (opening the
   // order drawer changes only the query, so it does not count). The first page keeps the browser's own focus.
+  // Entering the app (from the landing page, say) swaps in a shorter page; without this a phone keeps the old offset.
+  useEffect(() => { window.scrollTo(0, 0); }, []);
   const where = `${route.name}:${JSON.stringify(route.params)}`;
   const shown = useRef(where);
   useEffect(() => {

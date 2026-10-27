@@ -100,7 +100,7 @@ export function Drawer({id, workspace}) {
       <header class="order-title">
         <h3>${order.market?.name || order.market?.id}</h3>
         <p class="muted">${agent?.name || order.agent} · ${accountLabel(account)} · ${when(order.time)}</p>
-        <div class="order-pills"><${Verdict} value=${order.decision} />${status.label !== verdictLabel(order.decision)
+        <div class="order-pills"><${Verdict} value=${order.decision} status=${order.status} />${status.label !== verdictLabel(order.decision)
           ? html`<span class=${`pill pill-${status.tone}`}>${status.label}</span>` : null}</div>
       </header>
       <dl class="order-facts">

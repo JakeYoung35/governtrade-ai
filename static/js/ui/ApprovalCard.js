@@ -75,10 +75,13 @@ export function ApprovalCard({order, workspace, detail = false, verdict = true})
     setError('');
     try {
       // The decided order leaves the waiting list, and may be outside the state's newest orders, so its status comes
-      // from the action's result (null for a denial; undefined when the user changed meanwhile).
+      // from the action's result (null for a denial; undefined when the user changed meanwhile). A denial that arrives
+      // after the server already ended the order (its approval window closed) returns that order instead.
       const result = await action('decision', {id: order.id, approve});
       if (result === undefined) return;
-      setStore({toast: !approve ? 'Denied. The order will not be placed.' : result?.status ? `Approved: ${statusOf(result.status).label.toLowerCase()}.` : 'Approved.'});
+      const settled = result?.status ? statusOf(result.status).label.toLowerCase() : null;
+      setStore({toast: !approve ? settled ? `Too late to deny: this order was already ${settled}. It will not be placed.` : 'Denied. The order will not be placed.'
+        : settled ? `Approved: ${settled}.` : 'Approved.'});
     } catch (e) {
       setError(e.message);
     }

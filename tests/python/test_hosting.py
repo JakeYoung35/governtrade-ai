@@ -72,7 +72,7 @@ class HostedHttpTests(unittest.TestCase):
 
     def test_static_files_revalidate(self):
         with patch.dict(os.environ, {'GOVERNTRADE_ACCESS_PASSWORD':'test-password'}):
-            for path in ('/js/main.js','/style.css'):
+            for path in ('/js/main.js','/css/base.css'):
                 self.assertEqual(self.cache_headers(path,self.auth()),(200,['no-cache']))
 
     def test_health_and_api_keep_single_no_store(self):

@@ -15,7 +15,7 @@ export function DecisionsTable({workspace, orders: list, limit = 12, title = 'Re
   const orders = (list || workspace.recentOrders || []).slice(0, limit);
   return html`<section class="card"><div class="card-head"><h2>${title}</h2>${!activity ? html`<a href="/activity">All activity</a>` : null}</div>
     ${!orders.length ? html`<div class="empty"><p>${empty}</p></div>` : html`<div class="table-scroll" tabindex="0" role="region" aria-label=${title}><table class="decisions-table"><thead><tr><th scope="col">Market / agent</th><th scope="col">Amount</th><th scope="col">Verdict</th><th scope="col">Status</th><th scope="col">Time</th></tr></thead><tbody>
-      ${orders.map(o => {const agent = agents.get(o.agent) || {id: o.agent, name: o.agent}; return html`<tr key=${o.id}><td><a href=${orderHref(o.id)}>${o.market?.name || o.market?.id}</a><span class="table-agent"><${Creature} look=${lookFor(agent)} size=${20} class="creature-still" />${agent.name} · ${o.direction}</span></td><td class="num">${money(o.amount)}</td><td><${Verdict} value=${o.decision} /></td><td><${Status} value=${o.status} /></td><td>${when(o.time)}</td></tr>`;})}
+      ${orders.map(o => {const agent = agents.get(o.agent) || {id: o.agent, name: o.agent}; return html`<tr key=${o.id}><td><a href=${orderHref(o.id)}>${o.market?.name || o.market?.id}</a><span class="table-agent"><${Creature} look=${lookFor(agent)} size=${20} class="creature-still" />${agent.name} · ${o.direction}</span></td><td class="num">${money(o.amount)}</td><td><${Verdict} value=${o.decision} status=${o.status} /></td><td><${Status} value=${o.status} /></td><td>${when(o.time)}</td></tr>`;})}
     </tbody></table></div>`}
   </section>`;
 }
