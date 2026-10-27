@@ -309,6 +309,20 @@ class ApprovalExpiryTests(MainTests):
   self.waiting()
   with self.at('12:00:01'):self.w.expire_approvals(self.s)
   state=self.w.public(self.s);self.assertEqual(state['orderStats']['awaiting'],0);self.assertEqual(state['pendingOrders'],[])
+class StateReadClockTests(ApprovalExpiryTests):
+ def test_state_read_moves_usage_to_the_new_day(self):
+  o=self.waiting();o.update(status='filled',committed=True,time='2026-10-10T23:50:00+00:00');self.s['clock']='2026-10-10T23:55:00+00:00'
+  self.assertEqual(self.w.public(self.s)['agentConfigs'][0]['usage']['daily'],10)
+  with patch('workspace.now',return_value='2026-10-11T00:00:05+00:00'):self.w.read_state(self.s)
+  self.assertEqual(self.s['clock'],'2026-10-11T00:00:05+00:00');self.assertEqual(self.w.public(self.s)['agentConfigs'][0]['usage']['daily'],0)
+ def test_expiry_event_has_the_time_of_the_read(self):
+  self.waiting();self.s['clock']='2026-10-11T09:00:00+00:00'
+  with self.at('12:00:01'):self.assertTrue(self.w.read_state(self.s))
+  self.assertEqual(self.expired_events()[0]['time'],'2026-10-11T12:00:01+00:00')
+ def test_a_read_that_only_moves_the_clock_does_not_save(self):
+  with self.at('12:00:00'):self.assertTrue(self.w.read_state(self.s))
+  with self.at('12:00:05'):self.assertFalse(self.w.read_state(self.s))
+  self.assertEqual(self.s['clock'],'2026-10-11T12:00:05+00:00')
 class BalanceTests(unittest.TestCase):
  def test_cents_pnl_and_scoped_reserve(self):
   v=KalshiAdapter({},subaccount=2);calls=[]

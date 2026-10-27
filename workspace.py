@@ -33,6 +33,14 @@ class Workspace:
         for a in s['accounts']:
             if a['venue']=='kalshi' and a['status'] not in ('disconnected','removed') and a.get('credentialRef') and self.sync_due(a,maxAge):self.refresh(s,a);synced=True
         return synced
+    def read_state(self,s):
+        # A page's poll of the main state. It moves the clock first: no action runs between polls, and today's usage
+        # and the time of an expiry event both come from s['clock']. Returns whether to save; a clock that only moved
+        # is not worth a save, since every read sets it again.
+        s['clock']=now()
+        expired=self.expire_approvals(s)
+        synced=self.refresh_due(s,STATE_REFRESH_SECONDS)
+        return expired or synced
     def expire_approvals(self,s):
         # Runs on every state read as well as the decision, so an approval nobody answers still ends at its deadline
         # and stops counting as waiting. No venue call. Returns whether anything changed, so a caller saves only then.

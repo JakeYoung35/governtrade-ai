@@ -3,7 +3,7 @@ from pathlib import Path
 from urllib.parse import urlsplit,parse_qsl
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
 from engine import seed,main_seed,action,AGENTS,migrate
-from workspace import Workspace,STATE_REFRESH_SECONDS
+from workspace import Workspace
 from vault import Vault
 from store import PostgresStore
 from governor.records import compact_for_json
@@ -315,10 +315,7 @@ class Handler(SimpleHTTPRequestHandler):
             env='demo' if 'demo' in self.path else 'main'
             with locked(env):
                 s=read(env)
-                if env=='main':
-                    expired=workspace().expire_approvals(s)
-                    synced=workspace().refresh_due(s,STATE_REFRESH_SECONDS)
-                    if expired or synced:save(env,s)
+                if env=='main' and workspace().read_state(s):save(env,s)
                 self.json(200,self.response(env,s))
         else:self.route_app_shell();super().do_GET()  # browser routes (/agents, /rules, ...) get the app shell
     def do_POST(self):
