@@ -9,7 +9,7 @@ import {navigate} from '../router.js';
 import {money, accountValue} from '../format.js';
 import {reasonText, statusOf} from '../governor-text.js';
 import {thread, wasDelivered, governorLine, tradingBlocked} from '../chat.js';
-import {loadDraft, saveDraft, requestIdFor, draftOwner} from '../chat-draft.js';
+import {loadDraft, saveDraft, requestIdFor, draftOwner, startSend, settleSend, restoreSend} from '../chat-draft.js';
 import {Creature} from '../creature/Creature.js';
 import {FOCI, colorOf, freshSeed, lookFor} from '../creature/generate.js';
 import {useAgentMood} from '../creature/useAgentMood.js';
@@ -103,17 +103,16 @@ function Message({item, agent, workspace}) {
 function Conversation({agent, workspace}) {
   const store = useStore();
   const owner = draftOwner(store.auth);
-  // The box's text and, while a send is unconfirmed, its request ID (chat-draft.js). Kept in sessionStorage so a
+  // The box's text and any unconfirmed message with its request ID (chat-draft.js). Kept in sessionStorage so a
   // reload or an expired session never loses a message, and a resend after a lost response never runs it twice.
   const [draft, setDraftState] = useState(() => loadDraft(owner, agent.id));
   const latest = useRef(draft);
   const [interrupted, setInterrupted] = useState(() => !!(draft.requestId && draft.text && draft.text === draft.sentText));
   const [error, setError] = useState('');
-  // `stored` differs from what the box shows only while a message is being sent: the box is empty, storage keeps it.
-  function update(next, stored = next) {
+  function update(next) {
     latest.current = next;
     setDraftState(next);
-    saveDraft(owner, agent.id, stored);
+    saveDraft(owner, agent.id, next);
   }
   const setDraft = text => update({...latest.current, text});
   const log = useRef(null);
@@ -123,26 +122,28 @@ function Conversation({agent, workspace}) {
   const pending = store.chatPending?.agent === agent.id ? store.chatPending : null;
   const otherPending = store.chatPending && !pending;
   const free = freeMessagesLeft(workspace, agent);
-  const canSend = !store.chatPending && draft.text.trim();
+  // One unconfirmed message at a time: a held one is sent again or discarded before the next goes.
+  const held = !pending && draft.held;
+  const canSend = !store.chatPending && !draft.held && draft.text.trim();
   const blocked = tradingBlocked(workspace, agent, workspace.accounts?.find(a => a.id === agent.accountId));
 
   // Keep the newest message in view: on open, on each new message, and while the agent is thinking.
   useLayoutEffect(() => { if (log.current) log.current.scrollTop = log.current.scrollHeight; }, [messages.length, !!pending]);
 
-  async function send(e) {
+  function send(e) {
     e?.preventDefault();
     if (!canSend) return;
     const text = draft.text.trim();
-    const requestId = requestIdFor(latest.current, text);
+    deliver(text, requestIdFor(latest.current, text), true);
+  }
+
+  async function deliver(text, requestId, fromBox) {
     const lengthBefore = messages.length;
-    const sending = {text, requestId, sentText: text};
-    update({...sending, text: ''}, sending);
+    update(startSend(latest.current, text, requestId, fromBox));
     setError('');
     setInterrupted(false);
-    // Done with this message: keep only what was typed since, as a new message.
-    const settle = () => update(latest.current.text ? {text: latest.current.text, requestId: null, sentText: null} : {text: '', requestId: null, sentText: null});
-    // Not confirmed: put it back with its request ID, unless something new was typed meanwhile.
-    const restore = () => { if (!latest.current.text.trim()) update(sending); };
+    const settle = () => update(settleSend(latest.current));
+    const restore = () => update(restoreSend(latest.current));
     try {
       const result = await sendChat(agent.id, text, requestId);
       settle();
@@ -181,7 +182,10 @@ function Conversation({agent, workspace}) {
     </div>
     <form class="chat-composer" onSubmit=${send}>
       <${ErrorNote} message=${error} />
-      ${interrupted && !error ? html`<div class="notice notice-warn"><${Icon} name="info" /><span>This message was being sent when the page was interrupted. Send it again: if ${agent.name} already has it, it will not run twice.</span></div>` : null}
+      ${held ? html`<div class="notice notice-warn"><${Icon} name="info" /><span>Not sent yet: “${held.text}”. Sending it again is safe: if ${agent.name} already has it, it will not run twice.</span>
+        <span class="notice-action"><button type="button" class="btn btn-sm" disabled=${!!store.chatPending} onClick=${() => deliver(held.text, held.requestId, false)}>Send again</button>
+        <button type="button" class="btn btn-sm btn-ghost" onClick=${() => { update(settleSend(latest.current)); setError(''); }}>Discard</button></span></div>` : null}
+      ${interrupted && !error && !held ? html`<div class="notice notice-warn"><${Icon} name="info" /><span>This message was being sent when the page was interrupted. Send it again: if ${agent.name} already has it, it will not run twice.</span></div>` : null}
       ${blocked ? html`<div class="notice"><${Icon} name="info" /><span>${agent.name} can answer questions but will not propose trades. ${blocked}</span></div>` : null}
       <div class="chat-input">
         <label class="visually-hidden" for="chat-text">Message ${agent.name}</label>
@@ -189,7 +193,7 @@ function Conversation({agent, workspace}) {
           onInput=${e => setDraft(e.currentTarget.value)} onKeyDown=${onKeyDown}></textarea>
         <button class="btn btn-primary" disabled=${!canSend}>${pending ? html`<span class="spinner" aria-hidden="true"></span>Working` : 'Send'}</button>
       </div>
-      <p class="fine-print">${otherPending ? 'Another agent is still answering. Send this when it is done.' : 'The governor sizes every proposal. Trades above the automatic limit wait for your approval.'}</p>
+      <p class="fine-print">${otherPending ? 'Another agent is still answering. Send this when it is done.' : held ? 'Send or discard the message above before sending this one.' : 'The governor sizes every proposal. Trades above the automatic limit wait for your approval.'}</p>
     </form>
   </section>`;
 }

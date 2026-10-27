@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import {getStore, resetStore} from '../../static/js/store.js';
 import {sendChat} from '../../static/js/api.js';
-import {loadDraft, saveDraft, clearDraft, requestIdFor, draftOwner} from '../../static/js/chat-draft.js';
+import {loadDraft, saveDraft, clearDraft, requestIdFor, draftOwner, startSend, settleSend, restoreSend} from '../../static/js/chat-draft.js';
 
 const memory = new Map();
 globalThis.sessionStorage = {getItem: k => memory.get(k) ?? null, setItem: (k, v) => memory.set(k, String(v)), removeItem: k => memory.delete(k)};
@@ -56,17 +56,38 @@ const me = draftOwner({mode: 'google', user: {email: 'me@example.com'}});
 const other = draftOwner({mode: 'google', user: {email: 'other@example.com'}});
 assert.equal(draftOwner({mode: 'local', user: null}), 'local:');
 saveDraft(me, 'a', {text: 'Put $10 on Cleveland', requestId: 'req-0006', sentText: 'Put $10 on Cleveland'});
-assert.deepEqual(loadDraft(me, 'a'), {text: 'Put $10 on Cleveland', requestId: 'req-0006', sentText: 'Put $10 on Cleveland'});
-assert.deepEqual(loadDraft(other, 'a'), {text: '', requestId: null, sentText: null});  // never shown to another user
-assert.deepEqual(loadDraft(me, 'b'), {text: '', requestId: null, sentText: null});
+assert.deepEqual(loadDraft(me, 'a'), {text: 'Put $10 on Cleveland', requestId: 'req-0006', sentText: 'Put $10 on Cleveland', held: null});
+assert.deepEqual(loadDraft(other, 'a'), {text: '', requestId: null, sentText: null, held: null});  // never shown to another user
+assert.deepEqual(loadDraft(me, 'b'), {text: '', requestId: null, sentText: null, held: null});
 // The unchanged message reuses its ID; an edited one is a new message.
 assert.equal(requestIdFor(loadDraft(me, 'a'), 'Put $10 on Cleveland', () => 'new'), 'req-0006');
 assert.equal(requestIdFor(loadDraft(me, 'a'), 'Put $20 on Cleveland', () => 'new'), 'new');
 assert.equal(requestIdFor(loadDraft(me, 'b'), 'anything', () => 'new'), 'new');
 clearDraft(me, 'a');
 assert.equal(memory.has('governtrade-chat-draft'), false);
+// A message being sent is held apart from the box: typing the next one never overwrites it.
+const box = text => ({text, requestId: null, sentText: null, held: null});
+const sendingA = startSend(box('A'), 'A', 'req-A');
+assert.deepEqual(sendingA, {text: '', requestId: null, sentText: null, held: {text: 'A', requestId: 'req-A'}});
+const typedB = {...sendingA, text: 'B'};
+// It fails: A stays held with its ID, B stays in the box.
+assert.deepEqual(restoreSend(typedB), {text: 'B', requestId: null, sentText: null, held: {text: 'A', requestId: 'req-A'}});
+// It is confirmed: only B is left, with no request ID.
+assert.deepEqual(settleSend(typedB), box('B'));
+// With nothing typed, a failure puts A back in the box, where resending reuses its ID.
+const failedA = restoreSend(sendingA);
+assert.deepEqual(failedA, {text: 'A', requestId: 'req-A', sentText: 'A', held: null});
+assert.equal(requestIdFor(failedA, 'A', () => 'new'), 'req-A');
+// Resending a held A from its notice leaves B in the box.
+assert.deepEqual(startSend(restoreSend(typedB), 'A', 'req-A', false), typedB);
+// A reload while A is being sent keeps both: A held when B was typed, A back in an empty box otherwise.
+saveDraft(me, 'a', typedB);
+assert.deepEqual(loadDraft(me, 'a'), typedB);
+saveDraft(me, 'a', sendingA);
+assert.deepEqual(loadDraft(me, 'a'), failedA);
+clearDraft(me, 'a');
 // Blocked storage never breaks the page.
 globalThis.sessionStorage = {getItem() { throw Error('blocked'); }, setItem() { throw Error('blocked'); }, removeItem() { throw Error('blocked'); }};
 saveDraft(me, 'a', {text: 'x'});
-assert.deepEqual(loadDraft(me, 'a'), {text: '', requestId: null, sentText: null});
-console.log('Chat send tests passed: confirmed, duplicate, 401, refused, lost connection, server error, drafts');
+assert.deepEqual(loadDraft(me, 'a'), {text: '', requestId: null, sentText: null, held: null});
+console.log('Chat send tests passed: confirmed, duplicate, 401, refused, lost connection, server error, drafts, held messages');

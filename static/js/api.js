@@ -236,7 +236,7 @@ export async function sendChat(agent, text, requestId) {
     if (r.status === 401) {
       resetUser('starting');
       await initializeAuth();
-      throw kept('Your session expired. Sign in again; your message is kept in the box.', 'expired');
+      throw kept('Your session expired. Sign in again; your message is kept.', 'expired');
     }
     // A 4xx is the server refusing the message before it was stored (quota, a turn still running).
     if (r.status >= 400 && r.status < 500) throw kept(d.error || 'Your agent could not respond.', 'refused');
@@ -247,6 +247,6 @@ export async function sendChat(agent, text, requestId) {
     if (e.stale || e.expired || e.refused) throw e;
     if (g !== generation) throw kept('You were signed out while the message was being sent.', 'stale');
     await loadWorkspace();
-    throw kept(`${e.message} Your message is kept in the box. Sending it again is safe: it will not run twice.`, 'lost');
+    throw kept(`${e.message} Your message is kept. Sending it again is safe: it will not run twice.`, 'lost');
   } finally {if (g === generation) setStore({chatPending:null});}
 }
