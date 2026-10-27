@@ -2,7 +2,7 @@
 
 The app owns account connections, agent configuration, user instructions and governance, including the portfolio governor that sizes and caps agent proposals. Proposals reach the governor two ways: the in-app agent chat (below) and an external worker using the governed proposal API.
 
-A replacement for how agents are configured is proposed in [proposals/pilots.md](proposals/pilots.md); this document describes the current contract.
+A replacement for how agents are configured is proposed in [proposals/autonomous-agents.md](proposals/autonomous-agents.md); this document describes the current contract.
 
 ## In-app agent chat
 
