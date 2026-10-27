@@ -32,4 +32,22 @@ document.visibilityState = 'visible';
 globalThis.fetch = async () => response({error:'Unable to save'},400);
 await assert.rejects(action('decision',{id:'x',approve:false}),/Unable to save/);
 assert.equal(getStore().busy,false);
-console.log('Polling tests passed: unchanged, busy, action race, sign-out, 401, hidden, action error');
+const down = () => { throw new TypeError('fetch failed'); };
+ready();
+globalThis.fetch = down; await pollWorkspace();
+assert.match(getStore().error,/Could not reach GovernTrade/); assert.equal(getStore().errorSource,'poll');
+globalThis.fetch = async () => response({state:newer,csrf:'test'}); await pollWorkspace();
+assert.equal(getStore().error,''); assert.equal(getStore().errorSource,''); assert.equal(getStore().workspace,newer); // poll error clears
+ready();
+globalThis.fetch = down; await pollWorkspace();
+setStore({error:'Unable to save', errorSource:'action'});
+globalThis.fetch = async () => response({state,csrf:'test'}); await pollWorkspace();
+assert.equal(getStore().error,'Unable to save'); assert.equal(getStore().errorSource,'action'); // action error survives a good poll
+globalThis.fetch = down; await pollWorkspace();
+globalThis.fetch = async () => response({state,csrf:'test'}); await pollWorkspace();
+assert.equal(getStore().error,'Unable to save'); assert.equal(getStore().errorSource,'action'); // and a failed poll in between
+ready();
+globalThis.fetch = down; await pollWorkspace();
+globalThis.fetch = async () => response({state,csrf:'test'}); await pollWorkspace(); // unchanged state still clears
+assert.equal(getStore().error,''); assert.equal(getStore().errorSource,''); assert.equal(getStore().workspace,state);
+console.log('Polling tests passed: unchanged, busy, action race, sign-out, 401, hidden, action error, poll error clears, action error kept');

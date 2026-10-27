@@ -70,7 +70,7 @@ export async function initializeAuth() {
     if (d.mode === 'local') return enterLocal();
     await loadWorkspace();
   } catch (e) {
-    setStore({phase: 'unavailable', error: e.message});
+    setStore({phase: 'unavailable', error: e.message, errorSource: 'auth'});
   }
 }
 
@@ -100,11 +100,11 @@ export async function loadWorkspace() {
     }
     if (!r.ok) throw Error(d.error || 'Unable to load your workspace.');
     csrf = d.csrf;
-    setStore({workspace: d.state, phase: 'ready', error: ''});
+    setStore({workspace: d.state, phase: 'ready', error: '', errorSource: ''});
   } catch (e) {
     if (g !== generation) return;
-    if (getStore().workspace) setStore({error: e.message});
-    else setStore({phase: 'unavailable', error: e.message});
+    if (getStore().workspace) setStore({error: e.message, errorSource: 'load'});
+    else setStore({phase: 'unavailable', error: e.message, errorSource: 'load'});
   }
 }
 
@@ -153,7 +153,7 @@ export async function googleCredential(response) {
     await loadWorkspace();
   } catch (e) {
     await initializeAuth();
-    setStore({error: e.message});
+    setStore({error: e.message, errorSource: 'auth'});
   }
 }
 
@@ -190,9 +190,16 @@ export async function pollWorkspace() {
     if (g !== generation || getStore().busy || getStore().workspace !== before || document.visibilityState === 'hidden') return;
     if (!r.ok) throw Error(d.error || 'Unable to refresh your workspace.');
     csrf = d.csrf;
-    if (JSON.stringify(before) !== JSON.stringify(d.state)) setStore({workspace: d.state});
+    const patch = {};
+    if (JSON.stringify(before) !== JSON.stringify(d.state)) patch.workspace = d.state;
+    // A good poll only clears a poll's own error. An action's error stays until the person acts again, so a
+    // background refresh never hides it. The check runs on the current store, not the one from before the fetch.
+    if (getStore().errorSource === 'poll') Object.assign(patch, {error: '', errorSource: ''});
+    if (Object.keys(patch).length) setStore(patch);
   } catch (e) {
-    if (g === generation && getStore().phase === 'ready') setStore({error: e.message});
+    // A failed poll never replaces another error, or the next good poll would clear a message the person hasn't seen.
+    const {phase, error, errorSource} = getStore();
+    if (g === generation && phase === 'ready' && (!error || errorSource === 'poll')) setStore({error: e.message, errorSource: 'poll'});
   }
 }
 
@@ -221,7 +228,7 @@ export async function sendChat(agent, text, requestId) {
   if (getStore().chatPending) throw Error('Your agent is still working on the last message.');
   const g = generation;
   const kept = (message, kind) => Object.assign(Error(message), {[kind]: true});
-  setStore({chatPending: {agent, text}, error: ''});
+  setStore({chatPending: {agent, text}, error: '', errorSource: ''});
   try {
     const r = await send('/api/action', {method:'POST', headers:{'Content-Type':'application/json','X-CSRF-Token':csrf}, body:JSON.stringify({action:'chat',env:'main',agent,text,requestId})});
     const d = await readJson(r);

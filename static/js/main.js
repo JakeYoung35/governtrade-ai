@@ -43,7 +43,7 @@ function ErrorBanner({error}) {
   if (!error) return null;
   return html`<div class="notice notice-error banner" role="alert">
     <${Icon} name="alert" /><span>${error}</span>
-    <button class="btn btn-ghost btn-sm" onClick=${() => setStore({error: ''})}>Dismiss</button>
+    <button class="btn btn-ghost btn-sm" onClick=${() => setStore({error: '', errorSource: ''})}>Dismiss</button>
   </div>`;
 }
 

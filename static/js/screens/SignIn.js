@@ -25,7 +25,7 @@ export function Unavailable({error}) {
   const [trying, setTrying] = useState(false);
   async function retry() {
     setTrying(true);
-    setStore({error: ''});
+    setStore({error: '', errorSource: ''});
     await initializeAuth();
     setTrying(false);
   }

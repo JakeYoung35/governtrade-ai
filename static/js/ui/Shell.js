@@ -43,7 +43,7 @@ async function doSignOut() {
     await signOut();
     navigate('/', {replace: true});
   } catch (e) {
-    setStore({error: e.message});
+    setStore({error: e.message, errorSource: 'auth'});
   }
 }
 

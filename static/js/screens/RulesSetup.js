@@ -16,7 +16,7 @@ function BalanceNote({workspace}) {
 
 export function RulesSetup({workspace}) {
   const converted = workspace.rules?.converted;
-  const out = () => signOut().catch(e => setStore({error: e.message}));
+  const out = () => signOut().catch(e => setStore({error: e.message, errorSource: 'auth'}));
   return html`<div>
     <header class="setup-top">
       <span class="brand"><${BrandMark} />GovernTrade</span>

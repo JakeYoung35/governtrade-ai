@@ -7,6 +7,7 @@ const initial = {
   auth: {mode: 'local', user: null, config: null},
   workspace: null,       // the public workspace state from /api/state (accounts, agents, rules, a window of orders...)
   error: '',             // the latest workspace-level error, shown by the screen that caused it
+  errorSource: '',       // who set error: poll | action | auth | load. Only a poll's error clears on a later good poll
   moodEvents: {},
   toast: '',
   chatPending: null,

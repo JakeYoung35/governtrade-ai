@@ -125,7 +125,7 @@ export function Activity({workspace}) {
       await action('permissions', {values: {automation: false}});
       setStore({toast: 'All agents paused. Turn trading back on under Rules.'});
     } catch (e) {
-      setStore({error: e.message});
+      setStore({error: e.message, errorSource: 'action'});
     }
   }
 
